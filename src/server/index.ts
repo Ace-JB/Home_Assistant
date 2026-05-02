@@ -1,5 +1,12 @@
 import { serve } from "bun";
-import index from "./index.html";
+import index from "@/index.html";
+
+import { faceEngine } from '@modules/face_engine';
+import { CameraStream } from "./tools/Camera/camera";
+
+
+
+
 
 const server = serve({
   routes: {

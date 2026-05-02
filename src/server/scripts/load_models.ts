@@ -1,0 +1,87 @@
+/**
+ * 这个脚本的主要功能是下载并存储 Human 模型文件，以便在后续的 FaceEngine 模块中使用。
+ * 由于 Human 模型文件较大，且不适合直接包含在代码库中，因此我们通过这个脚本从官方仓库下载所需的模型。
+ * 后续考虑配置模型组，以支持不同的功能需求（如仅人脸检测、完整识别等）。
+ */
+
+
+import fs from 'fs';
+import path from 'path';
+import https from 'https';
+
+// 下个版本考虑根据参数，动态加载不同模型组
+// enum ModelGroup {
+//   FACE_DETECTION,
+//   FACE_RECOGNITION,
+//   FACE_ATTRIBUTES,
+//   POSE,
+//   HAND,
+//   SEGMENTATION,
+//   OBJECT_DETECTION,
+//   SECURITY
+// }
+
+// 定义模型存放路径
+const MODEL_DIR = path.join(process.cwd(), '/src/server/models');
+const BASE_URL = 'https://raw.githubusercontent.com/vladmandic/human/master/models/';
+
+// 根据你之前的 FaceEngine 配置，需要下载以下模型
+const models = [
+  'blazeface.json', 'blazeface.bin',     // 基础检测器
+  'facemesh.json', 'facemesh.bin',       // 特征点与网格
+  'faceres.json', 'faceres.bin',         // 特征识别/比对 (重要：用于 Embedding)
+  'iris.json', 'iris.bin',               // 虹膜
+  'movenet-lightning.json', 'movenet-lightning.bin',
+  'handtrack.json', 'handtrack.bin',
+  'handlandmark-lite.json', 'handlandmark-lite.bin',
+  'emotion.json', 'emotion.bin',
+];
+
+// 确保目录存在
+if (!fs.existsSync(MODEL_DIR)) {
+  fs.mkdirSync(MODEL_DIR, { recursive: true });
+}
+
+async function downloadFile(fileName: string): Promise<void> {
+  const url = `${BASE_URL}${fileName}`;
+  const filePath = path.join(MODEL_DIR, fileName);
+
+  // 如果同名文件已存在，则不进行下载
+  if (fs.existsSync(filePath)) {
+    console.log(`⚠️ 已存在: ${fileName}，跳过下载`);
+    return;
+  }
+
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(filePath);
+    https.get(url, (response) => {
+      if (response.statusCode !== 200) {
+        reject(new Error(`下载失败: ${fileName} (状态码: ${response.statusCode})`));
+        return;
+      }
+      response.pipe(file);
+      file.on('finish', () => {
+        file.close();
+        console.log(`✅ 已下载: ${fileName}`);
+        resolve();
+      });
+    }).on('error', (err) => {
+      fs.unlink(filePath, () => { });
+      reject(err);
+    });
+  });
+}
+
+async function load_models() {
+  console.log(`🚀 开始下载 Human 模型文件... 到 ${MODEL_DIR}`);
+  try {
+    for (const model of models) {
+      await downloadFile(model);
+    }
+    console.log('\n✨ 所有模型已就绪！存放在: ' + MODEL_DIR);
+  } catch (error: any) {
+    console.error('\n❌ 下载过程中出错:', error.message);
+  }
+}
+
+load_models();

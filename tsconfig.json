@@ -23,7 +23,11 @@
     "noImplicitOverride": true,
 
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@server/*": ["./src/server/*"],
+      "@modules/*": ["./src/server/modules/*"],
+      "@tools/*": ["./src/server/tools/*"],
+      "@db/*": ["./src/server/db/*"]
     },
 
     // Some stricter flags (disabled by default)
