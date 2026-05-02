@@ -4,18 +4,23 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun --hot src/index.ts",
-    "start": "NODE_ENV=production bun src/index.ts",
-    "build": "bun run build.ts"
+    "dev": "bun --hot src/server/index.ts",
+    "start": "NODE_ENV=production bun src/server/index.ts",
+    "build": "bun run build.ts",
+    "monitor": "bun --watch src/server/monitor.ts",
+    "download_models": "bun run src/server/scripts/load_models.ts"
   },
   "dependencies": {
     "@radix-ui/react-label": "^2.1.7",
     "@radix-ui/react-select": "^2.2.6",
     "@radix-ui/react-slot": "^1.2.3",
+    "@tensorflow/tfjs-node": "^4.22.0",
+    "@vladmandic/human": "^3.3.6",
     "bun-plugin-tailwind": "^0.1.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1",
+    "pipe2jpeg": "^0.5.0",
     "react": "^19",
     "react-dom": "^19",
     "tailwind-merge": "^3.3.1",
