@@ -38,3 +38,5 @@ models
 
 # local db data
 db
+temp_cache
+recordings

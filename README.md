@@ -1,4 +1,8 @@
-# bun-react-tailwind-shadcn-template
+# Home Assistant
+
+Local Bun + React app for a home monitoring assistant. The frontend is served
+from `src/index.html`; runtime modules for camera, audio, sync buffering, face
+recognition, and emergency recording live under `src/server`.
 
 To install dependencies:
 
@@ -12,10 +16,14 @@ To start a development server:
 bun dev
 ```
 
+To run static checks and a production build:
+
+```bash
+bun run check
+```
+
 To run for production:
 
 ```bash
 bun start
 ```
-
-This project was created using `bun init` in bun v1.3.13. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
