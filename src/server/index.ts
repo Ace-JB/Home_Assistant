@@ -1,14 +1,9 @@
 import { serve } from "bun";
 import index from "@/index.html";
-
-import { faceEngine } from '@modules/face_engine';
-import { CameraStream } from "./tools/Camera/camera";
-
-
-
-
+import { GLOBAL_CONFIG } from "@/global_config";
 
 const server = serve({
+  port: GLOBAL_CONFIG.SERVER.PORT,
   routes: {
     // Serve index.html for all unmatched routes.
     "/*": index,

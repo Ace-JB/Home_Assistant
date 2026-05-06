@@ -1,7 +1,7 @@
 // src/modules/face-engine.ts
 import * as tf from '@tensorflow/tfjs-node';
 import { Human, type Config } from '@vladmandic/human'; //[cite: 1]
-import { db } from '@db/index.ts';
+import { db } from '@db/index';
 import { GLOBAL_CONFIG } from '@/global_config';
 import { readFileSync } from 'fs';
 import path from 'path';
@@ -33,22 +33,31 @@ class FaceEngine {
     this.human = new Human(this.humanConfig);
   }
 
+  private loadPromise: Promise<void> | null = null;
+
   async loadModels() {
     if (this.isLoaded) return;
+    if (this.loadPromise) return this.loadPromise;
 
-    await tf.ready();
-    console.log(`🚀 TensorFlow Accelerator: ${tf.getBackend().toUpperCase()}`);
+    this.loadPromise = (async () => {
+      await tf.ready();
+      console.log(`🚀 TensorFlow Accelerator: ${tf.getBackend().toUpperCase()}`);
 
-    try {
-      // 预加载模型并进行热身
-      await this.human.load();
-      await this.human.warmup();
-      this.isLoaded = true;
-      console.log('✅ Human 感知引擎加载成功');
-    } catch (error) {
-      console.error('❌ 模型加载失败:', error);
-      throw error;
-    }
+      try {
+        // 预加载模型并进行热身
+        await this.human.load();
+        await this.human.warmup();
+        this.isLoaded = true;
+        console.log('✅ Human 感知引擎加载成功');
+      } catch (error) {
+        console.error('❌ 模型加载失败:', error);
+        throw error;
+      } finally {
+        this.loadPromise = null;
+      }
+    })();
+
+    return this.loadPromise;
   }
 
   // 核心工具：提取特征描述符 (Embedding)
