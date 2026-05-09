@@ -23,6 +23,10 @@ async function syncMediaStream(
     syncData: SyncSnapshot,
     fileName: string
 ): Promise<string> {
+    if (syncData.videos.length === 0) {
+        throw new Error('Cannot synthesize video: no video frames in snapshot.');
+    }
+
     const outputDir = join(process.cwd(), 'recordings');
     const filePath = join(outputDir, fileName);
     await fs.mkdir(outputDir, { recursive: true });

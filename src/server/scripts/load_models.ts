@@ -8,24 +8,14 @@
 import fs from 'fs';
 import path from 'path';
 import https from 'https';
-
-// 下个版本考虑根据参数，动态加载不同模型组
-// enum ModelGroup {
-//   FACE_DETECTION,
-//   FACE_RECOGNITION,
-//   FACE_ATTRIBUTES,
-//   POSE,
-//   HAND,
-//   SEGMENTATION,
-//   OBJECT_DETECTION,
-//   SECURITY
-// }
+import { spawn } from 'child_process';
+import { GLOBAL_CONFIG } from '@/global_config';
 
 // 定义模型存放路径
-const MODEL_DIR = path.join(process.cwd(), '/src/server/models');
+const MODEL_DIR = path.join(process.cwd(), GLOBAL_CONFIG.MODELS.METADATA_DIR);
 const BASE_URL = 'https://raw.githubusercontent.com/vladmandic/human/master/models/';
 
-// 根据你之前的 FaceEngine 配置，需要下载以下模型
+// 根据 FaceEngine 配置，需要下载以下模型
 const models = [
   'blazeface.json', 'blazeface.bin',     // 基础检测器
   'facemesh.json', 'facemesh.bin',       // 特征点与网格
@@ -84,4 +74,11 @@ async function load_models() {
   }
 }
 
-load_models();
+async function main() {
+  await load_models();
+}
+
+main().catch((error: any) => {
+  console.error('\n❌ 模型准备失败:', error.message);
+  process.exit(1);
+});

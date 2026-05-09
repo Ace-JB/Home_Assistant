@@ -6,14 +6,14 @@ import { GLOBAL_CONFIG } from '@/global_config';
 import { readFileSync } from 'fs';
 import path from 'path';
 
-const MODEL_DIR = path.join(process.cwd(), '/src/server/models');
+const MODEL_DIR = path.join(process.cwd(), GLOBAL_CONFIG.MODELS.METADATA_DIR);
 
 class FaceEngine {
   private isLoaded = false;
   private human!: Human;
   // Human 配置对象
   private humanConfig: Partial<Config> = {
-    backend: 'tensorflow',
+    backend: 'webgl',
     modelBasePath: `file://${MODEL_DIR}`, // 指向本地模型文件夹
     face: {
       enabled: true,
@@ -21,8 +21,10 @@ class FaceEngine {
       mesh: { enabled: true }, // 提供更精准的特征点
       iris: { enabled: true }, // 可选：视线追踪
       description: { enabled: true }, // 必须开启以提取特征向量
-      emotion: { enabled: false }, // 禁用情绪识别，避免加载相关模型
+      emotion: { enabled: true }, // 禁用情绪识别，避免加载相关模型
     },
+    // 针对 Apple Silicon 的优化
+    softwareKernels: false,
     // body: { enabled: false },
     // hand: { enabled: false },
     // object: { enabled: false },

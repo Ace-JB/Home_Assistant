@@ -1,4 +1,38 @@
-import { type CSSProperties, useEffect, useState } from 'react';
+import { type CSSProperties, useEffect, useRef, useState } from 'react';
+import { SentinelMonitor } from './components/SentinelMonitor';
+
+
+type RealtimeMessage =
+  | { type: 'socket.connected'; ts: number; clientId: string; clients: number; realtimeSubtitleEnabled: boolean }
+  | { type: 'socket.status'; ts: number; clients: number; realtimeSubtitleEnabled: boolean }
+  | { type: 'video.frame'; ts: number; mime: 'image/jpeg'; data: string }
+  | { type: 'voice.level'; ts: number; bytes: number; rms: number; peak: number }
+  | { type: 'voice.text'; ts: number; text: string; startTs: number; endTs: number };
+
+type BufferedFrame = {
+  ts: number;
+  src: string;
+};
+
+type SubtitleCue = {
+  startTs: number;
+  endTs: number;
+  text: string;
+};
+
+type RealtimeState = {
+  connected: boolean;
+  clients: number;
+  frameSrc: string | null;
+  audioLevel: number;
+  transcript: string;
+  activeSubtitle: string;
+  subtitleEnabled: boolean;
+  videoDelayMs: number;
+  lastFrameAt: number | null;
+  setRealtimeSubtitle: (enabled: boolean) => void;
+  setVideoDelay: (delayMs: number) => void;
+};
 
 // --- 彻底稳定的内联图标：硬编码宽高，防止渲染异常时尺寸溢出 ---
 const IconZap = () => (
@@ -18,6 +52,9 @@ const IconSettings = () => (
 );
 const IconActivity = () => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
+);
+const IconMore = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg>
 );
 
 // --- 样式定义：使用标准内联样式作为兜底 ---
@@ -51,6 +88,7 @@ const styles: Record<string, CSSProperties> = {
 const App = () => {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [currentTime, setCurrentTime] = useState(new Date());
+  const realtime = useRealtimeFeedback();
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -114,12 +152,148 @@ const App = () => {
         </header>
 
         <div className="flex-1 overflow-y-auto p-8">
-          {activeTab === 'dashboard' ? <DashboardView /> : <LiveView />}
+          {activeTab === 'dashboard' ? <DashboardView /> : <LiveView realtime={realtime} />}
         </div>
       </main>
     </div>
   );
 };
+
+function useRealtimeFeedback(): RealtimeState {
+  const socketRef = useRef<WebSocket | null>(null);
+  const frameQueueRef = useRef<BufferedFrame[]>([]);
+  const subtitleCuesRef = useRef<SubtitleCue[]>([]);
+  const [state, setState] = useState<RealtimeState>({
+    connected: false,
+    clients: 0,
+    frameSrc: null,
+    audioLevel: 0,
+    transcript: '',
+    activeSubtitle: '',
+    subtitleEnabled: false,
+    videoDelayMs: 5000,
+    lastFrameAt: null,
+    setRealtimeSubtitle: () => {},
+    setVideoDelay: () => {},
+  });
+
+  useEffect(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const currentPort = Number(window.location.port || (window.location.protocol === 'https:' ? 443 : 80));
+    const socketHost = `${window.location.hostname}:${currentPort + 1}`;
+    const socket = new WebSocket(`${protocol}//${socketHost}/ws/realtime`);
+    socketRef.current = socket;
+
+    socket.addEventListener('open', () => {
+      setState((prev) => ({ ...prev, connected: true }));
+    });
+
+    socket.addEventListener('close', () => {
+      setState((prev) => ({ ...prev, connected: false }));
+    });
+
+    socket.addEventListener('message', (event) => {
+      let message: RealtimeMessage;
+
+      try {
+        message = JSON.parse(event.data) as RealtimeMessage;
+      } catch {
+        return;
+      }
+
+      setState((prev) => {
+        if (message.type === 'socket.connected' || message.type === 'socket.status') {
+          return {
+            ...prev,
+            connected: true,
+            clients: message.clients,
+            subtitleEnabled: message.realtimeSubtitleEnabled,
+          };
+        }
+
+        if (message.type === 'video.frame') {
+          // 视频现在通过 WebRTC 传输，不再使用 Socket 发送 JPEG
+          return prev;
+        }
+
+
+        if (message.type === 'voice.level') {
+          return {
+            ...prev,
+            audioLevel: Math.min(100, Math.round(message.rms * 500)),
+          };
+        }
+
+        if (message.type === 'voice.text') {
+          subtitleCuesRef.current.push({
+            startTs: message.startTs,
+            endTs: message.endTs,
+            text: message.text,
+          });
+          subtitleCuesRef.current = subtitleCuesRef.current.slice(-40);
+          return { ...prev, transcript: message.text };
+        }
+
+        return prev;
+      });
+    });
+
+    return () => {
+      socketRef.current = null;
+      socket.close();
+    };
+  }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setState((prev) => {
+        const playbackTs = Date.now() - prev.videoDelayMs;
+        let frameSrc = prev.frameSrc;
+        let lastFrameAt = prev.lastFrameAt;
+
+        while (frameQueueRef.current.length > 0 && frameQueueRef.current[0]!.ts <= playbackTs) {
+          const frame = frameQueueRef.current.shift()!;
+          frameSrc = frame.src;
+          lastFrameAt = frame.ts;
+        }
+
+        frameQueueRef.current = frameQueueRef.current.filter((frame) => frame.ts >= playbackTs - 2000);
+        subtitleCuesRef.current = subtitleCuesRef.current.filter((cue) => cue.endTs >= playbackTs - 5000);
+
+        const activeCue = subtitleCuesRef.current.find((cue) => (
+          cue.startTs <= playbackTs && playbackTs <= cue.endTs + 2500
+        ));
+
+        return {
+          ...prev,
+          frameSrc,
+          lastFrameAt,
+          activeSubtitle: activeCue?.text ?? '',
+        };
+      });
+    }, 50);
+
+    return () => clearInterval(timer);
+  }, []);
+
+  return {
+    ...state,
+    setRealtimeSubtitle: (enabled: boolean) => {
+      setState((prev) => ({ ...prev, subtitleEnabled: enabled }));
+      if (socketRef.current?.readyState === WebSocket.OPEN) {
+        socketRef.current?.send(JSON.stringify({ type: 'subtitle.enable', enabled }));
+      }
+    },
+    setVideoDelay: (delayMs: number) => {
+      frameQueueRef.current = [];
+      setState((prev) => ({
+        ...prev,
+        videoDelayMs: delayMs,
+        activeSubtitle: '',
+      }));
+    },
+  };
+}
 
 const DashboardView = () => (
   <div className="max-w-5xl mx-auto space-y-8 animate-in fade-in duration-500">
@@ -152,38 +326,72 @@ const DashboardView = () => (
   </div>
 );
 
-const LiveView = () => (
+const LiveView = ({ realtime }: { realtime: RealtimeState }) => (
   <div className="max-w-5xl mx-auto space-y-6 animate-in slide-in-from-bottom-4 duration-500">
-    <div className="aspect-video bg-black rounded-3xl border-4 border-slate-800 flex items-center justify-center relative shadow-2xl overflow-hidden">
-      <div className="text-center">
-        <div className="w-10 h-10 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-        <p className="text-slate-600 font-mono text-[10px] uppercase tracking-widest">Waiting for Sync Manager...</p>
-      </div>
-      <div className="absolute top-6 left-6 bg-black/60 px-3 py-1 rounded-full border border-white/10 flex items-center gap-2">
-        <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
-        <span className="text-[10px] font-bold text-white">LIVE</span>
-      </div>
+    {/* 新的 WebRTC + AI Worker 监控架构 */}
+    <div className="flex justify-center relative group">
+      <SentinelMonitor />
+      <VideoToolMenu realtime={realtime} />
     </div>
 
     <div className="grid grid-cols-1 md:grid-cols-2 gap-6 font-mono text-[11px]">
+
       <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800">
         <div className="text-slate-500 uppercase mb-4">Pipeline Params</div>
         <div className="flex justify-between border-b border-slate-800 pb-2 mb-2">
-          <span>Encoder</span>
-          <span className="text-white">libx264</span>
+          <span>Transport</span>
+          <span className="text-white">WebRTC / RTP</span>
         </div>
         <div className="flex justify-between">
-          <span>Resolution</span>
-          <span className="text-white">640x480</span>
+          <span>Encoder</span>
+          <span className="text-white">VideoToolbox (H.264)</span>
+        </div>
+        <div className="flex justify-between border-t border-slate-800 pt-2 mt-2">
+          <span>AI Backend</span>
+          <span className="text-white">WebGL Worker</span>
         </div>
       </div>
-      <div className="flex items-center justify-center bg-indigo-600/10 rounded-2xl border border-indigo-500/20 p-6">
-        <button className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-8 py-3 rounded-xl transition-all active:scale-95 text-xs uppercase tracking-widest">
-          Manual Trigger Recording
-        </button>
+
+      <div className="bg-indigo-600/10 rounded-2xl border border-indigo-500/20 p-6 space-y-4">
+        <div className="text-slate-500 uppercase">Voice Activity</div>
+        <div className="h-3 overflow-hidden rounded-full bg-slate-950 border border-slate-800">
+          <div className="h-full bg-emerald-400 transition-all" style={{ width: `${realtime.audioLevel}%` }}></div>
+        </div>
+        <div className="text-slate-300 min-h-6">{realtime.transcript || 'Listening...'}</div>
       </div>
     </div>
   </div>
 );
+
+const VideoToolMenu = ({ realtime }: { realtime: RealtimeState }) => {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <div className="absolute right-5 top-5">
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/60 text-white transition hover:bg-black/80"
+        aria-label="Open live video tools"
+      >
+        <IconMore />
+      </button>
+      {expanded && (
+        <div className="absolute right-0 mt-2 w-56 rounded-lg border border-white/10 bg-slate-950/95 p-2 text-sm text-slate-200 shadow-2xl">
+          <button
+            type="button"
+            onClick={() => realtime.setRealtimeSubtitle(!realtime.subtitleEnabled)}
+            className="flex w-full items-center justify-between rounded-md px-3 py-2 text-left transition hover:bg-slate-800"
+          >
+            <span>Real-time subtitle</span>
+            <span className={`h-5 w-9 rounded-full p-0.5 transition ${realtime.subtitleEnabled ? 'bg-emerald-500' : 'bg-slate-700'}`}>
+              <span className={`block h-4 w-4 rounded-full bg-white transition ${realtime.subtitleEnabled ? 'translate-x-4' : ''}`}></span>
+            </span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
 
 export default App;
