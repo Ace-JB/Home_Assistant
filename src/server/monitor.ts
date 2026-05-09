@@ -1,73 +1,130 @@
-import { faceEngine } from '@/server/modules/media/face';
+import { GLOBAL_CONFIG } from '@/global_config';
 import { initCamera } from "./tools/Camera";
-import { initAudioListen } from "./tools/Voice";
+import { extractTextFromVoiceStream, initAudioListen } from "./tools/Voice";
+import { realtimeSocket, startRealtimeSocketServer, calculatePcmLevel } from "./tools/Socket";
 
 import Pipe2Jpeg from 'pipe2jpeg';
 import { syncManager } from './modules/media';
-import { faceValue, triggerUrgencySave, Urgency } from './tools/wiseRelex';
+
+const SUBTITLE_VAD_THRESHOLD = 0.05; // 过滤背景低频噪点
+const MAX_SUBTITLE_DURATION_MS = 10000; // 单次录音最长 10 秒
+const SILENCE_END_MS = 800; // 连续静音 800ms 认为说话结束
+
+let firstAudioReceived = false;
 
 async function monitor() {
-    const [{ stream: video }, { stream: audio }] = await Promise.all([
+    startRealtimeSocketServer();
+
+    const [{ stream: video, stop: stopVideo }, { stream: audio, stop: stopAudio }] = await Promise.all([
         initCamera(),
         initAudioListen(),
     ]);
 
-    // 1. 使用 Pipe2Jpeg 将视频流切分为完整的 JPEG 帧，防止因为截断半张图片导致 FFmpeg 合成失败
     const p2j = new Pipe2Jpeg();
-    // video.on('data', (chunk) => console.log('视频流收到原始数据块大小:', chunk.length));
     video.pipe(p2j);
 
+    let subtitleBuffer: Buffer[] = [];
+    let subtitleBufferStartedAt = 0;
+    let lastActiveTs = 0;
+    let isSpeaking = false;
+    let subtitleTranscribing = false;
+
+    async function flushSubtitleBuffer() {
+        if (subtitleTranscribing || subtitleBuffer.length === 0) {
+            return;
+        }
+
+        const audioStartTs = subtitleBufferStartedAt;
+        const audioEndTs = Date.now();
+        const audioBuffer = Buffer.concat(subtitleBuffer);
+
+        // 重置状态
+        subtitleBuffer = [];
+        subtitleBufferStartedAt = 0;
+        lastActiveTs = 0;
+        isSpeaking = false;
+
+        subtitleTranscribing = true;
+        try {
+            const text = await extractTextFromVoiceStream(audioBuffer);
+            if (text) {
+                realtimeSocket.publishVoiceText(text, audioStartTs, audioEndTs);
+
+                // --- 语音指令逻辑：唤醒词检测 ---
+                const wakeWord = GLOBAL_CONFIG.VOICE.WAKE_WORD;
+                if (text.includes(wakeWord)) {
+                    console.log(`🎯 检测到唤醒词 [${wakeWord}], 正在处理指令...`);
+                    const command = text.split(wakeWord).pop()?.trim();
+                    if (command) {
+                        const { brain } = await import('@/server/modules/brain');
+                        const { speak } = await import('./tools/Voice');
+
+                        const response = await brain.processCommand(command, "主人");
+                        console.log(`🤖 AI 响应: ${response}`);
+                        void speak(response);
+                        realtimeSocket.publishVoiceText(`[AI] ${response}`, Date.now(), Date.now() + 2000);
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('Subtitle transcription failed:', error);
+        } finally {
+            subtitleTranscribing = false;
+        }
+    }
+
     p2j.on('data', (jpegBuffer: Buffer) => {
-        // console.log('接收到完整视频帧');
         syncManager.addVideo(jpegBuffer);
     });
 
     audio.on('data', (data: Buffer) => {
-        // console.log('接收到音频块');
-        syncManager.addAudio(data);
-    });
-
-    // 2. 加载 AI 模型(面部识别、动作识别等)
-    await faceEngine.loadModels();
-
-    // 3. 如何触发 smartSave 保存视频？通常有两种策略：
-
-    // 策略 A：【事件驱动】当检测到异常时，保存过去 N 秒的视频（这是 SyncManager 的核心设计初衷）
-
-    p2j.on('data', async (jpegBuffer: Buffer) => {
-
-        if (faceValue.canExecute()) {
-            const result = await faceEngine.recognizeFaces(jpegBuffer);
-
-            const strangerCount = result.filter(r => r.label === '未知陌生人').length;
-
-            if (strangerCount >= 4) {
-                triggerUrgencySave(Urgency.HIGH);
-            } else if (strangerCount >= 2) {
-                triggerUrgencySave(Urgency.MEDIUM);
-            } else {
-                triggerUrgencySave(Urgency.LOW);
-            }
-
+        if (!firstAudioReceived) {
+            console.log('🎙️ Audio data flowing into monitor...');
+            firstAudioReceived = true;
         }
 
+        syncManager.addAudio(data);
+        realtimeSocket.publishVoiceChunk(data);
+
+        if (!realtimeSocket.isRealtimeSubtitleEnabled()) {
+            subtitleBuffer = [];
+            isSpeaking = false;
+            return;
+        }
+
+        // 计算当前音频块的能量
+        const { peak } = calculatePcmLevel(data);
+        const now = Date.now();
+
+        if (peak >= SUBTITLE_VAD_THRESHOLD) {
+            // 检测到声音
+            if (!isSpeaking) {
+                isSpeaking = true;
+                subtitleBufferStartedAt = now;
+            }
+            lastActiveTs = now;
+            subtitleBuffer.push(data);
+        } else {
+            // 静音阶段
+            if (isSpeaking) {
+                subtitleBuffer.push(data);
+                // 检查是否静音超过阈值 或者 录音时间过长
+                const silenceDuration = now - lastActiveTs;
+                const totalDuration = now - subtitleBufferStartedAt;
+
+                if (silenceDuration > SILENCE_END_MS || totalDuration > MAX_SUBTITLE_DURATION_MS) {
+                    void flushSubtitleBuffer();
+                }
+            }
+        }
     });
-
-    // 策略 B：【定时循环保存】每隔固定的时间（例如 30 秒）自动保存上一段记录，实现类似于行车记录仪的功能
-    /*
-    setInterval(async () => {
-        console.log('⏳ 执行常规视频存档...');
-        // SyncManager 默认是 30 秒的环形缓冲区，这里我们把过去 30 秒的数据都拿出来保存
-        const snapshot = syncManager.getSnapshot(30000);
-        await smartSave(snapshot);
-    }, 30000);
-    */
-
-    // 考虑加入语音模型，用于识别语音命令，和上面一样，不过换成本地的，不需要外网，本地模型离线使用
 }
 
-monitor().catch((error) => {
-    console.error('Monitor failed to start:', error);
-    console.error('Tip: list macOS AVFoundation devices with `ffmpeg -f avfoundation -list_devices true -i ""` and update GLOBAL_CONFIG.VIDEO.DEVICE / GLOBAL_CONFIG.VOICE.DEVICE.');
-    process.exit(1);
-});
+export async function startMonitor() {
+    console.log('🚀 Starting Sentinel Monitor (Camera & Audio)...');
+    try {
+        await monitor();
+    } catch (error) {
+        console.error('❌ Monitor failed to start:', error);
+    }
+}

@@ -46,7 +46,7 @@ export async function initCamera(
             '-video_size', `${width}x${height}`, // lock resolution before capture
             '-i', GLOBAL_CONFIG.VIDEO.DEVICE,    // macOS AVFoundation device
             '-an', '-c:v', 'mjpeg',
-            '-q:v', '2',                  // 决定压缩比 (1-31，越小质量越高，2为极高)
+            '-q:v', '5',                  // 决定压缩比 (1-31，越小质量越高，2为极高)
             '-pix_fmt', 'yuvj420p',       // 标准 JPEG 采样格式，保证 TensorFlow 兼容性
             '-f', 'image2pipe',
             // 使用高质量缩放算法 (lanczos)，同时降采样到目标 FPS
