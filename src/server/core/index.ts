@@ -1,11 +1,15 @@
 import { serve } from "bun";
 import index from "@/index.html";
 import { GLOBAL_CONFIG } from "@/global_config";
-import { realtimeSocket } from "@/server/tools/Socket";
-import type { SocketClientData } from "@/server/tools/Socket";
-import { WebRTCManager } from "@/server/tools/WebRTC";
+import { realtimeSocket } from "@tools/Socket";
+import type { SocketClientData } from "@tools/Socket";
+import { WebRTCManager } from "@tools/WebRTC";
 import path from "path";
 import { startMonitor } from "./monitor";
+import { LifecycleManager } from "./lifecycle";
+
+// 初始化生命周期管理
+LifecycleManager.init();
 
 const webrtcManager = new WebRTCManager();
 

@@ -1,5 +1,5 @@
 import { expect, test, describe } from "bun:test";
-import { calculatePcmLevel } from "../tools/Socket";
+import { calculatePcmLevel } from "@tools/Socket";
 import { measurePerformance } from "./performance_utils";
 
 describe("Socket Utils", () => {

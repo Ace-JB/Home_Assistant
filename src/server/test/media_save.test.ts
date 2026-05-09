@@ -1,5 +1,5 @@
 import { expect, test, describe } from "bun:test";
-import { safeSave } from "../tools/Async_Voice_Video";
+import { safeSave } from "@modules/media/synthesizer";
 import { measurePerformance } from "./performance_utils";
 import { readFileSync } from "fs";
 import path from "path";

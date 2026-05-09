@@ -6,98 +6,12 @@ import { join } from 'path';
 import { PassThrough } from 'stream';
 import type { Readable } from 'stream';
 import { GLOBAL_CONFIG } from '@/global_config';
+import { funasrService } from '@/server/services/FunASRService';
 
 type ProcessResult = {
     stdout: string;
     stderr: string;
 };
-
-/**
- * FunASR 常驻服务管理类
- * 避免每次识别都重新加载模型 (耗时 6s+)，改为加载一次常驻内存
- */
-class FunASRWorker {
-    private process: ChildProcess | null = null;
-    private isReady = false;
-    private pendingResolver: ((text: string) => void) | null = null;
-    private startPromise: Promise<void> | null = null;
-
-    async ensureStarted() {
-        if (this.isReady) return;
-        if (this.startPromise) return this.startPromise;
-
-        this.startPromise = new Promise<void>((resolve, reject) => {
-            const cmdParts = GLOBAL_CONFIG.VOICE.FUNASR_CMD.split(' ');
-            const cmd = cmdParts[0]!;
-            const baseArgs = cmdParts.slice(1);
-
-            console.log('⏳ Loading FunASR model into memory...');
-
-            this.process = spawn(cmd, [
-                ...baseArgs,
-                '--model', GLOBAL_CONFIG.VOICE.FUNASR_MODEL,
-                '--cache', GLOBAL_CONFIG.MODELS.BASE_PATH,
-            ]);
-
-            const timeout = setTimeout(() => {
-                reject(new Error('FunASR Worker startup timeout (60s)'));
-            }, 60000);
-
-            this.process.stdout?.on('data', (data) => {
-                const lines = data.toString().split('\n');
-                for (const line of lines) {
-                    const trimmedLine = line.trim();
-                    if (trimmedLine === 'READY') {
-                        clearTimeout(timeout);
-                        this.isReady = true;
-                        console.log('✅ FunASR Worker Ready (Model Loaded)');
-                        resolve();
-                    } else if (trimmedLine.startsWith('RESULT:')) {
-                        const text = trimmedLine.replace('RESULT:', '').trim();
-                        if (this.pendingResolver) {
-                            this.pendingResolver(text);
-                            this.pendingResolver = null;
-                        }
-                    } else if (trimmedLine.startsWith('ERROR:')) {
-                        console.error('[FunASR Worker Error]', trimmedLine);
-                        if (this.pendingResolver) {
-                            this.pendingResolver('');
-                            this.pendingResolver = null;
-                        }
-                    }
-                }
-            });
-
-            this.process.stderr?.on('data', (data) => {
-                const msg = data.toString().trim();
-                if (msg) console.error(`[FunASR Stderr] ${msg}`);
-            });
-
-            this.process.on('exit', (code) => {
-                console.warn(`⚠️ FunASR Worker exited with code ${code}`);
-                this.isReady = false;
-                this.process = null;
-                this.startPromise = null;
-            });
-        });
-
-        return this.startPromise;
-    }
-
-    async transcribe(wavPath: string): Promise<string> {
-        await this.ensureStarted();
-        return new Promise((resolve) => {
-            if (!this.process || !this.process.stdin) {
-                resolve('');
-                return;
-            }
-            this.pendingResolver = resolve;
-            this.process.stdin.write(`${wavPath}\n`);
-        });
-    }
-}
-
-const funasrWorker = new FunASRWorker();
 
 /**
  * 初始化麦克风音频流 (生产者函数)
@@ -106,8 +20,8 @@ export async function initAudioListen(): Promise<{ stream: Readable; stop: () =>
     const outputStream = new PassThrough();
     let ffmpegProcess: ChildProcess | null = null;
 
-    // 预热 FunASR Worker
-    void funasrWorker.ensureStarted().catch(e => console.error('FunASR prewarm failed:', e));
+    // 预热 FunASR Service
+    void funasrService.start().catch(e => console.error('FunASR prewarm failed:', e));
 
     return new Promise((resolve, reject) => {
         let settled = false;
@@ -185,8 +99,8 @@ export async function extractTextFromVoiceStream(audio: Buffer): Promise<string>
     try {
         await convertPcmToWav(audio, wavPath);
 
-        // 使用常驻 Worker 进行识别
-        const transcript = await funasrWorker.transcribe(wavPath);
+        // 使用常驻 Service 进行识别
+        const transcript = await funasrService.transcribe(wavPath);
         const cleaned = normalizeTranscript(transcript);
 
         const duration = Date.now() - startTime;
@@ -294,11 +208,20 @@ export function normalizeTranscript(transcript: string): string {
 }
 
 export async function speak(text: string, options: { rate?: number; voice?: string } = {}): Promise<void> {
-    const { rate = 175, voice } = options;
-    const voiceArg = voice ? `-v "${voice}"` : '';
+    const { rate = 180, voice = 'Tingting' } = options;
+    const voiceArg = `-v "${voice}"`;
+
+    // 预处理文本：移除括号内的英文（防止 TTS 语调突变），移除多余空格
+    const cleanedText = text
+        .replace(/\([^)]*\)/g, '')
+        .replace(/（[^）]*）/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    if (!cleanedText) return;
 
     return new Promise((resolve, reject) => {
-        const safeText = text.replace(/"/g, '\\"');
+        const safeText = cleanedText.replace(/"/g, '\\"');
         exec(`say ${voiceArg} -r ${rate} "${safeText}"`, (error) => {
             if (error) {
                 reject(error);
