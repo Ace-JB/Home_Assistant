@@ -1,5 +1,5 @@
 import { expect, test, describe, beforeEach } from "bun:test";
-import { SyncManager } from "../modules/media";
+import { SyncManager } from "@modules/media";
 import { measurePerformance } from "./performance_utils";
 
 describe("SyncManager", () => {

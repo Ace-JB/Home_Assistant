@@ -1,5 +1,5 @@
 import { expect, test, describe } from "bun:test";
-import { normalizeTranscript } from "../tools/Voice";
+import { normalizeTranscript } from "@tools/Voice";
 
 describe("Voice Utils", () => {
     test("should normalize transcript and remove garbage patterns", () => {

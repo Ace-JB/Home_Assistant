@@ -9,8 +9,8 @@ class DetectionValve {
     private lastRunTime: number = 0;
     private interval: number;
 
-    constructor(fps: number = GLOBAL_CONFIG.FACE.PROCESS_HZ) { // 默认每秒检测 2 次
-        this.interval = 1000 / fps;
+    constructor(fps: number = 2) { 
+        this.interval = 1000 / (fps || 2);
     }
 
     /**
@@ -23,6 +23,10 @@ class DetectionValve {
             return true;
         }
         return false;
+    }
+
+    reset(): void {
+        this.lastRunTime = 0;
     }
 }
 

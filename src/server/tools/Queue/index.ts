@@ -1,5 +1,5 @@
 import type { SyncSnapshot } from "@/server/modules/media";
-import { safeSave } from "../Async_Voice_Video";
+import { safeSave } from "@modules/media/synthesizer";
 
 interface VideoSaveTask {
     snapshot: SyncSnapshot;

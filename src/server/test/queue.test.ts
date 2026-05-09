@@ -1,5 +1,5 @@
 import { expect, test, describe, beforeEach } from "bun:test";
-import { VideoSavingQueue } from "../tools/Queue";
+import { VideoSavingQueue } from "@tools/Queue";
 import { measurePerformance } from "./performance_utils";
 
 describe("VideoSavingQueue", () => {

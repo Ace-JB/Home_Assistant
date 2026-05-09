@@ -1,5 +1,5 @@
 import { expect, test, describe, beforeAll } from "bun:test";
-import { faceEngine } from "../modules/media/face";
+import { faceEngine } from "@modules/media/face";
 import { measurePerformance } from "./performance_utils";
 import { readFileSync } from "fs";
 import path from "path";
