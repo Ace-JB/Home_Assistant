@@ -37,7 +37,7 @@ export class WebRTCManager {
     private startFFmpeg() {
         if (this.ffmpegProcess) return;
 
-        const fps = GLOBAL_CONFIG.VIDEO.FPS;
+        const fps = String(GLOBAL_CONFIG.VIDEO.FPS);
         const width = GLOBAL_CONFIG.VIDEO.WIDTH;
         const height = GLOBAL_CONFIG.VIDEO.HEIGHT;
         const device = GLOBAL_CONFIG.VIDEO.DEVICE;
@@ -48,10 +48,14 @@ export class WebRTCManager {
             GLOBAL_CONFIG.FFMPEG.BIN,
             "-hide_banner",
             "-loglevel", "warning",
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
             "-f", "avfoundation",
-            "-framerate", fps,
+            "-framerate", "30",
             "-video_size", `${width}x${height}`,
             "-i", device,
+            "-vf", `fps=${fps},scale=${width}:${height}`,
+            "-fps_mode", "passthrough",
             "-c:v", "h264_videotoolbox", // Apple Silicon 硬件加速编码器
             "-b:v", "1000k",             // 码率设置
             "-preset", "realtime",

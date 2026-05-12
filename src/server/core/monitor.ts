@@ -5,12 +5,72 @@ import { realtimeSocket, startRealtimeSocketServer, calculatePcmLevel } from "@t
 
 import Pipe2Jpeg from 'pipe2jpeg';
 import { syncManager } from '@modules/media';
+import { faceEngine, type RecognizedFace } from '@modules/media/face';
+import { faceValue } from '@tools/WiseRelex';
+import type { CameraRecognitionContext } from '@server/modules/brain';
 
 const SUBTITLE_VAD_THRESHOLD = 0.05; // 过滤背景低频噪点
 const MAX_SUBTITLE_DURATION_MS = 10000; // 单次录音最长 10 秒
 const SILENCE_END_MS = 800; // 连续静音 800ms 认为说话结束
 
 let firstAudioReceived = false;
+
+function buildCameraRecognitionContext(faces: RecognizedFace[], ts: number): CameraRecognitionContext {
+    const recognizedLabels = [...new Set(
+        faces
+            .filter(face => face.matched)
+            .map(face => face.label)
+    )];
+    const bestFace = [...faces].sort((a, b) => (b.similarity ?? 0) - (a.similarity ?? 0))[0];
+    const verifiedFace = faces.find(face => face.matched);
+
+    return {
+        ts,
+        faces,
+        recognizedLabels,
+        hasStranger: faces.some(face => face.label === '未知陌生人'),
+        identityVerification: verifiedFace
+            ? {
+                verified: true,
+                label: verifiedFace.label,
+                reason: 'recognized_face',
+                bestCandidate: verifiedFace.candidateLabel,
+                similarity: verifiedFace.similarity,
+                threshold: verifiedFace.threshold,
+            }
+            : {
+                verified: false,
+                label: null,
+                reason: faces.length === 0 ? 'no_face' : bestFace?.candidateLabel ? 'possible_face_match' : 'unknown_face',
+                bestCandidate: bestFace?.candidateLabel ?? null,
+                similarity: bestFace?.similarity ?? null,
+                threshold: bestFace?.threshold,
+            },
+        confidence: 'fresh',
+    };
+}
+
+function markRecognitionAge(context: CameraRecognitionContext | null): CameraRecognitionContext | undefined {
+    if (!context) {
+        return undefined;
+    }
+
+    const ageMs = Date.now() - context.ts;
+    const confidence = ageMs > 5_000 ? 'stale' : 'fresh';
+    return {
+        ...context,
+        ageMs,
+        confidence,
+        identityVerification: confidence === 'stale'
+            ? {
+                ...context.identityVerification,
+                verified: false,
+                label: null,
+                reason: 'stale',
+            }
+            : context.identityVerification,
+    };
+}
 
 async function monitor() {
     startRealtimeSocketServer();
@@ -31,6 +91,8 @@ async function monitor() {
     let subtitleTranscribing = false;
     let isAwake = false;
     let wakeTimer: any = null;
+    let latestCameraRecognition: CameraRecognitionContext | null = null;
+    let faceRecognitionRunning = false;
 
     async function flushSubtitleBuffer() {
         if (subtitleTranscribing || subtitleBuffer.length === 0 || systemSpeaking) {
@@ -64,7 +126,7 @@ async function monitor() {
                         isAwake = true;
                     }
 
-                    // 核心修复：只要检测到可能是指令，立即清除旧的倒计时，防止在思考/说话期间超时
+                    // 只要检测到可能是指令，立即清除旧的倒计时，防止在思考/说话期间超时
                     if (wakeTimer) {
                         clearTimeout(wakeTimer);
                         wakeTimer = null;
@@ -77,7 +139,7 @@ async function monitor() {
                         const { brain } = await import('@server/modules/brain');
                         const { speak } = await import('@tools/Voice');
 
-                        const response = await brain.processCommand(command, "主人");
+                        const response = await brain.processCommand(command, "主人", markRecognitionAge(latestCameraRecognition));
                         console.log(`🤖 AI 响应: ${response}`);
 
                         // 在说话期间停止监听，防止自唤醒循环
@@ -115,7 +177,34 @@ async function monitor() {
     }
 
     p2j.on('data', (jpegBuffer: Buffer) => {
-        syncManager.addVideo(jpegBuffer);
+        syncManager.addVideo(jpegBuffer, latestCameraRecognition);
+
+        if (!faceRecognitionRunning && faceValue.canExecute()) {
+            faceRecognitionRunning = true;
+            void faceEngine.recognizeFaces(jpegBuffer)
+                .then((faces) => {
+                    latestCameraRecognition = buildCameraRecognitionContext(faces, Date.now());
+                    console.log(`[Vision] Face recognition context updated: ${JSON.stringify({
+                        recognizedLabels: latestCameraRecognition.recognizedLabels,
+                        hasStranger: latestCameraRecognition.hasStranger,
+                        faces: latestCameraRecognition.faces.map(face => ({
+                            label: face.label,
+                            matched: face.matched,
+                            candidateLabel: face.candidateLabel,
+                            distance: typeof face.distance === 'number' ? Number(face.distance.toFixed(4)) : face.distance,
+                            threshold: face.threshold,
+                            similarity: typeof face.similarity === 'number' ? Number(face.similarity.toFixed(4)) : face.similarity,
+                        })),
+                        identityVerification: latestCameraRecognition.identityVerification,
+                    })}`);
+                })
+                .catch((error) => {
+                    console.error('Face recognition failed:', error);
+                })
+                .finally(() => {
+                    faceRecognitionRunning = false;
+                });
+        }
     });
 
     audio.on('data', (data: Buffer) => {

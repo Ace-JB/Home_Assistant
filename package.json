@@ -14,7 +14,8 @@
     "test": "bun test src/server/test/*.test.ts",
     "test:perf": "bun test src/server/test/*.test.ts --timeout 60000",
     "test:report": "bun run src/server/test/generate_report.ts",
-    "terminate_media": "bun run src/server/scripts/terminate_media.ts"
+    "terminate_media": "bun run src/server/scripts/terminate_media.ts",
+    "register": "bun run src/server/scripts/register_face.ts"
   },
   "dependencies": {
     "@tensorflow/tfjs-node": "^4.22.0",

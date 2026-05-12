@@ -1,18 +1,30 @@
 # Home Assistant - Sentinel
 
-# Performance Snapshot (May 9, 2026) ✅
+# Performance Snapshot (May 12, 2026) ✅
 
-The system has been verified with **14 automated tests** passing at 100%. Below are the current performance metrics:
+The system has been verified with **18 automated tests** passing at 100%. Below are the latest local performance metrics from the server test suite:
 
 | Component | Operation | Avg. Duration | Note |
 | :--- | :--- | :--- | :--- |
-| **FaceEngine** | `loadModels` | **276.88 ms** | One-time startup / Warmup |
-| **FaceEngine** | `extractDescriptor` | **119.73 ms** | Per-face feature extraction |
-| **FaceEngine** | `recognizeFaces` | **50.80 ms** | Full multi-face detection pass |
-| **SyncManager** | `addVideo` | **0.13 ms** | Ring buffer push overhead |
-| **Socket** | `calculatePcmLevel` | **0.40 ms** | 1s audio volume analysis |
-| **MediaSave** | `safeSave` | **139.93 ms** | Optimized MP4 synthesis |
-| **VoiceUtils** | `normalize` | **0.15 ms** | Text cleanup & VAD filtering |
+| **FaceEngine** | `loadModels` | **223.33 ms** | One-time startup / warmup |
+| **FaceEngine** | `extractDescriptor` | **104.23 ms** | Per-face feature extraction |
+| **FaceEngine** | `recognizeFaces` | **49.77 ms** | Detection plus similarity-based identity check |
+| **SyncManager** | `addVideo` | **0.19 ms** | Batched expiry cleanup / frame push overhead |
+| **Socket** | `calculatePcmLevel` | **0.94 ms** | 1s audio volume analysis |
+| **MediaSave** | `safeSave` | **133.15 ms** | Optimized MP4 synthesis |
+| **VoiceUtils** | `normalize` | **<1 ms** | Text cleanup & VAD filtering |
+
+Latest verification command:
+
+```bash
+bun test src/server/test/*.test.ts --timeout 60000
+```
+
+Result: **18 pass / 0 fail / 40 assertions** across 8 files in **2.53s**.
+
+Generated reports:
+- `test-report.html`
+- `performance-report.json`
 
 ## Hardware & Environment
 - **TensorFlow Backend**: TensorFlow Node (Metal/Accelerate)
@@ -44,10 +56,14 @@ bun dev
 ### 4. Run Verification Suite
 ```bash
 # Run all tests
-bun run test
+bun test src/server/test/*.test.ts --timeout 60000
 
-# Run tests and generate HTML report
-bun run test:report
+# Run tests and generate HTML + JSON performance reports
+bun src/server/test/generate_report.ts
+
+# Type-check and build
+./node_modules/.bin/tsc --noEmit
+bun build.ts
 ```
 
 ---
@@ -68,6 +84,7 @@ The project is structured into modular layers for maximum performance and mainta
 - **Voice**: Text-to-Speech (TTS) using macOS native voices and FunASR transcription.
 - **WebRTC**: Real-time video/audio streaming via WebRTC (UDP).
 - **Frequency Control**: `WiseRelex` (DetectionValve) manages AI inference frequency to optimize CPU usage.
+- **Identity Verification**: Camera recognition context is passed to `HomeBrain` with `identityVerification`, `similarity`, and threshold details before command execution.
 
 ---
 
@@ -84,3 +101,4 @@ The project is structured into modular layers for maximum performance and mainta
 - **FFmpeg Pixel Format Warning**: Expected on macOS `avfoundation`. The system automatically falls back to `uyvy422` with no performance loss.
 - **Microphone Echo**: If the AI hears itself, ensure the `systemSpeaking` lock is enabled in `monitor.ts` (default: ON).
 - **Model Initialization**: Ensure you have at least 8GB of RAM for the `qwen2.5:7b` model running via Ollama.
+- **Face Recognition Mismatch**: If logs show `candidateLabel` but low `similarity`, re-register the member with `bun src/server/scripts/register_face.ts --name master --camera`.

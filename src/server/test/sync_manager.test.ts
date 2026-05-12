@@ -46,7 +46,6 @@ describe("SyncManager", () => {
     });
 
     test("should calculate correct durationMs", () => {
-        const start = Date.now();
         syncManager.addVideo(Buffer.from("1"));
         
         // Mocking time passing is hard with Date.now() in real tests, 
@@ -54,5 +53,25 @@ describe("SyncManager", () => {
         syncManager.addVideo(Buffer.from("2"));
         const snapshot = syncManager.getSnapshot(1000);
         expect(snapshot.videos[1]!.durationMs).toBeGreaterThanOrEqual(0);
+    });
+
+    test("should prune multiple expired frames while preserving valid frames", () => {
+        const originalNow = Date.now;
+        let now = 1_000;
+        Date.now = () => now;
+
+        try {
+            syncManager.addVideo(Buffer.from("old-1"));
+            now = 1_100;
+            syncManager.addVideo(Buffer.from("old-2"));
+            now = 2_200;
+            syncManager.addVideo(Buffer.from("new"));
+
+            const snapshot = syncManager.getSnapshot(1_000);
+            expect(snapshot.videos.length).toBe(1);
+            expect(snapshot.videos[0]!.data.toString()).toBe("new");
+        } finally {
+            Date.now = originalNow;
+        }
     });
 });

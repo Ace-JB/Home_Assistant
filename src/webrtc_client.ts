@@ -73,8 +73,9 @@ export function setupWebRTC(videoElement: HTMLVideoElement, signalingUrl: string
         // 监听远程轨道
         pc.ontrack = (event) => {
             console.log("📺 Received Remote Track");
-            if (videoElement.srcObject !== event.streams[0]) {
-                videoElement.srcObject = event.streams[0];
+            const stream = event.streams[0] ?? null;
+            if (videoElement.srcObject !== stream) {
+                videoElement.srcObject = stream;
             }
         };
 

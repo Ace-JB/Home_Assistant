@@ -1,9 +1,52 @@
 import { spawn } from "child_process";
-import { writeFileSync } from "fs";
+import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
+import { categorizePerformanceMetric, type PerformanceCategory } from "./performance_utils";
 
-async function runTests() {
-    console.log("🚀 Running tests and generating report...");
+export interface TestResult {
+    name: string;
+    status: "pass" | "fail";
+    duration?: number;
+}
+
+export interface ParsedPerformanceMetric {
+    name: string;
+    duration: number;
+    category: PerformanceCategory;
+}
+
+export interface TestSummary {
+    pass: number;
+    fail: number;
+    total: number;
+    time: string;
+}
+
+export interface ParsedReportData {
+    tests: TestResult[];
+    performanceMetrics: ParsedPerformanceMetric[];
+    summary: TestSummary;
+}
+
+export interface PerformanceHotspot extends ParsedPerformanceMetric {
+    rank: number;
+    baselineDuration?: number;
+    delta?: number;
+    deltaPercent?: number;
+}
+
+interface BaselineData {
+    performanceMetrics?: Array<{ name: string; duration: number }>;
+}
+
+const ALGORITHM_CANDIDATES = [
+    "SyncManager.cleanOld: prune expired frames in batches instead of repeated front-array deletion.",
+    "FaceEngine matching: centralize best-match selection and prepare descriptor caching/vectorized distance checks if records grow.",
+    "calculatePcmLevel: keep the linear scan, then benchmark larger PCM buffers before considering typed-array alternatives.",
+];
+
+export async function runTests() {
+    console.log("Running tests and generating report...");
 
     const bunTest = spawn("bun", ["test", "./src/server/test/"], {
         env: { ...process.env, FORCE_COLOR: "0" }
@@ -27,11 +70,11 @@ async function runTests() {
     });
 }
 
-function parseOutput(output: string) {
+export function parseOutput(output: string): ParsedReportData {
     const lines = output.split("\n");
-    const tests: any[] = [];
-    const performanceMetrics: any[] = [];
-    let summary = { pass: 0, fail: 0, total: 0, time: "" };
+    const tests: TestResult[] = [];
+    const performanceMetrics: ParsedPerformanceMetric[] = [];
+    const summary: TestSummary = { pass: 0, fail: 0, total: 0, time: "" };
 
     const perfRegex = /\[Performance\] (.*) took (.*)ms/;
     const testRegex = /(?:✓|\(pass\)) (.*) \[(.*)ms\]/;
@@ -40,19 +83,24 @@ function parseOutput(output: string) {
     for (const line of lines) {
         const perfMatch = line.match(perfRegex);
         if (perfMatch) {
-            performanceMetrics.push({ name: perfMatch[1], duration: parseFloat(perfMatch[2]!) });
+            const name = perfMatch[1]!;
+            performanceMetrics.push({
+                name,
+                duration: parseFloat(perfMatch[2]!),
+                category: categorizePerformanceMetric(name),
+            });
         }
 
         const testMatch = line.match(testRegex);
         if (testMatch) {
-            tests.push({ name: testMatch[1], duration: parseFloat(testMatch[2]!), status: "pass" });
+            tests.push({ name: testMatch[1]!, duration: parseFloat(testMatch[2]!), status: "pass" });
             summary.pass++;
             summary.total++;
         }
 
         const failMatch = line.match(failRegex);
         if (failMatch) {
-            tests.push({ name: failMatch[1], status: "fail" });
+            tests.push({ name: failMatch[1]!, status: "fail" });
             summary.fail++;
             summary.total++;
         }
@@ -65,22 +113,87 @@ function parseOutput(output: string) {
     return { tests, performanceMetrics, summary };
 }
 
-function generateHtml(data: any) {
-    const { tests, performanceMetrics, summary } = data;
+function readBaseline(baselinePath?: string): BaselineData | null {
+    if (!baselinePath || !existsSync(baselinePath)) {
+        return null;
+    }
 
-    const rows = tests.map((t: any) => `
-        <tr class="${t.status}">
-            <td>${t.status === 'pass' ? '✅' : '❌'}</td>
-            <td>${t.name}</td>
-            <td>${t.duration ? t.duration.toFixed(2) + 'ms' : '-'}</td>
+    try {
+        return JSON.parse(readFileSync(baselinePath, "utf8")) as BaselineData;
+    } catch {
+        return null;
+    }
+}
+
+export function buildHotspots(
+    performanceMetrics: ParsedPerformanceMetric[],
+    baseline: BaselineData | null = null,
+): PerformanceHotspot[] {
+    const baselineByName = new Map(
+        baseline?.performanceMetrics?.map((metric) => [metric.name, metric.duration]) ?? [],
+    );
+
+    return [...performanceMetrics]
+        .sort((a, b) => b.duration - a.duration)
+        .map((metric, index) => {
+            const baselineDuration = baselineByName.get(metric.name);
+            const delta = baselineDuration === undefined ? undefined : metric.duration - baselineDuration;
+            const deltaPercent = baselineDuration && delta !== undefined
+                ? (delta / baselineDuration) * 100
+                : undefined;
+
+            return {
+                ...metric,
+                rank: index + 1,
+                baselineDuration,
+                delta,
+                deltaPercent,
+            };
+        });
+}
+
+function escapeHtml(value: string): string {
+    return value
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
+function formatDelta(hotspot: PerformanceHotspot): string {
+    if (hotspot.delta === undefined || hotspot.deltaPercent === undefined) {
+        return "No baseline";
+    }
+
+    const sign = hotspot.delta >= 0 ? "+" : "";
+    return `${sign}${hotspot.delta.toFixed(2)} ms (${sign}${hotspot.deltaPercent.toFixed(1)}%)`;
+}
+
+export function generateHtml(data: ParsedReportData, baseline: BaselineData | null = null): string {
+    const { tests, performanceMetrics, summary } = data;
+    const hotspots = buildHotspots(performanceMetrics, baseline);
+
+    const rows = tests.map((testResult) => `
+        <tr class="${testResult.status}">
+            <td>${testResult.status === "pass" ? "PASS" : "FAIL"}</td>
+            <td>${escapeHtml(testResult.name)}</td>
+            <td>${testResult.duration ? testResult.duration.toFixed(2) + "ms" : "-"}</td>
         </tr>
     `).join("");
 
-    const perfRows = performanceMetrics.map((p: any) => `
+    const perfRows = hotspots.map((metric) => `
         <tr>
-            <td>${p.name}</td>
-            <td class="perf-val">${p.duration.toFixed(2)} ms</td>
+            <td>${metric.rank}</td>
+            <td>${escapeHtml(metric.name)}</td>
+            <td>${metric.category}</td>
+            <td class="perf-val">${metric.duration.toFixed(2)} ms</td>
+            <td>${formatDelta(metric)}</td>
         </tr>
+    `).join("");
+
+    const candidates = ALGORITHM_CANDIDATES.map((candidate) => `
+        <li>${escapeHtml(candidate)}</li>
     `).join("");
 
     return `
@@ -92,51 +205,51 @@ function generateHtml(data: any) {
     <title>Home Assistant - Test Report</title>
     <style>
         :root {
-            --bg: #0f172a;
-            --card-bg: #1e293b;
+            --bg: #10151f;
+            --card-bg: #182230;
             --text: #f8fafc;
-            --text-muted: #94a3b8;
+            --text-muted: #a6b3c2;
             --success: #22c55e;
             --error: #ef4444;
             --accent: #38bdf8;
+            --border: rgba(255, 255, 255, 0.08);
         }
         body {
-            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            font-family: Inter, system-ui, -apple-system, sans-serif;
             background: var(--bg);
             color: var(--text);
             margin: 0;
             padding: 40px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
         }
         .container {
             width: 100%;
-            max-width: 900px;
+            max-width: 1040px;
+            margin: 0 auto;
         }
         header {
-            margin-bottom: 40px;
-            text-align: center;
+            margin-bottom: 32px;
         }
         h1 {
-            font-size: 2.5rem;
-            margin-bottom: 10px;
-            background: linear-gradient(to right, #38bdf8, #818cf8);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+            font-size: 2.25rem;
+            margin: 0 0 8px;
+        }
+        p {
+            color: var(--text-muted);
+            margin: 0;
         }
         .summary-cards {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-            margin-bottom: 40px;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 16px;
+            margin-bottom: 28px;
+        }
+        .card, section {
+            background: var(--card-bg);
+            border-radius: 8px;
+            border: 1px solid var(--border);
         }
         .card {
-            background: var(--card-bg);
-            padding: 24px;
-            border-radius: 16px;
-            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
-            border: 1px solid rgba(255, 255, 255, 0.05);
+            padding: 20px;
         }
         .card .label {
             color: var(--text-muted);
@@ -144,23 +257,18 @@ function generateHtml(data: any) {
             margin-bottom: 8px;
         }
         .card .value {
-            font-size: 2rem;
+            font-size: 1.75rem;
             font-weight: 700;
         }
         .card.pass .value { color: var(--success); }
         .card.fail .value { color: var(--error); }
-        
         section {
-            background: var(--card-bg);
-            border-radius: 16px;
-            padding: 32px;
-            margin-bottom: 30px;
-            border: 1px solid rgba(255, 255, 255, 0.05);
+            padding: 28px;
+            margin-bottom: 24px;
         }
         h2 {
-            margin-top: 0;
-            font-size: 1.5rem;
-            margin-bottom: 24px;
+            margin: 0 0 20px;
+            font-size: 1.25rem;
             color: var(--accent);
         }
         table {
@@ -170,23 +278,26 @@ function generateHtml(data: any) {
         th {
             text-align: left;
             color: var(--text-muted);
-            font-size: 0.875rem;
-            padding: 12px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            font-size: 0.8125rem;
+            padding: 10px;
+            border-bottom: 1px solid var(--border);
         }
         td {
-            padding: 16px 12px;
+            padding: 12px 10px;
             border-bottom: 1px solid rgba(255, 255, 255, 0.05);
         }
-        tr.pass:hover { background: rgba(34, 197, 94, 0.05); }
         tr.fail { color: var(--error); }
         .perf-val {
-            font-family: 'JetBrains Mono', monospace;
+            font-family: "JetBrains Mono", ui-monospace, monospace;
             color: var(--accent);
             font-weight: 600;
         }
+        li {
+            color: var(--text-muted);
+            margin-bottom: 8px;
+        }
         .timestamp {
-            margin-top: 40px;
+            margin-top: 32px;
             color: var(--text-muted);
             font-size: 0.875rem;
         }
@@ -214,17 +325,20 @@ function generateHtml(data: any) {
             </div>
             <div class="card">
                 <div class="label">Execution Time</div>
-                <div class="value">${summary.time}</div>
+                <div class="value">${escapeHtml(summary.time || "-")}</div>
             </div>
         </div>
 
         <section>
-            <h2>⚡ Performance Metrics</h2>
+            <h2>Performance Hotspots</h2>
             <table>
                 <thead>
                     <tr>
+                        <th>Rank</th>
                         <th>Module / Operation</th>
+                        <th>Category</th>
                         <th>Duration</th>
+                        <th>Baseline Delta</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -234,11 +348,16 @@ function generateHtml(data: any) {
         </section>
 
         <section>
-            <h2>🧪 Test Results</h2>
+            <h2>Algorithm Candidates</h2>
+            <ul>${candidates}</ul>
+        </section>
+
+        <section>
+            <h2>Test Results</h2>
             <table>
                 <thead>
                     <tr>
-                        <th style="width: 40px"></th>
+                        <th style="width: 72px">Status</th>
                         <th>Test Case</th>
                         <th>Duration</th>
                     </tr>
@@ -261,15 +380,25 @@ function generateHtml(data: any) {
 async function main() {
     const { output, code } = await runTests();
     const data = parseOutput(output);
-    const html = generateHtml(data);
+    const baseline = readBaseline(join(process.cwd(), "performance-baseline.json"));
+    const html = generateHtml(data, baseline);
 
     const reportPath = join(process.cwd(), "test-report.html");
     writeFileSync(reportPath, html);
+    writeFileSync(
+        join(process.cwd(), "performance-report.json"),
+        JSON.stringify({ ...data, hotspots: buildHotspots(data.performanceMetrics, baseline) }, null, 2),
+    );
 
-    console.log(`\n✨ Report generated successfully: ${reportPath}`);
+    console.log(`\nReport generated successfully: ${reportPath}`);
     if (code !== 0) {
         process.exit(1);
     }
 }
 
-main().catch(console.error);
+if (import.meta.main) {
+    main().catch((error) => {
+        console.error(error);
+        process.exit(1);
+    });
+}

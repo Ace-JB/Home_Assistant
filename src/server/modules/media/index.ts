@@ -48,11 +48,18 @@ export class SyncManager {
         this.cleanOld(this.audioRing);
     }
 
-    // 清理过期数据
+    // 清理过期数据，避免在高频流中反复 shift 造成数组重排开销
     private cleanOld(ring: PerceptualFrame[]) {
         const now = Date.now();
-        while (ring.length > 0 && now - ring[0]!.ts > this.windowSizeMs) {
-            ring.shift();
+        const cutoff = now - this.windowSizeMs;
+        let firstValidIndex = 0;
+
+        while (firstValidIndex < ring.length && ring[firstValidIndex]!.ts < cutoff) {
+            firstValidIndex++;
+        }
+
+        if (firstValidIndex > 0) {
+            ring.splice(0, firstValidIndex);
         }
     }
 
