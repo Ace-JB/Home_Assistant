@@ -54,7 +54,8 @@ export function useRealtimeFeedback(): RealtimeState {
         }
 
         if (message.type === 'video.frame') {
-          // 视频现在通过 WebRTC 传输，不再使用 Socket 发送 JPEG
+          // Camera preview is transported exclusively through WebRTC.
+          // Do not enqueue JPEG frames on this realtime socket.
           return prev;
         }
 

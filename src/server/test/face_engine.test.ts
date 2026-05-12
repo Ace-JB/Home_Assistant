@@ -30,9 +30,11 @@ describe("FaceEngine Performance", () => {
         });
 
         expect(result.length).toBeGreaterThan(0);
+        expect(result[0]!.matched).toBeBoolean();
+        expect(result[0]!.threshold).toBeGreaterThan(0);
         console.log(`[FaceEngine] Found ${result.length} faces`);
         result.forEach(face => {
-            console.log(`[FaceEngine] Detected: ${face.label} at [${face.box.x}, ${face.box.y}]`);
+            console.log(`[FaceEngine] Detected: ${face.label} candidate=${face.candidateLabel ?? '-'} similarity=${face.similarity ?? '-'} at [${face.box.x}, ${face.box.y}]`);
         });
     });
 });

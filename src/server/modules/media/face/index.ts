@@ -8,6 +8,29 @@ import path from 'path';
 
 const MODEL_DIR = path.join(process.cwd(), GLOBAL_CONFIG.MODELS.METADATA_DIR);
 
+type FaceRecord = {
+  name: string;
+  descriptor: number[];
+};
+
+type FaceMatch = {
+  label: string;
+  distance: number;
+  similarity: number;
+  matched: boolean;
+  candidateLabel: string | null;
+};
+
+export type RecognizedFace = {
+  label: string;
+  matched: boolean;
+  distance: number | null;
+  similarity: number | null;
+  candidateLabel: string | null;
+  threshold: number;
+  box: { x: number; y: number; width: number; height: number };
+};
+
 class FaceEngine {
   private isLoaded = false;
   private human!: Human;
@@ -36,6 +59,33 @@ class FaceEngine {
   }
 
   private loadPromise: Promise<void> | null = null;
+
+  private findBestMatch(descriptor: number[] | Float32Array, records: FaceRecord[]): FaceMatch {
+    let bestDistance = Number.POSITIVE_INFINITY;
+    let bestSimilarity = 0;
+    let candidateLabel: string | null = null;
+    const comparableDescriptor = Array.from(descriptor);
+
+    for (const record of records) {
+      const dist = this.human.match.distance(comparableDescriptor, record.descriptor);
+      const similarity = this.human.match.similarity(comparableDescriptor, record.descriptor);
+      if (similarity > bestSimilarity || (similarity === bestSimilarity && dist < bestDistance)) {
+        bestDistance = dist;
+        bestSimilarity = similarity;
+        candidateLabel = record.name;
+      }
+    }
+
+    const matched = candidateLabel !== null && bestSimilarity >= GLOBAL_CONFIG.FACE.DISTANCE_THRESHOLD;
+
+    return {
+      label: matched ? candidateLabel! : '未知陌生人',
+      distance: Number.isFinite(bestDistance) ? bestDistance : 1.0,
+      similarity: bestSimilarity,
+      matched,
+      candidateLabel,
+    };
+  }
 
   async loadModels() {
     if (this.isLoaded) return;
@@ -86,17 +136,7 @@ class FaceEngine {
     const records = db.getRecords();
     if (records.length === 0) return '数据库为空';
 
-    let bestMatch = { label: '未知陌生人', distance: 1.0 };
-
-    for (const record of records) {
-      // 使用 human.match.distance 计算距离
-      const dist = this.human.match.distance(descriptor_to_compare, record.descriptor);
-      if (dist < GLOBAL_CONFIG.FACE.DISTANCE_THRESHOLD && dist < bestMatch.distance) {
-        bestMatch = { label: record.name, distance: dist };
-      }
-    }
-
-    return bestMatch.label;
+    return this.findBestMatch(descriptor_to_compare, records).label;
   }
 
   async registerUser(name: string, imagePath: string): Promise<Float32Array | null> {
@@ -110,7 +150,7 @@ class FaceEngine {
   }
 
   // 针对视频流处理的高频识别方法
-  async recognizeFaces(imageBuffer: Buffer): Promise<Array<{ label: string, box: any }>> {
+  async recognizeFaces(imageBuffer: Buffer): Promise<RecognizedFace[]> {
     if (!this.isLoaded) await this.loadModels();
 
     // 💡 改进：不再使用固定 shape 的 tf.tensor3d
@@ -126,20 +166,24 @@ class FaceEngine {
     const records = db.getRecords();
 
     return result.face.map(f => {
-      let label = '未知陌生人';
+      let match: FaceMatch = {
+        label: '未知陌生人',
+        distance: 1.0,
+        similarity: 0,
+        matched: false,
+        candidateLabel: null,
+      };
       if (f.embedding && records.length > 0) {
-        let minDistance = 1.0;
-        for (const record of records) {
-          const dist = this.human.match.distance(f.embedding, record.descriptor);
-          if (dist < GLOBAL_CONFIG.FACE.DISTANCE_THRESHOLD && dist < minDistance) {
-            minDistance = dist;
-            label = record.name;
-          }
-        }
+        match = this.findBestMatch(f.embedding, records);
       }
 
       return {
-        label,
+        label: match.label,
+        matched: match.matched,
+        distance: match.candidateLabel ? match.distance : null,
+        similarity: match.candidateLabel ? match.similarity : null,
+        candidateLabel: match.candidateLabel,
+        threshold: GLOBAL_CONFIG.FACE.DISTANCE_THRESHOLD,
         box: { x: f.box[0], y: f.box[1], width: f.box[2], height: f.box[3] }
       };
     });

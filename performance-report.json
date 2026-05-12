@@ -1,0 +1,192 @@
+{
+  "tests": [
+    {
+      "name": "Media Save Performance > should save a small snapshot as MP4 and measure performance",
+      "duration": 128.75,
+      "status": "pass"
+    },
+    {
+      "name": "DetectionValve > should allow execution based on frequency",
+      "duration": 601.22,
+      "status": "pass"
+    },
+    {
+      "name": "SyncManager > should add video frames and retrieve snapshot",
+      "duration": 0.46,
+      "status": "pass"
+    },
+    {
+      "name": "SyncManager > should add audio frames and retrieve snapshot",
+      "duration": 0.13,
+      "status": "pass"
+    },
+    {
+      "name": "SyncManager > should clean old frames",
+      "duration": 1101.08,
+      "status": "pass"
+    },
+    {
+      "name": "SyncManager > should calculate correct durationMs",
+      "duration": 0.24,
+      "status": "pass"
+    },
+    {
+      "name": "SyncManager > should prune multiple expired frames while preserving valid frames",
+      "duration": 0.27,
+      "status": "pass"
+    },
+    {
+      "name": "VideoSavingQueue > should process tasks sequentially",
+      "duration": 101.29,
+      "status": "pass"
+    },
+    {
+      "name": "Socket Utils > should calculate PCM level and measure performance",
+      "duration": 1.85,
+      "status": "pass"
+    },
+    {
+      "name": "FaceEngine Performance > should extract descriptor and measure performance",
+      "duration": 127.24,
+      "status": "pass"
+    },
+    {
+      "name": "FaceEngine Performance > should recognize faces and measure performance",
+      "duration": 53.18,
+      "status": "pass"
+    },
+    {
+      "name": "Voice Utils > should normalize transcript and remove garbage patterns",
+      "duration": 0.27,
+      "status": "pass"
+    },
+    {
+      "name": "Voice Utils > should remove content in parentheses",
+      "duration": 0.07,
+      "status": "pass"
+    },
+    {
+      "name": "Voice Utils > should filter out short lines",
+      "duration": 0.04,
+      "status": "pass"
+    },
+    {
+      "name": "Voice Utils > should remove multiple spaces",
+      "duration": 0.01,
+      "status": "pass"
+    },
+    {
+      "name": "Report Generation > should parse Bun test output and performance metrics",
+      "duration": 0.18,
+      "status": "pass"
+    },
+    {
+      "name": "Report Generation > should rank hotspots by duration and compare baselines",
+      "duration": 0.13,
+      "status": "pass"
+    },
+    {
+      "name": "Report Generation > should generate a report with hotspot and test sections",
+      "duration": 8.42,
+      "status": "pass"
+    }
+  ],
+  "performanceMetrics": [
+    {
+      "name": "Async_Voice_Video.safeSave",
+      "duration": 127.38,
+      "category": "media-synthesis"
+    },
+    {
+      "name": "SyncManager.addVideo",
+      "duration": 0.23,
+      "category": "media-synthesis"
+    },
+    {
+      "name": "SyncManager.addAudio",
+      "duration": 0.03,
+      "category": "sync-buffer"
+    },
+    {
+      "name": "Queue.push",
+      "duration": 98.01,
+      "category": "media-synthesis"
+    },
+    {
+      "name": "Socket.calculatePcmLevel",
+      "duration": 0.69,
+      "category": "socket-audio"
+    },
+    {
+      "name": "FaceEngine.loadModels",
+      "duration": 244.77,
+      "category": "face-inference"
+    },
+    {
+      "name": "FaceEngine.extractDescriptor",
+      "duration": 127.1,
+      "category": "face-inference"
+    },
+    {
+      "name": "FaceEngine.recognizeFaces",
+      "duration": 52.81,
+      "category": "face-inference"
+    }
+  ],
+  "summary": {
+    "pass": 18,
+    "fail": 0,
+    "total": 18,
+    "time": "2.58s"
+  },
+  "hotspots": [
+    {
+      "name": "FaceEngine.loadModels",
+      "duration": 244.77,
+      "category": "face-inference",
+      "rank": 1
+    },
+    {
+      "name": "Async_Voice_Video.safeSave",
+      "duration": 127.38,
+      "category": "media-synthesis",
+      "rank": 2
+    },
+    {
+      "name": "FaceEngine.extractDescriptor",
+      "duration": 127.1,
+      "category": "face-inference",
+      "rank": 3
+    },
+    {
+      "name": "Queue.push",
+      "duration": 98.01,
+      "category": "media-synthesis",
+      "rank": 4
+    },
+    {
+      "name": "FaceEngine.recognizeFaces",
+      "duration": 52.81,
+      "category": "face-inference",
+      "rank": 5
+    },
+    {
+      "name": "Socket.calculatePcmLevel",
+      "duration": 0.69,
+      "category": "socket-audio",
+      "rank": 6
+    },
+    {
+      "name": "SyncManager.addVideo",
+      "duration": 0.23,
+      "category": "media-synthesis",
+      "rank": 7
+    },
+    {
+      "name": "SyncManager.addAudio",
+      "duration": 0.03,
+      "category": "sync-buffer",
+      "rank": 8
+    }
+  ]
+}
