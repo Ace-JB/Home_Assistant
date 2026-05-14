@@ -184,6 +184,8 @@ function runProcess(command: string, args: string[], input?: Buffer): Promise<Pr
 export function normalizeTranscript(transcript: string): string {
     const garbagePatterns = [
         '请用简体中文清晰地回答',
+        'please answer clearly in english',
+        'answer clearly in english',
         '点赞', '订阅', '转发', '打赏',
         '谢谢大家', '字幕由', '字幕製作',
         'funasr', 'modelscope', 'version:', 'downloading', 'directory:', 'http',

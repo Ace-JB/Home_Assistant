@@ -8,20 +8,25 @@ export type SocketClientData = {
     realtimeSubtitleEnabled: boolean;
 };
 
+export type AssistantLanguage = 'zh' | 'en';
+
 type SocketMessage =
-    | { type: 'socket.connected'; ts: number; clientId: string; clients: number; realtimeSubtitleEnabled: boolean }
-    | { type: 'socket.status'; ts: number; clients: number; realtimeSubtitleEnabled: boolean }
+    | { type: 'socket.connected'; ts: number; clientId: string; clients: number; realtimeSubtitleEnabled: boolean; language: AssistantLanguage }
+    | { type: 'socket.status'; ts: number; clients: number; realtimeSubtitleEnabled: boolean; language: AssistantLanguage }
     | { type: 'video.frame'; ts: number; mime: 'image/jpeg'; data: string; meta?: unknown }
     | { type: 'voice.level'; ts: number; bytes: number; rms: number; peak: number }
-    | { type: 'voice.text'; ts: number; text: string; startTs: number; endTs: number };
+    | { type: 'voice.text'; ts: number; text: string; startTs: number; endTs: number }
+    | { type: 'vision.detection'; ts: number; faces: any[]; bodies: any[]; hands: any[]; objects: any[] };
 
 type SocketCommand =
     | { type: 'subtitle.enable'; enabled: boolean }
+    | { type: 'language.set'; language: AssistantLanguage }
     | { type: 'ping' };
 
 const SOCKET_PATH = '/ws/realtime';
 const clients = new Set<ServerWebSocket<SocketClientData>>();
 let standaloneServer: Server<SocketClientData> | null = null;
+let assistantLanguage: AssistantLanguage = 'zh';
 
 function createClientId(): string {
     return typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -69,6 +74,9 @@ function parseCommand(message: string | Buffer): SocketCommand | null {
     try {
         const parsed = JSON.parse(raw) as Partial<SocketCommand>;
         if (parsed.type === 'subtitle.enable' && typeof parsed.enabled === 'boolean') {
+            return parsed as SocketCommand;
+        }
+        if (parsed.type === 'language.set' && (parsed.language === 'zh' || parsed.language === 'en')) {
             return parsed as SocketCommand;
         }
     } catch {
@@ -130,6 +138,7 @@ export const realtimeSocket = {
                 clientId: ws.data.id,
                 clients: clients.size,
                 realtimeSubtitleEnabled: ws.data.realtimeSubtitleEnabled,
+                language: assistantLanguage,
             });
             realtimeSocket.publishStatus();
         },
@@ -143,12 +152,18 @@ export const realtimeSocket = {
                     ts: Date.now(),
                     clients: clients.size,
                     realtimeSubtitleEnabled: ws.data.realtimeSubtitleEnabled,
+                    language: assistantLanguage,
                 });
                 return;
             }
 
             if (command?.type === 'subtitle.enable') {
                 ws.data.realtimeSubtitleEnabled = command.enabled;
+                realtimeSocket.publishStatus();
+            }
+
+            if (command?.type === 'language.set') {
+                assistantLanguage = command.language;
                 realtimeSocket.publishStatus();
             }
         },
@@ -166,8 +181,13 @@ export const realtimeSocket = {
                 ts: Date.now(),
                 clients: clients.size,
                 realtimeSubtitleEnabled: client.data.realtimeSubtitleEnabled,
+                language: assistantLanguage,
             });
         }
+    },
+
+    getAssistantLanguage(): AssistantLanguage {
+        return assistantLanguage;
     },
 
     isRealtimeSubtitleEnabled(): boolean {
@@ -207,6 +227,18 @@ export const realtimeSocket = {
             text: normalized,
             startTs,
             endTs,
+        });
+    },
+
+    publishVisionDetection(detection: { faces: any[]; bodies: any[]; hands: any[]; objects: any[]; ts: number }): void {
+        if (clients.size === 0) return;
+        broadcast({
+            type: 'vision.detection',
+            ts: detection.ts,
+            faces: detection.faces,
+            bodies: detection.bodies,
+            hands: detection.hands,
+            objects: detection.objects,
         });
     },
 };

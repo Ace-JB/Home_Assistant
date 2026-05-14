@@ -8,6 +8,7 @@ export function useRealtimeFeedback(): RealtimeState {
   const [state, setState] = useState<RealtimeState>({
     connected: false,
     clients: 0,
+    language: 'zh',
     frameSrc: null,
     audioLevel: 0,
     transcript: '',
@@ -15,7 +16,9 @@ export function useRealtimeFeedback(): RealtimeState {
     subtitleEnabled: false,
     videoDelayMs: 5000,
     lastFrameAt: null,
+    visionDetection: null,
     setRealtimeSubtitle: () => {},
+    setLanguage: () => {},
     setVideoDelay: () => {},
   });
 
@@ -50,6 +53,7 @@ export function useRealtimeFeedback(): RealtimeState {
             connected: true,
             clients: message.clients,
             subtitleEnabled: message.realtimeSubtitleEnabled,
+            language: message.language,
           };
         }
 
@@ -74,6 +78,19 @@ export function useRealtimeFeedback(): RealtimeState {
           });
           subtitleCuesRef.current = subtitleCuesRef.current.slice(-40);
           return { ...prev, transcript: message.text };
+        }
+
+        if (message.type === 'vision.detection') {
+          return {
+            ...prev,
+            visionDetection: {
+              faces: message.faces,
+              bodies: message.bodies,
+              hands: message.hands,
+              objects: message.objects,
+              ts: message.ts,
+            },
+          };
         }
 
         return prev;
@@ -124,6 +141,12 @@ export function useRealtimeFeedback(): RealtimeState {
       setState((prev) => ({ ...prev, subtitleEnabled: enabled }));
       if (socketRef.current?.readyState === WebSocket.OPEN) {
         socketRef.current?.send(JSON.stringify({ type: 'subtitle.enable', enabled }));
+      }
+    },
+    setLanguage: (language: 'zh' | 'en') => {
+      setState((prev) => ({ ...prev, language }));
+      if (socketRef.current?.readyState === WebSocket.OPEN) {
+        socketRef.current?.send(JSON.stringify({ type: 'language.set', language }));
       }
     },
     setVideoDelay: (delayMs: number) => {

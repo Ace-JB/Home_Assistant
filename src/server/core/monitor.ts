@@ -5,7 +5,7 @@ import { realtimeSocket, startRealtimeSocketServer, calculatePcmLevel } from "@t
 
 import Pipe2Jpeg from 'pipe2jpeg';
 import { syncManager } from '@modules/media';
-import { faceEngine, type RecognizedFace } from '@modules/media/face';
+import { faceEngine, type HumanDetectionResult } from '@modules/media/face';
 import { faceValue } from '@tools/WiseRelex';
 import type { CameraRecognitionContext } from '@server/modules/brain';
 
@@ -15,7 +15,8 @@ const SILENCE_END_MS = 800; // 连续静音 800ms 认为说话结束
 
 let firstAudioReceived = false;
 
-function buildCameraRecognitionContext(faces: RecognizedFace[], ts: number): CameraRecognitionContext {
+function buildCameraRecognitionContext(detection: HumanDetectionResult): CameraRecognitionContext {
+    const { faces, bodies, hands, objects, ts } = detection;
     const recognizedLabels = [...new Set(
         faces
             .filter(face => face.matched)
@@ -45,8 +46,21 @@ function buildCameraRecognitionContext(faces: RecognizedFace[], ts: number): Cam
                 bestCandidate: bestFace?.candidateLabel ?? null,
                 similarity: bestFace?.similarity ?? null,
                 threshold: bestFace?.threshold,
-            },
+        },
         confidence: 'fresh',
+        bodies: bodies.map(body => ({
+            score: body.score,
+            keypointCount: body.keypointCount,
+        })),
+        hands: hands.map(hand => ({
+            score: hand.score,
+            handedness: hand.handedness,
+            gestures: hand.gestures,
+        })),
+        objects: objects.map(object => ({
+            label: object.label,
+            score: object.score,
+        })),
     };
 }
 
@@ -139,7 +153,12 @@ async function monitor() {
                         const { brain } = await import('@server/modules/brain');
                         const { speak } = await import('@tools/Voice');
 
-                        const response = await brain.processCommand(command, "主人", markRecognitionAge(latestCameraRecognition));
+                        const response = await brain.processCommand(
+                            command,
+                            "主人",
+                            markRecognitionAge(latestCameraRecognition),
+                            realtimeSocket.getAssistantLanguage()
+                        );
                         console.log(`🤖 AI 响应: ${response}`);
 
                         // 在说话期间停止监听，防止自唤醒循环
@@ -181,9 +200,13 @@ async function monitor() {
 
         if (!faceRecognitionRunning && faceValue.canExecute()) {
             faceRecognitionRunning = true;
-            void faceEngine.recognizeFaces(jpegBuffer)
-                .then((faces) => {
-                    latestCameraRecognition = buildCameraRecognitionContext(faces, Date.now());
+            void faceEngine.detectAll(jpegBuffer)
+                .then((detection: HumanDetectionResult) => {
+                    latestCameraRecognition = buildCameraRecognitionContext(detection);
+
+                    // 广播完整感知数据到前端
+                    realtimeSocket.publishVisionDetection(detection);
+
                     console.log(`[Vision] Face recognition context updated: ${JSON.stringify({
                         recognizedLabels: latestCameraRecognition.recognizedLabels,
                         hasStranger: latestCameraRecognition.hasStranger,
@@ -196,6 +219,9 @@ async function monitor() {
                             similarity: typeof face.similarity === 'number' ? Number(face.similarity.toFixed(4)) : face.similarity,
                         })),
                         identityVerification: latestCameraRecognition.identityVerification,
+                        bodies: detection.bodies.length,
+                        hands: detection.hands.length,
+                        objects: detection.objects.map(o => o.label),
                     })}`);
                 })
                 .catch((error) => {
