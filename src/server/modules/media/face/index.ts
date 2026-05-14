@@ -31,6 +31,41 @@ export type RecognizedFace = {
   box: { x: number; y: number; width: number; height: number };
 };
 
+export type EmotionScore = { emotion: string; score: number };
+
+/** RecognizedFace + top-3 emotion scores from Human */
+export type FaceDetection = RecognizedFace & {
+  emotions: EmotionScore[];
+};
+
+export type BodyDetection = {
+  score: number;
+  keypointCount: number;
+  box: { x: number; y: number; width: number; height: number };
+};
+
+export type HandDetection = {
+  score: number;
+  handedness: string;
+  gestures: string[];
+  box: { x: number; y: number; width: number; height: number };
+};
+
+export type ObjectDetection = {
+  label: string;
+  score: number;
+  box: { x: number; y: number; width: number; height: number };
+};
+
+/** Full output of one Human.detect() call across all enabled modules */
+export type HumanDetectionResult = {
+  faces: FaceDetection[];
+  bodies: BodyDetection[];
+  hands: HandDetection[];
+  objects: ObjectDetection[];
+  ts: number;
+};
+
 class FaceEngine {
   private isLoaded = false;
   private human!: Human;
@@ -44,13 +79,13 @@ class FaceEngine {
       mesh: { enabled: true }, // 提供更精准的特征点
       iris: { enabled: true }, // 可选：视线追踪
       description: { enabled: true }, // 必须开启以提取特征向量
-      emotion: { enabled: true }, // 禁用情绪识别，避免加载相关模型
+      emotion: { enabled: true }, // 开启情绪识别，关闭后可避免加载相关模型
     },
     // 针对 Apple Silicon 的优化
     softwareKernels: false,
-    // body: { enabled: false },
-    // hand: { enabled: false },
-    // object: { enabled: false },
+    body: { enabled: true },
+    hand: { enabled: true },
+    object: { enabled: true },
   };
 
   constructor() {
@@ -149,33 +184,29 @@ class FaceEngine {
     return null;
   }
 
-  // 针对视频流处理的高频识别方法
-  async recognizeFaces(imageBuffer: Buffer): Promise<RecognizedFace[]> {
+  // 完整感知检测：人脸 + 肢体 + 手部 + 物体（单次 human.detect 调用）
+  async detectAll(imageBuffer: Buffer): Promise<HumanDetectionResult> {
     if (!this.isLoaded) await this.loadModels();
 
-    // 💡 改进：不再使用固定 shape 的 tf.tensor3d
-    // 直接使用 tf.node.decodeImage 将 JPEG Buffer 解码为 Tensor
     const tensor = tf.node.decodeImage(imageBuffer, 3);
-
-    // 执行检测
     const result = await this.human.detect(tensor as any);
     tf.dispose(tensor);
 
-    if (!result.face || result.face.length === 0) return [];
-
     const records = db.getRecords();
 
-    return result.face.map(f => {
+    // --- 人脸识别 ---
+    const faces: FaceDetection[] = (result.face ?? []).map(f => {
       let match: FaceMatch = {
-        label: '未知陌生人',
-        distance: 1.0,
-        similarity: 0,
-        matched: false,
-        candidateLabel: null,
+        label: '未知陌生人', distance: 1.0, similarity: 0, matched: false, candidateLabel: null,
       };
       if (f.embedding && records.length > 0) {
         match = this.findBestMatch(f.embedding, records);
       }
+
+      const emotions: EmotionScore[] = ((f as any).emotion ?? [])
+        .sort((a: any, b: any) => b.score - a.score)
+        .slice(0, 3)
+        .map((e: any) => ({ emotion: e.emotion, score: Number(e.score.toFixed(3)) }));
 
       return {
         label: match.label,
@@ -184,9 +215,42 @@ class FaceEngine {
         similarity: match.candidateLabel ? match.similarity : null,
         candidateLabel: match.candidateLabel,
         threshold: GLOBAL_CONFIG.FACE.DISTANCE_THRESHOLD,
-        box: { x: f.box[0], y: f.box[1], width: f.box[2], height: f.box[3] }
+        emotions,
+        box: { x: f.box[0], y: f.box[1], width: f.box[2], height: f.box[3] },
       };
     });
+
+    // --- 肢体姿态 ---
+    const bodies: BodyDetection[] = (result.body ?? []).map((b: any) => ({
+      score: Number((b.score ?? 0).toFixed(3)),
+      keypointCount: b.keypoints?.length ?? 0,
+      box: { x: b.box[0], y: b.box[1], width: b.box[2], height: b.box[3] },
+    }));
+
+    // --- 手部追踪 ---
+    const hands: HandDetection[] = (result.hand ?? []).map((h: any) => ({
+      score: Number((h.score ?? 0).toFixed(3)),
+      handedness: h.handedness ?? 'unknown',
+      gestures: Array.isArray(h.gesture)
+        ? h.gesture.map((g: any) => (typeof g === 'string' ? g : (g.name ?? String(g)))).filter(Boolean)
+        : [],
+      box: { x: h.box[0], y: h.box[1], width: h.box[2], height: h.box[3] },
+    }));
+
+    // --- 物体检测 ---
+    const objects: ObjectDetection[] = (result.object ?? []).map((o: any) => ({
+      label: String(o.label ?? 'unknown'),
+      score: Number((o.score ?? 0).toFixed(3)),
+      box: { x: o.box[0], y: o.box[1], width: o.box[2], height: o.box[3] },
+    }));
+
+    return { faces, bodies, hands, objects, ts: Date.now() };
+  }
+
+  // 向后兼容：仅返回人脸识别结果（内部委托给 detectAll）
+  async recognizeFaces(imageBuffer: Buffer): Promise<RecognizedFace[]> {
+    const detection = await this.detectAll(imageBuffer);
+    return detection.faces;
   }
 }
 

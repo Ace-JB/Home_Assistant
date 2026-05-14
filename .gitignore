@@ -36,7 +36,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # models
 models
 
-# local db data
-db
+# local data
 temp_cache
 recordings
+src/server/db/*.sqlite
+src/server/db/*.sqlite-shm
+src/server/db/*.sqlite-wal

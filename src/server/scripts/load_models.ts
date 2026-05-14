@@ -16,15 +16,24 @@ const MODEL_DIR = path.join(process.cwd(), GLOBAL_CONFIG.MODELS.METADATA_DIR);
 const BASE_URL = 'https://raw.githubusercontent.com/vladmandic/human/master/models/';
 
 // 根据 FaceEngine 配置，需要下载以下模型
+// face: detector / mesh / description / iris / emotion
+// body: movenet-lightning
+// hand: handtrack / handlandmark-lite
+// object: nanodet
 const models = [
-  'blazeface.json', 'blazeface.bin',     // 基础检测器
-  'facemesh.json', 'facemesh.bin',       // 特征点与网格
-  'faceres.json', 'faceres.bin',         // 特征识别/比对 (重要：用于 Embedding)
-  'iris.json', 'iris.bin',               // 虹膜
-  'movenet-lightning.json', 'movenet-lightning.bin',
-  'handtrack.json', 'handtrack.bin',
-  'handlandmark-lite.json', 'handlandmark-lite.bin',
-  'emotion.json', 'emotion.bin',
+  // --- 人脸检测与识别 ---
+  'blazeface.json', 'blazeface.bin',             // 基础人脸检测器 (face.detector)
+  'facemesh.json', 'facemesh.bin',               // 面部特征网格 (face.mesh)
+  'faceres.json', 'faceres.bin',                 // 特征识别/比对 Embedding (face.description)
+  'iris.json', 'iris.bin',                       // 虹膜追踪 (face.iris)
+  'emotion.json', 'emotion.bin',                 // 情绪识别 (face.emotion)
+  // --- 肢体姿态 ---
+  'movenet-lightning.json', 'movenet-lightning.bin', // 身体姿态估计 (body)
+  // --- 手部追踪 ---
+  'handtrack.json', 'handtrack.bin',             // 手部检测 (hand)
+  'handlandmark-lite.json', 'handlandmark-lite.bin', // 手部关键点 (hand)
+  // --- 物体检测 ---
+  'centernet.json', 'centernet.bin',             // 物体检测 (object)
 ];
 
 // 确保目录存在
