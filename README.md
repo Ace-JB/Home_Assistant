@@ -1,30 +1,33 @@
 # Home Assistant - Sentinel
 
-# Performance Snapshot (May 12, 2026) ✅
+<!-- TEST_REPORT_START -->
+# Performance Snapshot (May 14, 2026) ✅
 
-The system has been verified with **18 automated tests** passing at 100%. Below are the latest local performance metrics from the server test suite:
+The system has been verified with **22 automated tests**. Below are the latest local performance metrics from the server test suite:
 
-| Component | Operation | Avg. Duration | Note |
+| Component | Operation | Duration | Note |
 | :--- | :--- | :--- | :--- |
-| **FaceEngine** | `loadModels` | **223.33 ms** | One-time startup / warmup |
-| **FaceEngine** | `extractDescriptor` | **104.23 ms** | Per-face feature extraction |
-| **FaceEngine** | `recognizeFaces` | **49.77 ms** | Detection plus similarity-based identity check |
-| **SyncManager** | `addVideo` | **0.19 ms** | Batched expiry cleanup / frame push overhead |
-| **Socket** | `calculatePcmLevel` | **0.94 ms** | 1s audio volume analysis |
-| **MediaSave** | `safeSave` | **133.15 ms** | Optimized MP4 synthesis |
-| **VoiceUtils** | `normalize` | **<1 ms** | Text cleanup & VAD filtering |
+| **Async_Voice_Video** | `safeSave` | **121.83 ms** | Optimized MP4 synthesis |
+| **FaceEngine** | `extractDescriptor` | **249.48 ms** | Per-face feature extraction |
+| **FaceEngine** | `loadModels` | **362.70 ms** | One-time startup / warmup |
+| **FaceEngine** | `recognizeFaces` | **49.11 ms** | Detection plus similarity-based identity check |
+| **Queue** | `push` | **83.68 ms** | Sequential task queue overhead |
+| **Socket** | `calculatePcmLevel` | **<1 ms** | Audio volume analysis |
+| **SyncManager** | `addAudio` | **<1 ms** | Audio buffer push overhead |
+| **SyncManager** | `addVideo` | **<1 ms** | Frame push overhead |
 
 Latest verification command:
 
 ```bash
-bun test src/server/test/*.test.ts --timeout 60000
+bun run test
 ```
 
-Result: **18 pass / 0 fail / 40 assertions** across 8 files in **2.53s**.
+Result: **22 pass / 0 fail / 62 assertions** across 9 files in **2.90s**.
 
 Generated reports:
 - `test-report.html`
 - `performance-report.json`
+<!-- TEST_REPORT_END -->
 
 ## Hardware & Environment
 - **TensorFlow Backend**: TensorFlow Node (Metal/Accelerate)
@@ -56,10 +59,10 @@ bun dev
 ### 4. Run Verification Suite
 ```bash
 # Run all tests
-bun test src/server/test/*.test.ts --timeout 60000
+bun run test
 
-# Run tests and generate HTML + JSON performance reports
-bun src/server/test/generate_report.ts
+# Run tests and generate HTML + JSON performance reports, then sync README.md
+bun run test:report
 
 # Type-check and build
 ./node_modules/.bin/tsc --noEmit

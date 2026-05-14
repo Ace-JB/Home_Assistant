@@ -115,11 +115,11 @@
         <div class="summary-cards">
             <div class="card">
                 <div class="label">Total Tests</div>
-                <div class="value">18</div>
+                <div class="value">22</div>
             </div>
             <div class="card pass">
                 <div class="label">Passed</div>
-                <div class="value">18</div>
+                <div class="value">22</div>
             </div>
             <div class="card fail">
                 <div class="label">Failed</div>
@@ -127,7 +127,7 @@
             </div>
             <div class="card">
                 <div class="label">Execution Time</div>
-                <div class="value">2.58s</div>
+                <div class="value">2.90s</div>
             </div>
         </div>
 
@@ -149,23 +149,23 @@
             <td>1</td>
             <td>FaceEngine.loadModels</td>
             <td>face-inference</td>
-            <td class="perf-val">244.77 ms</td>
+            <td class="perf-val">362.70 ms</td>
             <td>No baseline</td>
         </tr>
     
         <tr>
             <td>2</td>
-            <td>Async_Voice_Video.safeSave</td>
-            <td>media-synthesis</td>
-            <td class="perf-val">127.38 ms</td>
+            <td>FaceEngine.extractDescriptor</td>
+            <td>face-inference</td>
+            <td class="perf-val">249.48 ms</td>
             <td>No baseline</td>
         </tr>
     
         <tr>
             <td>3</td>
-            <td>FaceEngine.extractDescriptor</td>
-            <td>face-inference</td>
-            <td class="perf-val">127.10 ms</td>
+            <td>Async_Voice_Video.safeSave</td>
+            <td>media-synthesis</td>
+            <td class="perf-val">121.83 ms</td>
             <td>No baseline</td>
         </tr>
     
@@ -173,7 +173,7 @@
             <td>4</td>
             <td>Queue.push</td>
             <td>media-synthesis</td>
-            <td class="perf-val">98.01 ms</td>
+            <td class="perf-val">83.68 ms</td>
             <td>No baseline</td>
         </tr>
     
@@ -181,7 +181,7 @@
             <td>5</td>
             <td>FaceEngine.recognizeFaces</td>
             <td>face-inference</td>
-            <td class="perf-val">52.81 ms</td>
+            <td class="perf-val">49.11 ms</td>
             <td>No baseline</td>
         </tr>
     
@@ -189,7 +189,7 @@
             <td>6</td>
             <td>Socket.calculatePcmLevel</td>
             <td>socket-audio</td>
-            <td class="perf-val">0.69 ms</td>
+            <td class="perf-val">0.80 ms</td>
             <td>No baseline</td>
         </tr>
     
@@ -197,7 +197,7 @@
             <td>7</td>
             <td>SyncManager.addVideo</td>
             <td>media-synthesis</td>
-            <td class="perf-val">0.23 ms</td>
+            <td class="perf-val">0.15 ms</td>
             <td>No baseline</td>
         </tr>
     
@@ -239,19 +239,31 @@
         <tr class="pass">
             <td>PASS</td>
             <td>Media Save Performance &gt; should save a small snapshot as MP4 and measure performance</td>
-            <td>128.75ms</td>
+            <td>122.96ms</td>
         </tr>
     
         <tr class="pass">
             <td>PASS</td>
             <td>DetectionValve &gt; should allow execution based on frequency</td>
-            <td>601.22ms</td>
+            <td>600.24ms</td>
+        </tr>
+    
+        <tr class="pass">
+            <td>PASS</td>
+            <td>FaceDatabase &gt; should save, update, get, list, and remove face records</td>
+            <td>7.90ms</td>
+        </tr>
+    
+        <tr class="pass">
+            <td>PASS</td>
+            <td>FaceDatabase &gt; save should upsert records by name</td>
+            <td>4.15ms</td>
         </tr>
     
         <tr class="pass">
             <td>PASS</td>
             <td>SyncManager &gt; should add video frames and retrieve snapshot</td>
-            <td>0.46ms</td>
+            <td>0.33ms</td>
         </tr>
     
         <tr class="pass">
@@ -263,85 +275,97 @@
         <tr class="pass">
             <td>PASS</td>
             <td>SyncManager &gt; should clean old frames</td>
-            <td>1101.08ms</td>
+            <td>1100.33ms</td>
         </tr>
     
         <tr class="pass">
             <td>PASS</td>
             <td>SyncManager &gt; should calculate correct durationMs</td>
-            <td>0.24ms</td>
+            <td>0.19ms</td>
         </tr>
     
         <tr class="pass">
             <td>PASS</td>
             <td>SyncManager &gt; should prune multiple expired frames while preserving valid frames</td>
-            <td>0.27ms</td>
-        </tr>
-    
-        <tr class="pass">
-            <td>PASS</td>
-            <td>VideoSavingQueue &gt; should process tasks sequentially</td>
-            <td>101.29ms</td>
-        </tr>
-    
-        <tr class="pass">
-            <td>PASS</td>
-            <td>Socket Utils &gt; should calculate PCM level and measure performance</td>
-            <td>1.85ms</td>
-        </tr>
-    
-        <tr class="pass">
-            <td>PASS</td>
-            <td>FaceEngine Performance &gt; should extract descriptor and measure performance</td>
-            <td>127.24ms</td>
-        </tr>
-    
-        <tr class="pass">
-            <td>PASS</td>
-            <td>FaceEngine Performance &gt; should recognize faces and measure performance</td>
-            <td>53.18ms</td>
-        </tr>
-    
-        <tr class="pass">
-            <td>PASS</td>
-            <td>Voice Utils &gt; should normalize transcript and remove garbage patterns</td>
-            <td>0.27ms</td>
-        </tr>
-    
-        <tr class="pass">
-            <td>PASS</td>
-            <td>Voice Utils &gt; should remove content in parentheses</td>
-            <td>0.07ms</td>
-        </tr>
-    
-        <tr class="pass">
-            <td>PASS</td>
-            <td>Voice Utils &gt; should filter out short lines</td>
-            <td>0.04ms</td>
-        </tr>
-    
-        <tr class="pass">
-            <td>PASS</td>
-            <td>Voice Utils &gt; should remove multiple spaces</td>
-            <td>0.01ms</td>
-        </tr>
-    
-        <tr class="pass">
-            <td>PASS</td>
-            <td>Report Generation &gt; should parse Bun test output and performance metrics</td>
-            <td>0.18ms</td>
-        </tr>
-    
-        <tr class="pass">
-            <td>PASS</td>
-            <td>Report Generation &gt; should rank hotspots by duration and compare baselines</td>
             <td>0.13ms</td>
         </tr>
     
         <tr class="pass">
             <td>PASS</td>
+            <td>VideoSavingQueue &gt; should process tasks sequentially</td>
+            <td>84.50ms</td>
+        </tr>
+    
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Socket Utils &gt; should calculate PCM level and measure performance</td>
+            <td>1.98ms</td>
+        </tr>
+    
+        <tr class="pass">
+            <td>PASS</td>
+            <td>FaceEngine Performance &gt; should extract descriptor and measure performance</td>
+            <td>249.59ms</td>
+        </tr>
+    
+        <tr class="pass">
+            <td>PASS</td>
+            <td>FaceEngine Performance &gt; should recognize faces and measure performance</td>
+            <td>49.59ms</td>
+        </tr>
+    
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Voice Utils &gt; should normalize transcript and remove garbage patterns</td>
+            <td>0.26ms</td>
+        </tr>
+    
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Voice Utils &gt; should remove content in parentheses</td>
+            <td>0.05ms</td>
+        </tr>
+    
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Voice Utils &gt; should filter out short lines</td>
+            <td>0.02ms</td>
+        </tr>
+    
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Voice Utils &gt; should remove multiple spaces</td>
+            <td>0.03ms</td>
+        </tr>
+    
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Report Generation &gt; should parse Bun test output and performance metrics</td>
+            <td>0.31ms</td>
+        </tr>
+    
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Report Generation &gt; should rank hotspots by duration and compare baselines</td>
+            <td>0.05ms</td>
+        </tr>
+    
+        <tr class="pass">
+            <td>PASS</td>
             <td>Report Generation &gt; should generate a report with hotspot and test sections</td>
-            <td>8.42ms</td>
+            <td>8.62ms</td>
+        </tr>
+    
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Report Generation &gt; should generate a README report block</td>
+            <td>0.43ms</td>
+        </tr>
+    
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Report Generation &gt; should sync the managed README report block</td>
+            <td>1.13ms</td>
         </tr>
     
                 </tbody>
@@ -349,7 +373,7 @@
         </section>
 
         <div class="timestamp">
-            Generated at: 5/12/2026, 10:03:47 AM
+            Generated at: 5/14/2026, 4:06:44 PM
         </div>
     </div>
 </body>

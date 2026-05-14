@@ -11,7 +11,7 @@
     "check": "bun run typecheck && bun run build",
     "monitor": "bun --watch src/server/core/monitor.ts",
     "download_models": "bun run src/server/scripts/load_models.ts",
-    "test": "bun test src/server/test/*.test.ts",
+    "test": "bun run test:report",
     "test:perf": "bun test src/server/test/*.test.ts --timeout 60000",
     "test:report": "bun run src/server/test/generate_report.ts",
     "terminate_media": "bun run src/server/scripts/terminate_media.ts",
