@@ -57,6 +57,13 @@ export type SubtitleCue = {
   text: string;
 };
 
+export type TranscriptEntry = {
+  startTs: number;
+  endTs: number;
+  text: string;
+  ts: number;
+};
+
 export type RealtimeState = {
   connected: boolean;
   clients: number;
@@ -64,6 +71,7 @@ export type RealtimeState = {
   frameSrc: string | null;
   audioLevel: number;
   transcript: string;
+  transcriptHistory: TranscriptEntry[];
   activeSubtitle: string;
   subtitleEnabled: boolean;
   videoDelayMs: number;

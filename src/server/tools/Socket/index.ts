@@ -27,6 +27,7 @@ const SOCKET_PATH = '/ws/realtime';
 const clients = new Set<ServerWebSocket<SocketClientData>>();
 let standaloneServer: Server<SocketClientData> | null = null;
 let assistantLanguage: AssistantLanguage = 'zh';
+const REALTIME_SUBTITLE_ENABLED = true;
 
 function createClientId(): string {
     return typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -52,16 +53,6 @@ function broadcast(message: SocketMessage): void {
             client.send(serialized);
         }
     }
-}
-
-function hasRealtimeSubtitleSubscribers(): boolean {
-    for (const client of clients) {
-        if (client.data.realtimeSubtitleEnabled) {
-            return true;
-        }
-    }
-
-    return false;
 }
 
 function parseCommand(message: string | Buffer): SocketCommand | null {
@@ -118,7 +109,7 @@ export const realtimeSocket = {
             data: {
                 id: createClientId(),
                 connectedAt: Date.now(),
-                realtimeSubtitleEnabled: false,
+                realtimeSubtitleEnabled: REALTIME_SUBTITLE_ENABLED,
             },
         });
 
@@ -137,7 +128,7 @@ export const realtimeSocket = {
                 ts: Date.now(),
                 clientId: ws.data.id,
                 clients: clients.size,
-                realtimeSubtitleEnabled: ws.data.realtimeSubtitleEnabled,
+                realtimeSubtitleEnabled: REALTIME_SUBTITLE_ENABLED,
                 language: assistantLanguage,
             });
             realtimeSocket.publishStatus();
@@ -151,7 +142,7 @@ export const realtimeSocket = {
                     type: 'socket.status',
                     ts: Date.now(),
                     clients: clients.size,
-                    realtimeSubtitleEnabled: ws.data.realtimeSubtitleEnabled,
+                    realtimeSubtitleEnabled: REALTIME_SUBTITLE_ENABLED,
                     language: assistantLanguage,
                 });
                 return;
@@ -180,7 +171,7 @@ export const realtimeSocket = {
                 type: 'socket.status',
                 ts: Date.now(),
                 clients: clients.size,
-                realtimeSubtitleEnabled: client.data.realtimeSubtitleEnabled,
+                realtimeSubtitleEnabled: REALTIME_SUBTITLE_ENABLED,
                 language: assistantLanguage,
             });
         }
@@ -191,7 +182,7 @@ export const realtimeSocket = {
     },
 
     isRealtimeSubtitleEnabled(): boolean {
-        return hasRealtimeSubtitleSubscribers();
+        return true;
     },
 
     publishVideoFrame(frame: Buffer, meta?: unknown): void {

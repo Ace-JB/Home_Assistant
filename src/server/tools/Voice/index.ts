@@ -13,6 +13,11 @@ type ProcessResult = {
     stderr: string;
 };
 
+export type InterruptibleSpeech = {
+    done: Promise<void>;
+    stop: () => void;
+};
+
 /**
  * 初始化麦克风音频流 (生产者函数)
  */
@@ -91,6 +96,9 @@ export async function extractTextFromVoiceStream(audio: Buffer): Promise<string>
     if (audio.length === 0) {
         return '';
     }
+    if (!isLikelySpeechAudio(audio)) {
+        return '';
+    }
 
     const sessionDir = await fs.mkdtemp(join(tmpdir(), 'ha-voice-'));
     const wavPath = join(sessionDir, 'audio.wav');
@@ -115,6 +123,27 @@ export async function extractTextFromVoiceStream(audio: Buffer): Promise<string>
     } finally {
         await fs.rm(sessionDir, { recursive: true, force: true }).catch(() => { });
     }
+}
+
+function isLikelySpeechAudio(audio: Buffer): boolean {
+    const sampleRate = Number(GLOBAL_CONFIG.VOICE.SAMPLE_RATE);
+    const durationMs = sampleRate > 0 ? (audio.length / 2 / sampleRate) * 1000 : 0;
+    if (durationMs < 250) {
+        return false;
+    }
+
+    let peak = 0;
+    let sumSquares = 0;
+    let samples = 0;
+    for (let offset = 0; offset + 1 < audio.length; offset += 2) {
+        const sample = audio.readInt16LE(offset) / 32768;
+        const abs = Math.abs(sample);
+        peak = Math.max(peak, abs);
+        sumSquares += sample * sample;
+        samples++;
+    }
+    const rms = samples > 0 ? Math.sqrt(sumSquares / samples) : 0;
+    return peak >= 0.02 && rms >= 0.003;
 }
 
 async function convertPcmToWav(audio: Buffer, wavPath: string): Promise<void> {
@@ -209,27 +238,112 @@ export function normalizeTranscript(transcript: string): string {
     return cleaned;
 }
 
-export async function speak(text: string, options: { rate?: number; voice?: string } = {}): Promise<void> {
-    const { rate = 180, voice = 'Tingting' } = options;
-    const voiceArg = `-v "${voice}"`;
+export function calculateTextSimilarity(a: string, b: string): number {
+    const left = tokenizeForSimilarity(a);
+    const right = tokenizeForSimilarity(b);
+    if (left.length === 0 || right.length === 0) return 0;
 
-    // 预处理文本：移除括号内的英文（防止 TTS 语调突变），移除多余空格
-    const cleanedText = text
+    const leftSet = new Set(left);
+    const rightSet = new Set(right);
+    let intersection = 0;
+    for (const token of leftSet) {
+        if (rightSet.has(token)) intersection++;
+    }
+
+    return intersection / Math.min(leftSet.size, rightSet.size);
+}
+
+export function isEchoLikeTranscript(transcript: string, spokenText: string, threshold: number): boolean {
+    return calculateTextSimilarity(transcript, spokenText) >= threshold;
+}
+
+export function hasBargeInKeyword(transcript: string, keywords: readonly string[]): boolean {
+    const normalized = transcript.trim();
+    const lower = normalized.toLowerCase();
+    return keywords.some(keyword => {
+        const item = keyword.trim().toLowerCase();
+        return item.length > 0 && lower.includes(item);
+    });
+}
+
+export function isValidBargeInTranscript(
+    transcript: string,
+    wakeWord: string,
+    keywords: readonly string[] = [],
+): boolean {
+    const normalized = transcript.trim();
+    if (hasBargeInKeyword(normalized, keywords)) return true;
+    if (normalized.length < 2) return false;
+    if (normalized === wakeWord) return false;
+    if (/^(嗯+|啊+|哦+|呃+|额+|唔+|喂+|hi|hey|um+|uh+)$/i.test(normalized)) return false;
+    return true;
+}
+
+function tokenizeForSimilarity(value: string): string[] {
+    const normalized = value.toLowerCase().replace(/[^\p{Script=Han}\p{L}\p{N}]+/gu, ' ');
+    const words = normalized
+        .split(/\s+/)
+        .map(item => item.trim())
+        .filter(item => item.length > 1);
+    const cjkBigrams = Array.from(normalized.matchAll(/[\p{Script=Han}]{2,}/gu))
+        .flatMap(match => {
+            const chars = Array.from(match[0]);
+            const bigrams: string[] = [];
+            for (let index = 0; index < chars.length - 1; index++) {
+                bigrams.push(`${chars[index]}${chars[index + 1]}`);
+            }
+            return bigrams;
+        });
+
+    return [...words, ...cjkBigrams];
+}
+
+export function speakInterruptible(text: string, options: { rate?: number; voice?: string } = {}): InterruptibleSpeech {
+    const { rate = 180, voice = 'Tingting' } = options;
+    const cleanedText = cleanSpeechText(text);
+
+    if (!cleanedText) {
+        return {
+            done: Promise.resolve(),
+            stop: () => undefined,
+        };
+    }
+
+    const child = spawn('say', ['-v', voice, '-r', String(rate), cleanedText], {
+        stdio: 'ignore',
+    });
+    let stopped = false;
+
+    const done = new Promise<void>((resolve, reject) => {
+        child.once('error', reject);
+        child.once('exit', (code, signal) => {
+            if (stopped || signal === 'SIGTERM' || code === 0) {
+                resolve();
+                return;
+            }
+            reject(new Error(`say exited with code=${code}, signal=${signal}`));
+        });
+    });
+
+    return {
+        done,
+        stop: () => {
+            stopped = true;
+            if (!child.killed) {
+                child.kill('SIGTERM');
+            }
+        },
+    };
+}
+
+export async function speak(text: string, options: { rate?: number; voice?: string } = {}): Promise<void> {
+    return speakInterruptible(text, options).done;
+}
+
+function cleanSpeechText(text: string): string {
+    return text
         .replace(/\([^)]*\)/g, '')
         .replace(/（[^）]*）/g, '')
         .replace(/\s+/g, ' ')
         .trim();
-
-    if (!cleanedText) return;
-
-    return new Promise((resolve, reject) => {
-        const safeText = cleanedText.replace(/"/g, '\\"');
-        exec(`say ${voiceArg} -r ${rate} "${safeText}"`, (error) => {
-            if (error) {
-                reject(error);
-                return;
-            }
-            resolve();
-        });
-    });
 }
