@@ -1,17 +1,17 @@
 # Home Assistant - Sentinel
 
 <!-- TEST_REPORT_START -->
-# Performance Snapshot (May 22, 2026) ✅
+# Performance Snapshot (May 27, 2026) ✅
 
-The system has been verified with **61 automated tests**. Below are the latest local performance metrics from the server test suite:
+The system has been verified with **65 automated tests**. Below are the latest local performance metrics from the server test suite:
 
 | Component | Operation | Duration | Note |
 | :--- | :--- | :--- | :--- |
-| **Async_Voice_Video** | `safeSave` | **138.25 ms** | Optimized MP4 synthesis |
-| **FaceEngine** | `extractDescriptor` | **191.19 ms** | Per-face feature extraction |
-| **FaceEngine** | `loadModels` | **380.39 ms** | One-time startup / warmup |
-| **FaceEngine** | `recognizeFaces` | **54.31 ms** | Detection plus similarity-based identity check |
-| **Queue** | `push` | **97.95 ms** | Sequential task queue overhead |
+| **Async_Voice_Video** | `safeSave` | **118.50 ms** | Optimized MP4 synthesis |
+| **FaceEngine** | `extractDescriptor` | **146.76 ms** | Per-face feature extraction |
+| **FaceEngine** | `loadModels` | **281.59 ms** | One-time startup / warmup |
+| **FaceEngine** | `recognizeFaces` | **44.88 ms** | Detection plus similarity-based identity check |
+| **Queue** | `push` | **78.42 ms** | Sequential task queue overhead |
 | **Socket** | `calculatePcmLevel` | **<1 ms** | Audio volume analysis |
 | **SyncManager** | `addAudio` | **<1 ms** | Audio buffer push overhead |
 | **SyncManager** | `addVideo` | **<1 ms** | Frame push overhead |
@@ -22,7 +22,7 @@ Latest verification command:
 bun run test
 ```
 
-Result: **61 pass / 0 fail / 176 assertions** across 12 files in **2.97s**.
+Result: **65 pass / 0 fail / 194 assertions** across 12 files in **2.89s**.
 
 Generated reports:
 - `test-report.html`
