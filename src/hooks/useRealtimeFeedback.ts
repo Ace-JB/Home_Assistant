@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { RealtimeMessage, BufferedFrame, SubtitleCue, RealtimeState } from '../types/realtime';
+import type { RealtimeMessage, BufferedFrame, SubtitleCue, RealtimeState, TranscriptEntry } from '../types/realtime';
 
 export function useRealtimeFeedback(): RealtimeState {
   const socketRef = useRef<WebSocket | null>(null);
@@ -12,8 +12,9 @@ export function useRealtimeFeedback(): RealtimeState {
     frameSrc: null,
     audioLevel: 0,
     transcript: '',
+    transcriptHistory: [],
     activeSubtitle: '',
-    subtitleEnabled: false,
+    subtitleEnabled: true,
     videoDelayMs: 5000,
     lastFrameAt: null,
     visionDetection: null,
@@ -71,13 +72,23 @@ export function useRealtimeFeedback(): RealtimeState {
         }
 
         if (message.type === 'voice.text') {
+          const entry: TranscriptEntry = {
+            startTs: message.startTs,
+            endTs: message.endTs,
+            text: message.text,
+            ts: message.ts,
+          };
           subtitleCuesRef.current.push({
             startTs: message.startTs,
             endTs: message.endTs,
             text: message.text,
           });
           subtitleCuesRef.current = subtitleCuesRef.current.slice(-40);
-          return { ...prev, transcript: message.text };
+          return {
+            ...prev,
+            transcript: message.text,
+            transcriptHistory: [...prev.transcriptHistory, entry].slice(-20),
+          };
         }
 
         if (message.type === 'vision.detection') {

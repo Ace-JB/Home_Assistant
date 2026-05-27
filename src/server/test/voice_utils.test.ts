@@ -1,5 +1,11 @@
 import { expect, test, describe } from "bun:test";
-import { normalizeTranscript } from "@tools/Voice";
+import {
+    calculateTextSimilarity,
+    hasBargeInKeyword,
+    isEchoLikeTranscript,
+    isValidBargeInTranscript,
+    normalizeTranscript,
+} from "@tools/Voice";
 
 describe("Voice Utils", () => {
     test("should normalize transcript and remove garbage patterns", () => {
@@ -24,5 +30,33 @@ describe("Voice Utils", () => {
         const input = "你好    管家";
         const expected = "你好 管家";
         expect(normalizeTranscript(input)).toBe(expected);
+    });
+
+    test("should detect echo-like transcripts", () => {
+        const spoken = "番茄炒蛋的做法如下，先炒鸡蛋，再炒番茄。";
+
+        expect(isEchoLikeTranscript("番茄炒蛋的做法如下，先炒鸡蛋", spoken, 0.65)).toBe(true);
+        expect(isEchoLikeTranscript("不是这个，我刚才说错了", spoken, 0.65)).toBe(false);
+    });
+
+    test("should calculate lower similarity for unrelated text", () => {
+        const similarity = calculateTextSimilarity("请停一下", "番茄炒蛋的做法如下");
+
+        expect(similarity).toBeLessThan(0.65);
+    });
+
+    test("should filter invalid barge-in candidates", () => {
+        expect(isValidBargeInTranscript("嗯", "蛋蛋")).toBe(false);
+        expect(isValidBargeInTranscript("蛋蛋", "蛋蛋")).toBe(false);
+        expect(isValidBargeInTranscript("停一下，我说错了", "蛋蛋")).toBe(true);
+    });
+
+    test("should detect configured barge-in keywords", () => {
+        const keywords = ["停一下", "别说了", "wait"];
+
+        expect(hasBargeInKeyword("请停一下", keywords)).toBe(true);
+        expect(hasBargeInKeyword("WAIT a second", keywords)).toBe(true);
+        expect(hasBargeInKeyword("继续说", keywords)).toBe(false);
+        expect(isValidBargeInTranscript("停", "蛋蛋", ["停"])).toBe(true);
     });
 });

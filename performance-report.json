@@ -2,211 +2,406 @@
   "tests": [
     {
       "name": "Media Save Performance > should save a small snapshot as MP4 and measure performance",
-      "duration": 122.96,
+      "duration": 140.18,
       "status": "pass"
     },
     {
-      "name": "DetectionValve > should allow execution based on frequency",
-      "duration": 600.24,
+      "name": "Intention analysis > should use model output for abstract cooking topic instead of keyword rules",
+      "duration": 0.53,
       "status": "pass"
     },
     {
-      "name": "FaceDatabase > should save, update, get, list, and remove face records",
-      "duration": 7.9,
+      "name": "Intention analysis > should use model output for recent memory recall",
+      "duration": 0.09,
       "status": "pass"
     },
     {
-      "name": "FaceDatabase > save should upsert records by name",
-      "duration": 4.15,
-      "status": "pass"
-    },
-    {
-      "name": "SyncManager > should add video frames and retrieve snapshot",
-      "duration": 0.33,
-      "status": "pass"
-    },
-    {
-      "name": "SyncManager > should add audio frames and retrieve snapshot",
-      "duration": 0.13,
-      "status": "pass"
-    },
-    {
-      "name": "SyncManager > should clean old frames",
-      "duration": 1100.33,
-      "status": "pass"
-    },
-    {
-      "name": "SyncManager > should calculate correct durationMs",
+      "name": "Intention analysis > should correct contradictory memory recall output that disables memory",
       "duration": 0.19,
       "status": "pass"
     },
     {
-      "name": "SyncManager > should prune multiple expired frames while preserving valid frames",
-      "duration": 0.13,
+      "name": "Intention analysis > should use model output to rewrite short follow-ups with context",
+      "duration": 0.35,
       "status": "pass"
     },
     {
-      "name": "VideoSavingQueue > should process tasks sequentially",
-      "duration": 84.5,
-      "status": "pass"
-    },
-    {
-      "name": "Socket Utils > should calculate PCM level and measure performance",
-      "duration": 1.98,
-      "status": "pass"
-    },
-    {
-      "name": "FaceEngine Performance > should extract descriptor and measure performance",
-      "duration": 249.59,
-      "status": "pass"
-    },
-    {
-      "name": "FaceEngine Performance > should recognize faces and measure performance",
-      "duration": 49.59,
-      "status": "pass"
-    },
-    {
-      "name": "Voice Utils > should normalize transcript and remove garbage patterns",
-      "duration": 0.26,
-      "status": "pass"
-    },
-    {
-      "name": "Voice Utils > should remove content in parentheses",
-      "duration": 0.05,
-      "status": "pass"
-    },
-    {
-      "name": "Voice Utils > should filter out short lines",
-      "duration": 0.02,
-      "status": "pass"
-    },
-    {
-      "name": "Voice Utils > should remove multiple spaces",
-      "duration": 0.03,
-      "status": "pass"
-    },
-    {
-      "name": "Report Generation > should parse Bun test output and performance metrics",
-      "duration": 0.31,
-      "status": "pass"
-    },
-    {
-      "name": "Report Generation > should rank hotspots by duration and compare baselines",
-      "duration": 0.05,
-      "status": "pass"
-    },
-    {
-      "name": "Report Generation > should generate a report with hotspot and test sections",
-      "duration": 8.62,
-      "status": "pass"
-    },
-    {
-      "name": "Report Generation > should generate a README report block",
+      "name": "Intention analysis > should use model output to avoid memory retrieval for device control",
       "duration": 0.43,
       "status": "pass"
     },
     {
+      "name": "Intention analysis > should treat affirmative answer to recipe proposal as current-session follow-up",
+      "duration": 0.38,
+      "status": "pass"
+    },
+    {
+      "name": "Intention analysis > should rewrite \"来一个\" after recipe proposal without long-term memory retrieval",
+      "duration": 0.1,
+      "status": "pass"
+    },
+    {
+      "name": "Intention analysis > should not trigger recipe proposal handling without recent assistant proposal",
+      "duration": 0.11,
+      "status": "pass"
+    },
+    {
+      "name": "Intention analysis > should fall back to semantic retrieval on invalid json",
+      "duration": 0.07,
+      "status": "pass"
+    },
+    {
+      "name": "Intention analysis > should let model disable memory and end session for closing answers",
+      "duration": 0.09,
+      "status": "pass"
+    },
+    {
+      "name": "Intention analysis > should let model ignore non-actionable input without memory retrieval",
+      "duration": 0.06,
+      "status": "pass"
+    },
+    {
+      "name": "Intention analysis > should fall back to recent context rewrite when model fails on short follow-up",
+      "duration": 0.37,
+      "status": "pass"
+    },
+    {
+      "name": "DetectionValve > should allow execution based on frequency",
+      "duration": 601.22,
+      "status": "pass"
+    },
+    {
+      "name": "FaceDatabase > should save, update, get, list, and remove face records",
+      "duration": 8.01,
+      "status": "pass"
+    },
+    {
+      "name": "FaceDatabase > save should upsert records by name",
+      "duration": 4.95,
+      "status": "pass"
+    },
+    {
+      "name": "SyncManager > should add video frames and retrieve snapshot",
+      "duration": 0.48,
+      "status": "pass"
+    },
+    {
+      "name": "SyncManager > should add audio frames and retrieve snapshot",
+      "duration": 0.2,
+      "status": "pass"
+    },
+    {
+      "name": "SyncManager > should clean old frames",
+      "duration": 1101.32,
+      "status": "pass"
+    },
+    {
+      "name": "SyncManager > should calculate correct durationMs",
+      "duration": 0.3,
+      "status": "pass"
+    },
+    {
+      "name": "SyncManager > should prune multiple expired frames while preserving valid frames",
+      "duration": 0.22,
+      "status": "pass"
+    },
+    {
+      "name": "HomeBrain > should answer assistant proposal using resolved rewrite without long-term memory",
+      "duration": 0.85,
+      "status": "pass"
+    },
+    {
+      "name": "VideoSavingQueue > should process tasks sequentially",
+      "duration": 98.53,
+      "status": "pass"
+    },
+    {
+      "name": "Socket Utils > should calculate PCM level and measure performance",
+      "duration": 1.94,
+      "status": "pass"
+    },
+    {
+      "name": "FaceEngine Performance > should extract descriptor and measure performance",
+      "duration": 191.32,
+      "status": "pass"
+    },
+    {
+      "name": "FaceEngine Performance > should recognize faces and measure performance",
+      "duration": 54.91,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should create and get a conversation session by conversation_id",
+      "duration": 11.74,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should append multiple user-agent turns to one session",
+      "duration": 4.39,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should hide empty conversation sessions from search and count",
+      "duration": 4.63,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should remove empty conversation sessions on initialization",
+      "duration": 4.55,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should return recent conversation messages for follow-up context",
+      "duration": 3.95,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should fuzzy search session messages",
+      "duration": 4.3,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should search sessions by time period",
+      "duration": 4.05,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should paginate newest-first sessions",
+      "duration": 4.02,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should count sessions with and without filters",
+      "duration": 4.22,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should remove a single conversation session",
+      "duration": 3.67,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should save pruned memories in a separate table and search them for context",
+      "duration": 5.45,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should update and remove pruned memories",
+      "duration": 3.89,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should update instead of duplicating pruned memories for the same source session",
+      "duration": 3.72,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should create new pruned memories as warm even with a low base score",
+      "duration": 4.04,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should rank context memories by content and situation and update hit count",
+      "duration": 4.11,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should rank context memories with heat score decay over time",
+      "duration": 3.98,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should not inject hot memories without semantic relevance",
+      "duration": 4.16,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should not inject memories from situation match alone",
+      "duration": 3.93,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should use situation and heat only to rank semantically relevant memories",
+      "duration": 3.88,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should return recent long-term memories for recent recall mode",
+      "duration": 4.67,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should supplement semantic results with recent memories in hybrid mode",
+      "duration": 4.75,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should archive the old exchange table before creating the session table",
+      "duration": 4.81,
+      "status": "pass"
+    },
+    {
+      "name": "Voice Utils > should normalize transcript and remove garbage patterns",
+      "duration": 0.22,
+      "status": "pass"
+    },
+    {
+      "name": "Voice Utils > should remove content in parentheses",
+      "duration": 0.04,
+      "status": "pass"
+    },
+    {
+      "name": "Voice Utils > should filter out short lines",
+      "duration": 0.05,
+      "status": "pass"
+    },
+    {
+      "name": "Voice Utils > should remove multiple spaces",
+      "duration": 0.01,
+      "status": "pass"
+    },
+    {
+      "name": "Voice Utils > should detect echo-like transcripts",
+      "duration": 0.86,
+      "status": "pass"
+    },
+    {
+      "name": "Voice Utils > should calculate lower similarity for unrelated text",
+      "duration": 0.23,
+      "status": "pass"
+    },
+    {
+      "name": "Voice Utils > should filter invalid barge-in candidates",
+      "duration": 0.11,
+      "status": "pass"
+    },
+    {
+      "name": "Voice Utils > should detect configured barge-in keywords",
+      "duration": 0.04,
+      "status": "pass"
+    },
+    {
+      "name": "Report Generation > should parse Bun test output and performance metrics",
+      "duration": 0.19,
+      "status": "pass"
+    },
+    {
+      "name": "Report Generation > should rank hotspots by duration and compare baselines",
+      "duration": 0.18,
+      "status": "pass"
+    },
+    {
+      "name": "Report Generation > should generate a report with hotspot and test sections",
+      "duration": 10.01,
+      "status": "pass"
+    },
+    {
+      "name": "Report Generation > should generate a README report block",
+      "duration": 0.92,
+      "status": "pass"
+    },
+    {
       "name": "Report Generation > should sync the managed README report block",
-      "duration": 1.13,
+      "duration": 1.12,
       "status": "pass"
     }
   ],
   "performanceMetrics": [
     {
       "name": "Async_Voice_Video.safeSave",
-      "duration": 121.83,
+      "duration": 138.25,
       "category": "media-synthesis"
     },
     {
       "name": "SyncManager.addVideo",
-      "duration": 0.15,
+      "duration": 0.19,
       "category": "media-synthesis"
     },
     {
       "name": "SyncManager.addAudio",
-      "duration": 0.03,
+      "duration": 0.04,
       "category": "sync-buffer"
     },
     {
       "name": "Queue.push",
-      "duration": 83.68,
+      "duration": 97.95,
       "category": "media-synthesis"
     },
     {
       "name": "Socket.calculatePcmLevel",
-      "duration": 0.8,
+      "duration": 0.7,
       "category": "socket-audio"
     },
     {
       "name": "FaceEngine.loadModels",
-      "duration": 362.7,
+      "duration": 380.39,
       "category": "face-inference"
     },
     {
       "name": "FaceEngine.extractDescriptor",
-      "duration": 249.48,
+      "duration": 191.19,
       "category": "face-inference"
     },
     {
       "name": "FaceEngine.recognizeFaces",
-      "duration": 49.11,
+      "duration": 54.31,
       "category": "face-inference"
     }
   ],
   "summary": {
-    "pass": 22,
+    "pass": 61,
     "fail": 0,
-    "total": 22,
-    "time": "2.90s",
-    "files": 9,
-    "assertions": 62
+    "total": 61,
+    "time": "2.97s",
+    "files": 12,
+    "assertions": 176
   },
   "hotspots": [
     {
       "name": "FaceEngine.loadModels",
-      "duration": 362.7,
+      "duration": 380.39,
       "category": "face-inference",
       "rank": 1
     },
     {
       "name": "FaceEngine.extractDescriptor",
-      "duration": 249.48,
+      "duration": 191.19,
       "category": "face-inference",
       "rank": 2
     },
     {
       "name": "Async_Voice_Video.safeSave",
-      "duration": 121.83,
+      "duration": 138.25,
       "category": "media-synthesis",
       "rank": 3
     },
     {
       "name": "Queue.push",
-      "duration": 83.68,
+      "duration": 97.95,
       "category": "media-synthesis",
       "rank": 4
     },
     {
       "name": "FaceEngine.recognizeFaces",
-      "duration": 49.11,
+      "duration": 54.31,
       "category": "face-inference",
       "rank": 5
     },
     {
       "name": "Socket.calculatePcmLevel",
-      "duration": 0.8,
+      "duration": 0.7,
       "category": "socket-audio",
       "rank": 6
     },
     {
       "name": "SyncManager.addVideo",
-      "duration": 0.15,
+      "duration": 0.19,
       "category": "media-synthesis",
       "rank": 7
     },
     {
       "name": "SyncManager.addAudio",
-      "duration": 0.03,
+      "duration": 0.04,
       "category": "sync-buffer",
       "rank": 8
     }

@@ -10,7 +10,8 @@ export class FunASRService {
     private static instance: FunASRService;
     private process: ChildProcess | null = null;
     private isReady = false;
-    private pendingResolver: ((text: string) => void) | null = null;
+    private activeRequest: { wavPath: string; resolve: (text: string) => void } | null = null;
+    private requestQueue: Array<{ wavPath: string; resolve: (text: string) => void }> = [];
     private startPromise: Promise<void> | null = null;
 
     private constructor() {}
@@ -54,16 +55,10 @@ export class FunASRService {
                         resolve();
                     } else if (trimmedLine.startsWith('RESULT:')) {
                         const text = trimmedLine.replace('RESULT:', '').trim();
-                        if (this.pendingResolver) {
-                            this.pendingResolver(text);
-                            this.pendingResolver = null;
-                        }
+                        this.resolveActive(text);
                     } else if (trimmedLine.startsWith('ERROR:')) {
                         console.error('[FunASR Service Error]', trimmedLine);
-                        if (this.pendingResolver) {
-                            this.pendingResolver('');
-                            this.pendingResolver = null;
-                        }
+                        this.resolveActive('');
                     }
                 }
             });
@@ -83,6 +78,10 @@ export class FunASRService {
                 this.isReady = false;
                 this.process = null;
                 this.startPromise = null;
+                this.resolveActive('');
+                while (this.requestQueue.length > 0) {
+                    this.requestQueue.shift()?.resolve('');
+                }
             });
         });
 
@@ -92,12 +91,8 @@ export class FunASRService {
     async transcribe(wavPath: string): Promise<string> {
         await this.start();
         return new Promise((resolve) => {
-            if (!this.process || !this.process.stdin) {
-                resolve('');
-                return;
-            }
-            this.pendingResolver = resolve;
-            this.process.stdin.write(`${wavPath}\n`);
+            this.requestQueue.push({ wavPath, resolve });
+            this.processNext();
         });
     }
 
@@ -108,7 +103,30 @@ export class FunASRService {
             this.process = null;
             this.isReady = false;
             this.startPromise = null;
+            this.resolveActive('');
+            while (this.requestQueue.length > 0) {
+                this.requestQueue.shift()?.resolve('');
+            }
         }
+    }
+
+    private processNext(): void {
+        if (this.activeRequest || !this.process || !this.process.stdin) {
+            return;
+        }
+        const request = this.requestQueue.shift();
+        if (!request) {
+            return;
+        }
+        this.activeRequest = request;
+        this.process.stdin.write(`${request.wavPath}\n`);
+    }
+
+    private resolveActive(text: string): void {
+        const request = this.activeRequest;
+        this.activeRequest = null;
+        request?.resolve(text);
+        this.processNext();
     }
 }
 

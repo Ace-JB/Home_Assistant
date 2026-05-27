@@ -1,10 +1,10 @@
 import { type FC } from 'react';
-import { IconDashboard, IconVideo, IconBell, IconSettings, IconZap } from './Icons';
+import { IconDashboard, IconVideo, IconBell, IconSettings, IconZap, IconMemory } from './Icons';
 import { useI18n } from '../i18n';
 
 interface SidebarProps {
   activeTab: string;
-  setActiveTab: (tab: string) => void;
+  setActiveTab: (tab: 'dashboard' | 'live' | 'memory') => void;
 }
 
 export const Sidebar: FC<SidebarProps> = ({ activeTab, setActiveTab }) => {
@@ -33,6 +33,13 @@ export const Sidebar: FC<SidebarProps> = ({ activeTab, setActiveTab }) => {
         >
           <IconVideo />
           <span className="text-sm font-medium">{t('sidebar.live')}</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('memory')}
+          className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'memory' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}
+        >
+          <IconMemory />
+          <span className="text-sm font-medium">{t('sidebar.memory')}</span>
         </button>
         <div className="flex items-center gap-3 px-4 py-3 text-slate-500 opacity-50 cursor-not-allowed">
           <IconBell />
