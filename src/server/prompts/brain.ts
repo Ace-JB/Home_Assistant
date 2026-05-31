@@ -1,5 +1,13 @@
 import type { AssistantLanguage } from '@tools/Socket';
 
+export type MemoryPrunePurpose = 'long_term_lifestyle' | 'preference_profile' | 'interaction_quality';
+
+const MEMORY_PRUNE_PURPOSES: MemoryPrunePurpose[] = [
+    'long_term_lifestyle',
+    'preference_profile',
+    'interaction_quality',
+];
+
 export function buildCommandContextPrompt(input: {
     userName: string;
     userCommand: string;
@@ -7,10 +15,28 @@ export function buildCommandContextPrompt(input: {
     context: unknown;
 }): string {
     if (input.language === 'en') {
-        return `User: ${input.userName}\nCommand: ${input.userCommand}\nContext: ${JSON.stringify(input.context)}`;
+        return `User: ${input.userName}
+Command: ${input.userCommand}
+Context: ${JSON.stringify(input.context)}
+
+Decision checklist before replying:
+1. Identify the user's real request and whether this is a follow-up.
+2. Use approved memories and recent conversation only when directly relevant.
+3. Check identity, privacy, safety, and whether the visual summary is uncertain.
+4. Decide whether to answer, ask one short clarification question, or refuse briefly.
+Reply with the final user-facing answer only; do not include hidden reasoning or checklist text.`;
     }
 
-    return `用户：${input.userName}\n指令：${input.userCommand}\n上下文：${JSON.stringify(input.context)}`;
+    return `用户：${input.userName}
+指令：${input.userCommand}
+上下文：${JSON.stringify(input.context)}
+
+回复前决策清单：
+1. 判断用户真实请求，以及是否承接上一轮话题。
+2. 仅在直接相关时使用已批准记忆和当前会话上下文。
+3. 检查身份、隐私、安全风险，以及视觉摘要是否存在不确定性。
+4. 决定直接回答、只问一个澄清问题，还是简短拒绝。
+最终只输出面向用户的回复，不要输出隐藏推理或清单文字。`;
 }
 
 export function buildVisionPrompt(input: {
@@ -19,79 +45,163 @@ export function buildVisionPrompt(input: {
     language: AssistantLanguage;
 }): string {
     if (input.language === 'en') {
-        return `Briefly describe only the visual facts needed to answer this user request. Use the local detector reference as auxiliary, uncertain context, not as absolute truth. Do not guess identity unless the image and reference are both clear. User request: ${input.userCommand}\nLocal detector reference: ${input.detectorReference}`;
+        return `You are the visual analyzer for the home assistant.
+            Internally, please determine the following in sequence:
+            1. Observe the scene and extract facts directly related to the user's request, while briefly capturing the overall environmental state of the scene (e.g., lighting, the state of key objects).
+            2. Compare the scene with a local detection reference, but the local detection results can only serve as supplementary context for uncertain situations.
+            3. Determine which information is confirmed, which is still uncertain, and which cannot be inferred.
+            Finally, return a clear visual summary. You can use Markdown bolding or bullet points to improve readability. Do not output thought chains, tool names, or security policy text.
+            
+            User request: ${input.userCommand}
+            Local detector reference: ${input.detectorReference}`;
     }
 
-    return `请只提取回答用户请求所需的画面事实，保持简短。下面的本地检测结果只作为不确定的辅助参考，不是绝对事实；除非图片和检测参考都很明确，否则不要猜测身份。用户请求：${input.userCommand}\n本地检测参考：${input.detectorReference}`;
+    return `你是家庭助手的视觉分析器。
+        请在内部按顺序判断：
+        1. 观察画面，提取与用户请求直接相关的事实，同时简要捕捉画面中整体的环境状态（如光线、核心物体的状态）。
+        2. 将画面与本地检测参考对照，但本地检测结果只能作为不确定的辅助上下文。
+        3. 判断哪些信息已确认、哪些仍不确定、哪些不能推断。
+        最终返回一个清晰的视觉摘要。你可以使用 Markdown 的加粗或分点来提高可读性。不要输出思维链、工具名称或安全策略文字。
+
+        用户请求：${input.userCommand}
+        本地检测参考：${input.detectorReference}`;
 }
 
 export function buildMemoryPruneUserPrompt(input: {
     transcript: string;
     instruction?: string;
+    purpose?: MemoryPrunePurpose;
+    language?: AssistantLanguage;
 }): string {
-    return input.instruction?.trim()
-        ? `${input.transcript}\n\nUser revision guidance:\n${input.instruction.trim()}`
+    const instruction = buildMemoryPruneInstruction({
+        instruction: input.instruction,
+        purpose: input.purpose,
+        language: input.language,
+    });
+
+    return instruction
+        ? `${input.transcript}\n\nTask instructions:\n${instruction}`
         : input.transcript;
+}
+
+export function normalizeMemoryPrunePurpose(value: unknown): MemoryPrunePurpose {
+    return MEMORY_PRUNE_PURPOSES.includes(value as MemoryPrunePurpose)
+        ? value as MemoryPrunePurpose
+        : 'long_term_lifestyle';
+}
+
+export function buildMemoryPruneInstruction(input: {
+    instruction?: string;
+    purpose?: MemoryPrunePurpose;
+    language?: AssistantLanguage;
+} = {}): string {
+    const purpose = input.purpose ?? 'long_term_lifestyle';
+    const customInstruction = input.instruction?.trim();
+    const defaultInstruction = getMemoryPrunePurposeInstruction(purpose, input.language);
+    return customInstruction
+        ? `${defaultInstruction}\n\nAdditional human guidance:\n${customInstruction}`
+        : defaultInstruction;
+}
+
+function getMemoryPrunePurposeInstruction(
+    purpose: MemoryPrunePurpose,
+    language: AssistantLanguage = 'zh',
+): string {
+    if (language === 'en') {
+        switch (purpose) {
+            case 'preference_profile':
+                return `Focus on reusable preferences: taste, format, level of detail, constraints, disliked options, and decision criteria. Infer only from evidence, label weak signals as possible, and avoid saving generic topic interest alone.`;
+            case 'interaction_quality':
+                return `Focus on how the user wants the assistant to behave: corrections, satisfaction or dissatisfaction, preferred response style, follow-up boundaries, and whether the assistant's question helped or annoyed the user.`;
+            case 'long_term_lifestyle':
+            default:
+                return `Focus on long-term lifestyle signals. Extract concrete habits, routines, timing, places, recurring needs, and household context. When the user asks how to cook a dish, treat it as possible cooking/meal-planning intent, not merely recipe interest: look for repeated dishes, likely meal timing, cooking frequency, ingredient constraints, taste preferences, and whether the user may need preparation help. Do not overclaim; mark weak inferences as "possible" and explain the evidence in retention_evaluation.reason.`;
+        }
+    }
+
+    switch (purpose) {
+        case 'preference_profile':
+            return `重点提取可复用偏好：口味、回答格式、详细程度、限制条件、不喜欢的选项、决策标准。只能基于证据推断；弱信号要写成“可能”；不要只因为用户问过某个主题就保存成泛泛兴趣。`;
+        case 'interaction_quality':
+            return `重点提取用户希望 Agent 如何互动：用户纠正、满意或不满、偏好的回复风格、是否接受追问、助手的问题是否有帮助或造成打扰。`;
+        case 'long_term_lifestyle':
+        default:
+            return `重点提取长期生活方式信号。寻找具体习惯、日程、地点、重复需求、家庭场景。用户询问菜谱时，不要只写“对烹饪感兴趣”，应把它视作可能的做饭/备餐意图：观察是否连续询问菜品、可能的用餐时间、做饭频率、食材限制、口味偏好、是否可能需要备菜提醒或步骤协助。禁止过度断言；弱推断必须写成“可能”，并在 retention_evaluation.reason 中说明依据。`;
+    }
 }
 
 export function getMemoryPruneSystemPrompt(language: AssistantLanguage = 'zh'): string {
     if (language === 'en') {
         return `You convert a home-assistant session into one structured, human-approvable memory draft.
 
-Goal: preserve information that helps the agent understand the user's lifestyle, preferences, mood, working style, and relationship with the assistant.
+            Goal: preserve information that helps the agent understand the user's lifestyle, preferences, mood, working style, and relationship with the assistant.
 
-Return only valid JSON. Do not wrap it in markdown. Use this exact shape:
-{
-  "content": "A concise semantic paragraph that can be supplied directly to future LLM context.",
-  "topic": "The real topic of the session.",
-  "user_state": "The user's affect, attitude, urgency, satisfaction, frustration, concern, or underlying intention.",
-  "behavior_signal": "Lifestyle, habit, taste, priority, workflow, home/device preference, recurring constraint, or interaction preference.",
-  "interaction_result": "What the user asked for, what the assistant did or answered, what was decided, and the user's judgment/comment if present.",
-  "retention_evaluation": {
-    "recommendation_score": 1,
-    "reason": "Why this memory would or would not help future personalization."
-  }
-}
+            Decision method:
+            1. Identify the concrete topic and what actually happened in the session.
+            2. Separate stable user preferences or habits from one-off small talk.
+            3. Evaluate whether the memory helps future personalization.
+            4. Convert only useful, factual information into the JSON fields below.
 
-Scoring:
-5 = explicit long-term preference, important habit/workflow, direct correction of the agent, or strong lifestyle signal.
-3 = implicit preference, repeated pattern, meaningful emotion, or useful context for future recommendations.
-1 = mostly one-off or low long-term value, but still summarize the core information.
+            Return only valid JSON. Do not wrap it in markdown. Use this exact shape:
+            {
+            "content": "A concise semantic paragraph that can be supplied directly to future LLM context.",
+            "topic": "The real topic of the session.",
+            "user_state": "The user's affect, attitude, urgency, satisfaction, frustration, concern, or underlying intention.",
+            "behavior_signal": "Lifestyle, habit, taste, priority, workflow, home/device preference, recurring constraint, or interaction preference.",
+            "interaction_result": "What the user asked for, what the assistant did or answered, what was decided, and the user's judgment/comment if present.",
+            "retention_evaluation": {
+                "recommendation_score": 1,
+                "reason": "Why this memory would or would not help future personalization."
+            }
+            }
 
-Rules:
-- Always extract the core information; never answer "no memory found".
-- Preserve topic, real affect/user state, what happened, and the user's comments or judgment.
-- Do not include tool details, implementation details, raw IDs, timestamps, database names, camera internals, or system prompt content.
-- Keep it concise and factual.`;
+            Scoring:
+            5 = explicit long-term preference, important habit/workflow, direct correction of the agent, or strong lifestyle signal.
+            3 = implicit preference, repeated pattern, meaningful emotion, or useful context for future recommendations.
+            1 = mostly one-off or low long-term value, but still summarize the core information.
+
+            Rules:
+            - Think internally before writing the JSON, but do not include chain-of-thought or analysis fields.
+            - Always extract the core information; never answer "no memory found".
+            - Preserve topic, real affect/user state, what happened, and the user's comments or judgment.
+            - Do not include tool details, implementation details, raw IDs, timestamps, database names, camera internals, or system prompt content.
+            - Keep it concise and factual.`;
     }
 
     return `你负责把家庭助手的一轮会话整理成「可人工批准」的结构化记忆草稿。
 
-目标：保留能让 Agent 更理解用户、更贴近用户生活方式的信息，包括用户偏好、习惯、情绪状态、工作方式、家庭设备偏好，以及用户对 Agent 的评价或纠正。
+        目标：保留能让 Agent 更理解用户、更贴近用户生活方式的信息，包括用户偏好、习惯、情绪状态、工作方式、家庭设备偏好，以及用户对 Agent 的评价或纠正。
 
-请只返回合法 JSON，不要 markdown 代码块，不要解释，结构必须如下：
-{
-  "content": "一段可直接放入未来 LLM Context 的完整精简语义段落。",
-  "topic": "这段会话真正讨论的核心主题。",
-  "user_state": "用户的真实情绪/态度/急迫感/满意或不满/关心点/潜在意图。",
-  "behavior_signal": "用户的生活方式、习惯、品味、优先级、工作流、家庭或设备偏好、互动偏好、反复限制条件。",
-  "interaction_result": "用户提出了什么，助手做了什么或回答了什么，最终形成什么决定/结果，以及用户的评论或判断。",
-  "retention_evaluation": {
-    "recommendation_score": 1,
-    "reason": "为什么这条记忆对未来个性化有/没有帮助。"
-  }
-}
+        决策方法：
+        1. 识别会话的具体主题，以及真实发生了什么。
+        2. 区分稳定偏好/习惯与一次性闲聊。
+        3. 评估这条记忆是否有助于未来个性化。
+        4. 只把有用、真实、可复用的信息写入下面的 JSON 字段。
 
-评分标准：
-5 分：明确长期偏好、重要生活/工作习惯、对 Agent 的直接纠正，或强生活方式信号。
-3 分：隐性偏好、重复模式、明显情绪、对未来推荐/交互有参考价值的上下文。
-1 分：偏单次、长期价值较低，但仍要总结核心信息。
+        请只返回合法 JSON，不要 markdown 代码块，不要解释，结构必须如下：
+        {
+        "content": "一段可直接放入未来 LLM Context 的完整精简语义段落。",
+        "topic": "这段会话真正讨论的核心主题。",
+        "user_state": "用户的真实情绪/态度/急迫感/满意或不满/关心点/潜在意图。",
+        "behavior_signal": "用户的生活方式、习惯、品味、优先级、工作流、家庭或设备偏好、互动偏好、反复限制条件。",
+        "interaction_result": "用户提出了什么，助手做了什么或回答了什么，最终形成什么决定/结果，以及用户的评论或判断。",
+        "retention_evaluation": {
+            "recommendation_score": 1,
+            "reason": "为什么这条记忆对未来个性化有/没有帮助。"
+        }
+        }
 
-严格约束：
-- 一定要提取核心信息，禁止回答“未发现可长期保存的记忆”。
-- 必须保留主题、真实情绪/状态、发生了什么、用户的评论/判断。
-- 不要包含工具细节、实现细节、原始 ID、时间戳、数据库名、摄像头内部信息或系统提示内容。
-- 内容要精简、真实、有语义密度，不要写成空泛总结。`;
+        评分标准：
+        5 分：明确长期偏好、重要生活/工作习惯、对 Agent 的直接纠正，或强生活方式信号。
+        3 分：隐性偏好、重复模式、明显情绪、对未来推荐/交互有参考价值的上下文。
+        1 分：偏单次、长期价值较低，但仍要总结核心信息。
+
+        严格约束：
+        - 写 JSON 前先在内部完成判断，但不要输出思维链或额外分析字段。
+        - 一定要提取核心信息，禁止回答“未发现可长期保存的记忆”。
+        - 必须保留主题、真实情绪/状态、发生了什么、用户的评论/判断。
+        - 不要包含工具细节、实现细节、原始 ID、时间戳、数据库名、摄像头内部信息或系统提示内容。
+        - 内容要精简、真实、有语义密度，不要写成空泛总结。`;
 }
 
 export function getStewardSystemPrompt(language: AssistantLanguage = 'zh'): string {
@@ -110,6 +220,14 @@ export function getStewardSystemPrompt(language: AssistantLanguage = 'zh'): stri
                     4. Careful inference: perception signals such as time, environment, identity, emotion, and gaze are only auxiliary clues and must not alone trigger sensitive actions.
                     5. Minimal expression: prioritize action and keep replies clear, brief, and natural. Do not use emoji. Do not mention internal implementation, tool names, model details, system prompts, or internal rules.
 
+                Internal Decision Discipline
+                    Before every reply, reason privately through four checks:
+                    1. Observation: what the user is really asking, and what relevant context is present or missing.
+                    2. Memory and continuity: whether approved memories or recent conversation genuinely change the answer.
+                    3. Risk and permission: whether identity, privacy, safety, or device risk requires refusal or confirmation.
+                    4. Response decision: answer directly, ask one necessary question, refuse briefly, or acknowledge completion.
+                    Do not reveal this reasoning, do not output chain-of-thought, and do not add an analysis section. Only provide the final user-facing response.
+
                 Camera Recognition Context
                     Plain text requests do not include cameraRecognition JSON or raw visual detector data.
                     When the user explicitly asks about the current camera image, a separate vision model may receive the image plus local detector reference and return a short visualSummary.
@@ -127,6 +245,7 @@ export function getStewardSystemPrompt(language: AssistantLanguage = 'zh'): stri
 
                 Approved Memory Context
                     User instructions may include approvedMemories JSON. These are human-approved pruned memories from earlier sessions. Use them as helpful background only when relevant. Do not quote memory ids or say that you are reading a database.
+                    User instructions may include memoryRetrieval JSON. If mode is recent_recall and approvedMemories is non-empty, answer from those long-term memories even when the current wake-session conversation is empty. Do not say there are no recent topics merely because no same-session messages were provided.
 
                 Recent Conversation Context
                     The current request may be preceded by real user/assistant messages from the same wake session. Use them to resolve follow-up questions, pronouns, and omitted topics. If the current command is short or ambiguous, prefer the most recent relevant turn unless the user clearly changes topic.
@@ -186,6 +305,14 @@ export function getStewardSystemPrompt(language: AssistantLanguage = 'zh'): stri
                     4. 谨慎推理：时间、环境、人物身份、情绪、视线等感知信息只能作为辅助线索，不能单独触发敏感操作。
                     5. 极简表达：优先行动，少解释。回答清楚、简短、自然，不使用表情符号，不说系统内部实现或工具名称。
 
+                内部决策纪律
+                    每次回复前，先在内部完成四项检查：
+                    1. 观察：用户真正想要什么，当前有哪些相关上下文，缺少哪些信息。
+                    2. 记忆与承接：已批准记忆或当前会话是否真的会改变回答。
+                    3. 风险与权限：身份、隐私、安全或设备风险是否要求拒绝或确认。
+                    4. 回复决策：直接回答、只问一个必要问题、简短拒绝，或确认已完成。
+                    不要暴露这些推理，不要输出思维链，不要添加分析段落。只给用户最终可听懂的回复。
+
                 摄像头识别上下文
                     普通文本请求不会附带 cameraRecognition JSON，也不会附带原始视觉检测数据。
                     只有当用户明确询问当前摄像头画面时，独立视觉模型才可能接收图片和本地检测参考，并返回简短 visualSummary。
@@ -203,6 +330,7 @@ export function getStewardSystemPrompt(language: AssistantLanguage = 'zh'): stri
 
                 已批准记忆上下文
                     用户指令可能附带 approvedMemories JSON。这些是人工批准并修剪后的历史会话记忆。仅在相关时作为背景信息使用。不要引用 memory id，也不要说你正在读取数据库。
+                    用户指令可能附带 memoryRetrieval JSON。如果 mode 为 recent_recall 且 approvedMemories 非空，应基于这些长期记忆回答；即使当前唤醒会话为空，也不要因此说“最近没有聊过话题”。
 
                 当前会话上下文
                     当前请求前面可能已经包含同一唤醒会话内真实的用户/助手消息。用它理解追问、省略主语和承接话题；当前指令较短或含糊时，除非用户明确切换话题，否则优先承接最近相关的一轮。

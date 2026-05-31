@@ -34,7 +34,149 @@ function validAnalysis(overrides: Record<string, unknown> = {}) {
     };
 }
 
+function validLayeredAnalysis(overrides: Record<string, unknown> = {}) {
+    return {
+        routing: {
+            action: 'direct_answer',
+            confidence: 0.9,
+            reason: '可以直接回答',
+        },
+        contextResolution: {
+            isFollowUp: false,
+            topic: '默认主题',
+            responseRewrite: 'default query',
+            memoryQueryRewrite: '',
+            currentSessionSufficient: true,
+        },
+        dataPlan: {
+            memory: {
+                needed: false,
+                mode: 'none',
+                query: '',
+                topics: ['默认主题'],
+                canFetchInParallel: true,
+                reason: '无需长期记忆',
+                confidence: 0.9,
+            },
+            vision: {
+                needed: false,
+                canFetchInParallel: true,
+                reason: '无需视觉',
+            },
+            deviceState: {
+                needed: false,
+                targets: [],
+                reason: '',
+            },
+            safety: {
+                riskLevel: 'none',
+                requiresIdentity: false,
+                requiresConfirmation: false,
+                reason: '',
+            },
+        },
+        responsePlan: {
+            style: 'brief_answer',
+            clarificationQuestion: '',
+        },
+        ...overrides,
+    };
+}
+
 describe('Intention analysis', () => {
+    test('should parse layered direct answer without memory retrieval', async () => {
+        const result = await analyzeCommand(
+            { userCommand: '今天适合做什么晚饭' },
+            {
+                generateText: mockGenerateText(JSON.stringify(validLayeredAnalysis({
+                    intent: 'qa',
+                    dialogueAct: 'new_request',
+                }))),
+            },
+        );
+
+        expect(result.routing!.action).toBe('direct_answer');
+        expect(result.dataPlan!.memory.needed).toBe(false);
+        expect(result.memoryRetrieval.enabled).toBe(false);
+        expect(result.resolvedContext.rewrite).toBe('default query');
+    });
+
+    test('should parse layered memory recall into recent recall retrieval', async () => {
+        const result = await analyzeCommand(
+            { userCommand: '总结一下最近聊过的装修想法' },
+            {
+                generateText: mockGenerateText(JSON.stringify(validLayeredAnalysis({
+                    routing: {
+                        action: 'answer_after_context',
+                        confidence: 0.95,
+                        reason: '需要查长期记忆后回答',
+                    },
+                    contextResolution: {
+                        isFollowUp: false,
+                        topic: '装修/家居规划',
+                        responseRewrite: '总结最近聊过的装修想法',
+                        memoryQueryRewrite: '最近聊过的装修想法',
+                        currentSessionSufficient: false,
+                    },
+                    dataPlan: {
+                        memory: {
+                            needed: true,
+                            mode: 'recent_recall',
+                            query: '最近聊过的装修想法',
+                            topics: ['装修/家居规划'],
+                            canFetchInParallel: true,
+                            reason: '用户要求回顾历史记忆',
+                            confidence: 0.95,
+                        },
+                        vision: { needed: false, canFetchInParallel: true, reason: '无需视觉' },
+                        deviceState: { needed: false, targets: [], reason: '' },
+                        safety: { riskLevel: 'none', requiresIdentity: false, requiresConfirmation: false, reason: '' },
+                    },
+                    intent: 'memory_recall',
+                    dialogueAct: 'new_request',
+                }))),
+            },
+        );
+
+        expect(result.intent).toBe('memory_recall');
+        expect(result.routing!.action).toBe('answer_after_context');
+        expect(result.dataPlan!.memory.needed).toBe(true);
+        expect(result.memoryRetrieval.mode).toBe('recent_recall');
+        expect(result.memoryRetrieval.query).toBe('最近聊过的装修想法');
+    });
+
+    test('should parse layered clarification route without memory retrieval', async () => {
+        const result = await analyzeCommand(
+            { userCommand: '关掉那个' },
+            {
+                generateText: mockGenerateText(JSON.stringify(validLayeredAnalysis({
+                    routing: {
+                        action: 'ask_clarification',
+                        confidence: 0.9,
+                        reason: '缺少设备和房间',
+                    },
+                    contextResolution: {
+                        isFollowUp: false,
+                        topic: '智能家居控制',
+                        responseRewrite: '询问需要关闭哪个设备',
+                        memoryQueryRewrite: '',
+                        currentSessionSufficient: true,
+                    },
+                    responsePlan: {
+                        style: 'clarification_question',
+                        clarificationQuestion: '请问要关闭哪个设备？',
+                    },
+                    intent: 'device_control',
+                    dialogueAct: 'new_request',
+                }))),
+            },
+        );
+
+        expect(result.routing!.action).toBe('ask_clarification');
+        expect(result.responsePlan!.style).toBe('clarification_question');
+        expect(result.memoryRetrieval.enabled).toBe(false);
+    });
+
     test('should use model output for abstract cooking topic instead of keyword rules', async () => {
         const result = await analyzeCommand(
             { userCommand: '如何做番茄炒蛋' },
@@ -132,6 +274,96 @@ describe('Intention analysis', () => {
         expect(result.memoryRetrieval.mode).toBe('recent_recall');
         expect(result.memoryRetrieval.query).toBe('我们最近有聊过什么话题吗');
         expect(result.memoryRetrieval.confidence).toBe(0.55);
+    });
+
+    test('should revise contradictory prior-topic clarification with deterministic rules', async () => {
+        let callCount = 0;
+        const result = await analyzeCommand(
+            { userCommand: '我们之前都有聊过什么话题。' },
+            {
+                generateText: async () => {
+                    callCount += 1;
+                    if (callCount === 1) {
+                        return {
+                            text: JSON.stringify(validLayeredAnalysis({
+                                routing: {
+                                    action: 'ask_clarification',
+                                    confidence: 0.7,
+                                    reason: '最近对话为空，需要澄清具体指什么话题',
+                                },
+                                contextResolution: {
+                                    isFollowUp: false,
+                                    topic: '',
+                                    responseRewrite: '您想了解我们之前讨论过的哪些话题？',
+                                    memoryQueryRewrite: '',
+                                    currentSessionSufficient: false,
+                                },
+                                dataPlan: {
+                                    memory: {
+                                        needed: false,
+                                        mode: 'none',
+                                        query: '',
+                                        topics: [],
+                                        canFetchInParallel: true,
+                                        reason: '需要回顾之前的对话以确定用户想了解的话题',
+                                        confidence: 0.7,
+                                    },
+                                    vision: { needed: false, canFetchInParallel: true, reason: '无需视觉' },
+                                    deviceState: { needed: false, targets: [], reason: '' },
+                                    safety: { riskLevel: 'none', requiresIdentity: false, requiresConfirmation: false, reason: '' },
+                                },
+                                intent: 'follow_up',
+                                dialogueAct: 'new_request',
+                            })),
+                        } as any;
+                    }
+
+                    return {
+                        text: JSON.stringify({
+                            action: 'revise',
+                            reason: '用户是在请求回顾长期对话主题，不应因当前会话为空而澄清。',
+                            analysis: validLayeredAnalysis({
+                                routing: {
+                                    action: 'answer_after_context',
+                                    confidence: 0.92,
+                                    reason: '需要查询长期记忆后回答',
+                                },
+                                contextResolution: {
+                                    isFollowUp: false,
+                                    topic: '长期记忆回顾',
+                                    responseRewrite: '回顾之前聊过的话题',
+                                    memoryQueryRewrite: '之前聊过的话题',
+                                    currentSessionSufficient: false,
+                                },
+                                dataPlan: {
+                                    memory: {
+                                        needed: true,
+                                        mode: 'recent_recall',
+                                        query: '之前聊过的话题',
+                                        topics: ['长期记忆回顾'],
+                                        canFetchInParallel: true,
+                                        reason: '用户请求回顾历史对话主题',
+                                        confidence: 0.92,
+                                    },
+                                    vision: { needed: false, canFetchInParallel: true, reason: '无需视觉' },
+                                    deviceState: { needed: false, targets: [], reason: '' },
+                                    safety: { riskLevel: 'none', requiresIdentity: false, requiresConfirmation: false, reason: '' },
+                                },
+                                intent: 'memory_recall',
+                                dialogueAct: 'new_request',
+                            }),
+                        }),
+                    } as any;
+                },
+            },
+        );
+
+        expect(callCount).toBe(1);
+        expect(result.intent).toBe('memory_recall');
+        expect(result.routing!.action).toBe('answer_after_context');
+        expect(result.memoryRetrieval.enabled).toBe(true);
+        expect(result.memoryRetrieval.mode).toBe('recent_recall');
+        expect(result.memoryRetrieval.query).toBe('我们之前都有聊过什么话题。');
     });
 
     test('should use model output to rewrite short follow-ups with context', async () => {
@@ -445,7 +677,7 @@ describe('Intention analysis', () => {
         );
 
         expect(calls).toHaveLength(2);
-        expect(calls[1]).toContain('previous intent analysis output did not match');
+        expect(calls[1]).toContain('previous routing JSON failed validation');
         expect(result.intent).toBe('memory_recall');
         expect(result.memoryRetrieval.query).toBe('最近聊过的装修想法');
     });

@@ -562,6 +562,96 @@ describe('MemoryDatabase', () => {
     db.close();
   });
 
+  test('should create, approve, and reject memory candidates', () => {
+    const db = createTempMemory();
+    const draft = JSON.stringify({
+      content: 'The user prefers concise answers.',
+      topic: 'assistant style',
+      user_state: 'focused',
+      behavior_signal: 'prefers concise answers',
+      interaction_result: 'assistant should keep answers short',
+      retention_evaluation: { recommendation_score: 5, reason: 'explicit preference' },
+    });
+
+    const candidate = db.saveMemoryCandidate({
+      source_conversation_id: 'candidate-source',
+      draft_json: draft,
+      score: 5,
+    });
+    const duplicate = db.saveMemoryCandidate({
+      source_conversation_id: 'candidate-source',
+      draft_json: draft,
+      score: 4,
+    });
+
+    expect(duplicate.id).toBe(candidate.id);
+    expect(db.searchMemoryCandidates({ status: 'pending' })).toHaveLength(1);
+    expect(db.getContextMemories({ query: 'concise answers', limit: 5 })).toEqual([]);
+
+    const approved = db.approveMemoryCandidate(candidate.id, {
+      content: 'The user prefers concise answers.',
+      topic: 'assistant style',
+      base_score: 5,
+    });
+
+    expect(approved?.content).toContain('concise answers');
+    expect(db.getMemoryCandidate(candidate.id)?.status).toBe('approved');
+    expect(db.getContextMemories({ query: 'concise answers', limit: 1 })[0]?.id).toBe(approved?.id);
+
+    const rejected = db.saveMemoryCandidate({
+      source_conversation_id: 'rejected-source',
+      draft_json: 'The user dislikes long answers.',
+      score: 3,
+    });
+
+    expect(db.rejectMemoryCandidate(rejected.id)?.status).toBe('rejected');
+    expect(db.searchMemoryCandidates({ status: 'pending' }).map(item => item.id)).toEqual([]);
+
+    db.close();
+  });
+
+  test('should filter cold memories from semantic retrieval but include them in recent recall', () => {
+    const db = createTempMemory();
+    const cold = db.savePrunedMemory({
+      source_conversation_id: 'cold-source',
+      content: 'The user likes green tea after dinner.',
+      topic: 'tea preference',
+      base_score: 2,
+      status: 'cold',
+      created_at: Date.now(),
+    });
+
+    expect(db.getContextMemories({ query: 'green tea dinner', limit: 5 })).toEqual([]);
+    expect(db.getContextMemories({ query: 'recent memories', mode: 'recent_recall', limit: 1 })[0]?.id).toBe(cold.id);
+
+    db.close();
+  });
+
+  test('should cool low-value stale memories during lifecycle maintenance', () => {
+    const db = createTempMemory();
+    const now = new Date('2026-06-20T10:00:00.000Z').getTime();
+    const stale = db.savePrunedMemory({
+      source_conversation_id: 'stale-low',
+      content: 'The user once asked about a low value topic.',
+      topic: 'low value',
+      base_score: 2,
+      created_at: now - 45 * 24 * 60 * 60 * 1000,
+    });
+    const important = db.savePrunedMemory({
+      source_conversation_id: 'important',
+      content: 'The user has a strong preference for concise answers.',
+      topic: 'assistant style',
+      base_score: 5,
+      created_at: now - 45 * 24 * 60 * 60 * 1000,
+    });
+
+    expect(db.maintainMemoryLifecycle(now)).toBe(1);
+    expect(db.getPrunedMemory(stale.id)?.status).toBe('cold');
+    expect(db.getPrunedMemory(important.id)?.status).toBe('warm');
+
+    db.close();
+  });
+
   test('should archive the old exchange table before creating the session table', () => {
     const path = createTempPath();
     const sqlite = new Database(path);

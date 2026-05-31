@@ -3,6 +3,7 @@ import {
     calculateTextSimilarity,
     hasBargeInKeyword,
     isEchoLikeTranscript,
+    extractSpeechReadyChunk,
     isValidBargeInTranscript,
     normalizeTranscript,
 } from "@tools/Voice";
@@ -58,5 +59,32 @@ describe("Voice Utils", () => {
         expect(hasBargeInKeyword("WAIT a second", keywords)).toBe(true);
         expect(hasBargeInKeyword("继续说", keywords)).toBe(false);
         expect(isValidBargeInTranscript("停", "蛋蛋", ["停"])).toBe(true);
+    });
+
+    test("should split speech chunks on Chinese sentence boundaries", () => {
+        const first = extractSpeechReadyChunk("今天可以先处理日程。然后我再提醒你。");
+
+        expect(first).toEqual({
+            chunk: "今天可以先处理日程。",
+            rest: "然后我再提醒你。",
+        });
+    });
+
+    test("should wait for short soft punctuation before splitting", () => {
+        expect(extractSpeechReadyChunk("好的，")).toBeNull();
+        expect(extractSpeechReadyChunk("好的，我现在帮你查一下")).toBeNull();
+
+        const chunk = extractSpeechReadyChunk("我先帮你整理一下当前已经识别到的几个关键信息，然后继续说明后续步骤。");
+        expect(chunk).toEqual({
+            chunk: "我先帮你整理一下当前已经识别到的几个关键信息，",
+            rest: "然后继续说明后续步骤。",
+        });
+    });
+
+    test("should fallback split long text without punctuation", () => {
+        const chunk = extractSpeechReadyChunk("This is a long response without punctuation but it should speak progressively", 18);
+
+        expect(chunk?.chunk.length).toBeGreaterThanOrEqual(18);
+        expect(chunk?.rest.length).toBeGreaterThan(0);
     });
 });

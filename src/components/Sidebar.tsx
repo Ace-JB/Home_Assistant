@@ -1,10 +1,10 @@
 import { type FC } from 'react';
-import { IconDashboard, IconVideo, IconBell, IconSettings, IconZap, IconMemory } from './Icons';
+import { IconDashboard, IconVideo, IconBell, IconSettings, IconZap, IconMemory, IconMic, IconLogs } from './Icons';
 import { useI18n } from '../i18n';
 
 interface SidebarProps {
   activeTab: string;
-  setActiveTab: (tab: 'dashboard' | 'live' | 'memory') => void;
+  setActiveTab: (tab: 'dashboard' | 'live' | 'memory' | 'voice' | 'logs') => void;
 }
 
 export const Sidebar: FC<SidebarProps> = ({ activeTab, setActiveTab }) => {
@@ -40,6 +40,20 @@ export const Sidebar: FC<SidebarProps> = ({ activeTab, setActiveTab }) => {
         >
           <IconMemory />
           <span className="text-sm font-medium">{t('sidebar.memory')}</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('voice')}
+          className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'voice' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}
+        >
+          <IconMic />
+          <span className="text-sm font-medium">{t('sidebar.voice')}</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('logs')}
+          className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'logs' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}
+        >
+          <IconLogs />
+          <span className="text-sm font-medium">{t('sidebar.logs')}</span>
         </button>
         <div className="flex items-center gap-3 px-4 py-3 text-slate-500 opacity-50 cursor-not-allowed">
           <IconBell />

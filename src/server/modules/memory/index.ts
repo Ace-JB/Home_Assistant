@@ -5,6 +5,9 @@ import { dirname, join } from 'path';
 const DB_DIR = join(process.cwd(), 'src', 'server', 'db');
 const SQLITE_MEMORY_DB_PATH = join(DB_DIR, 'memory.sqlite');
 const MEMORY_HEAT_DECAY_GAMMA = 1.2;
+const MEMORY_HEAT_SCORE_CAP = 8;
+const MEMORY_COLD_HEAT_MULTIPLIER = 0.4;
+const MEMORY_COLD_AFTER_DAYS = 30;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const SEMANTIC_TERM_SCORE = 3;
 const MIN_CONTEXT_SEMANTIC_SCORE = SEMANTIC_TERM_SCORE;
@@ -27,7 +30,7 @@ const TOKEN_STOP_WORDS = new Set([
   'your',
 ]);
 
-type SqlValue = string | number;
+type SqlValue = string | number | null;
 
 type ConversationSessionRow = {
   conversation_id: string;
@@ -54,6 +57,16 @@ type PrunedMemoryRow = {
   day_type: DayType;
 };
 
+type MemoryCandidateRow = {
+  candidate_id: string;
+  source_conversation_id: string;
+  draft_json: string;
+  score: number;
+  status: MemoryCandidateStatus;
+  created_at: number;
+  reviewed_at: number | null;
+};
+
 type MemoryScore = {
   semanticScore: number;
   situationScore: number;
@@ -63,6 +76,7 @@ type MemoryScore = {
 
 export type ConversationRole = 'user' | 'agent';
 export type MemoryStatus = 'warm' | 'cold';
+export type MemoryCandidateStatus = 'pending' | 'approved' | 'rejected';
 export type MemoryLocation = 'living_room' | 'bedroom' | 'kitchen' | 'unknown';
 export type TimeBucket = 'morning' | 'noon' | 'afternoon' | 'evening' | 'night';
 export type DayType = 'weekday' | 'weekend';
@@ -99,6 +113,16 @@ export interface MemoryRecord {
 }
 
 export type PrunedMemoryRecord = MemoryRecord;
+
+export interface MemoryCandidateRecord {
+  id: string;
+  sourceConversationId: string;
+  draftJson: string;
+  score: number;
+  status: MemoryCandidateStatus;
+  createdAt: number;
+  reviewedAt: number | null;
+}
 
 export interface CreateConversationSessionInput {
   conversation_id?: string;
@@ -153,6 +177,22 @@ export interface PrunedMemorySearchOptions {
   offset?: number;
 }
 
+export interface SaveMemoryCandidateInput {
+  source_conversation_id: string;
+  draft_json: string;
+  score?: number;
+  status?: MemoryCandidateStatus;
+  created_at?: number;
+}
+
+export interface MemoryCandidateSearchOptions {
+  sourceConversationId?: string;
+  status?: MemoryCandidateStatus;
+  query?: string;
+  limit?: number;
+  offset?: number;
+}
+
 export interface ContextMemorySearchOptions {
   query: string;
   location?: MemoryLocation;
@@ -169,6 +209,7 @@ export interface RecentConversationMessageOptions {
 
 export class MemoryDatabase {
   private readonly sqlite: Database;
+  private hasMemoryFts = false;
 
   constructor(dbPath = SQLITE_MEMORY_DB_PATH) {
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -313,7 +354,7 @@ export class MemoryDatabase {
         $baseScore: baseScore,
         $createdAt: now,
         $lastAccessedAt: now,
-        $status: 'warm',
+        $status: input.status ?? 'warm',
         $topic: input.topic ?? '',
         $userState: input.user_state ?? '',
         $behaviorSignal: input.behavior_signal ?? '',
@@ -323,7 +364,9 @@ export class MemoryDatabase {
         $dayType: getDayType(createdDate),
       });
 
-    return this.getPrunedMemory(memoryId)!;
+    const memory = this.getPrunedMemory(memoryId)!;
+    this.upsertPrunedMemoryFts(memory);
+    return memory;
   }
 
   getPrunedMemory(memoryId: string): MemoryRecord | null {
@@ -369,11 +412,19 @@ export class MemoryDatabase {
       });
 
     this.touchMemory(input.memory_id, updatedAt, false);
-    return this.getPrunedMemory(input.memory_id);
+    const memory = this.getPrunedMemory(input.memory_id);
+    if (memory) {
+      this.upsertPrunedMemoryFts(memory);
+    }
+    return memory;
   }
 
   removePrunedMemory(memoryId: string): boolean {
-    return this.sqlite.query('DELETE FROM pruned_memories WHERE memory_id = ?').run(memoryId).changes > 0;
+    const removed = this.sqlite.query('DELETE FROM pruned_memories WHERE memory_id = ?').run(memoryId).changes > 0;
+    if (removed) {
+      this.deletePrunedMemoryFts(memoryId);
+    }
+    return removed;
   }
 
   searchPrunedMemories(options: PrunedMemorySearchOptions = {}): MemoryRecord[] {
@@ -400,11 +451,16 @@ export class MemoryDatabase {
       : optionsOrQuery;
     const mode = options.mode ?? 'semantic';
     if (mode === 'recent_recall') {
-      return this.getRecentContextMemories(normalizeLimit(options.limit), options.query);
+      return this.getRecentContextMemories(normalizeLimit(options.limit), options.query, new Set(), true);
     }
 
     const terms = tokenize(options.query);
-    const candidates = this.searchPrunedMemories({ limit: 100 });
+    if (terms.length === 0) {
+      traceContextMemorySearch(options.query, 0, [], mode, 'no_terms');
+      return [];
+    }
+
+    const candidates = this.searchContextMemoryCandidates(terms, false);
     const scored = candidates
       .map(memory => ({
         memory,
@@ -431,7 +487,14 @@ export class MemoryDatabase {
       ];
     }
 
-    traceContextMemorySearch(options.query, candidates.length, finalScored, mode);
+    const reason = finalScored.length > 0
+      ? undefined
+      : this.getPendingMemoryCandidateMatchCount(terms) > 0
+        ? 'candidate_pending'
+        : this.searchContextMemoryCandidates(terms, true).some(item => item.status === 'cold')
+          ? 'cold_filtered'
+          : 'below_semantic_threshold';
+    traceContextMemorySearch(options.query, candidates.length, finalScored, mode, reason);
 
     const results = finalScored.map(item => item.memory);
     for (const item of results) {
@@ -440,15 +503,17 @@ export class MemoryDatabase {
     return results.map(item => this.getPrunedMemory(item.id) ?? item);
   }
 
-  getRecentContextMemories(limit = 5, query = '', excludeIds: Set<string> = new Set()): MemoryRecord[] {
+  getRecentContextMemories(limit = 5, query = '', excludeIds: Set<string> = new Set(), includeCold = false): MemoryRecord[] {
     const rows = this.sqlite
       .query<PrunedMemoryRow, Record<string, SqlValue>>(`
         SELECT *
         FROM pruned_memories
+        ${includeCold ? '' : 'WHERE status = $status'}
         ORDER BY created_at DESC, last_accessed_at DESC, memory_id DESC
         LIMIT $limit
       `)
       .all({
+        ...(includeCold ? {} : { $status: 'warm' }),
         $limit: normalizeLimit(limit + excludeIds.size),
       });
     const results = rows
@@ -461,6 +526,114 @@ export class MemoryDatabase {
       this.touchMemory(item.id, Date.now(), true);
     }
     return results.map(item => this.getPrunedMemory(item.id) ?? item);
+  }
+
+  saveMemoryCandidate(input: SaveMemoryCandidateInput): MemoryCandidateRecord {
+    const existing = this.searchMemoryCandidates({ sourceConversationId: input.source_conversation_id, limit: 1 })[0];
+    const now = input.created_at ?? Date.now();
+    const score = normalizeBaseScore(input.score);
+    if (existing) {
+      this.sqlite
+        .query(`
+          UPDATE memory_candidates
+          SET draft_json = $draftJson,
+              score = $score,
+              status = $status,
+              reviewed_at = $reviewedAt
+          WHERE candidate_id = $candidateId
+        `)
+        .run({
+          $candidateId: existing.id,
+          $draftJson: input.draft_json,
+          $score: score,
+          $status: input.status ?? (existing.status === 'pending' ? 'pending' : existing.status),
+          $reviewedAt: input.status === 'pending' || input.status === undefined ? existing.reviewedAt : now,
+        });
+      return this.getMemoryCandidate(existing.id)!;
+    }
+
+    const candidateId = createId();
+    this.sqlite
+      .query(`
+        INSERT INTO memory_candidates (
+          candidate_id, source_conversation_id, draft_json, score, status, created_at, reviewed_at
+        )
+        VALUES (
+          $candidateId, $sourceConversationId, $draftJson, $score, $status, $createdAt, $reviewedAt
+        )
+      `)
+      .run({
+        $candidateId: candidateId,
+        $sourceConversationId: input.source_conversation_id,
+        $draftJson: input.draft_json,
+        $score: score,
+        $status: input.status ?? 'pending',
+        $createdAt: now,
+        $reviewedAt: input.status && input.status !== 'pending' ? now : null,
+      });
+
+    return this.getMemoryCandidate(candidateId)!;
+  }
+
+  getMemoryCandidate(candidateId: string): MemoryCandidateRecord | null {
+    const row = this.sqlite
+      .query<MemoryCandidateRow, [string]>(`
+        SELECT *
+        FROM memory_candidates
+        WHERE candidate_id = ?
+      `)
+      .get(candidateId);
+    return row ? this.toMemoryCandidateRecord(row) : null;
+  }
+
+  searchMemoryCandidates(options: MemoryCandidateSearchOptions = {}): MemoryCandidateRecord[] {
+    const { where, params } = this.buildMemoryCandidateWhere(options);
+    const rows = this.sqlite
+      .query<MemoryCandidateRow, Record<string, SqlValue>>(`
+        SELECT *
+        FROM memory_candidates
+        ${where}
+        ORDER BY created_at DESC, candidate_id DESC
+        LIMIT $limit OFFSET $offset
+      `)
+      .all({
+        ...params,
+        $limit: normalizeLimit(options.limit),
+        $offset: normalizeOffset(options.offset),
+      });
+    return rows.map(row => this.toMemoryCandidateRecord(row));
+  }
+
+  approveMemoryCandidate(
+    candidateId: string,
+    draft: Omit<SavePrunedMemoryInput, 'source_conversation_id'>,
+  ): MemoryRecord | null {
+    const candidate = this.getMemoryCandidate(candidateId);
+    if (!candidate) return null;
+    const prunedMemory = this.savePrunedMemory({
+      source_conversation_id: candidate.sourceConversationId,
+      ...draft,
+    });
+    this.updateMemoryCandidateStatus(candidateId, 'approved');
+    return prunedMemory;
+  }
+
+  rejectMemoryCandidate(candidateId: string): MemoryCandidateRecord | null {
+    return this.updateMemoryCandidateStatus(candidateId, 'rejected');
+  }
+
+  maintainMemoryLifecycle(now = Date.now()): number {
+    const coldBefore = now - MEMORY_COLD_AFTER_DAYS * MS_PER_DAY;
+    return this.sqlite
+      .query(`
+        UPDATE pruned_memories
+        SET status = 'cold'
+        WHERE status = 'warm'
+          AND base_score <= 2
+          AND hit_count <= 1
+          AND last_accessed_at < $coldBefore
+      `)
+      .run({ $coldBefore: coldBefore }).changes;
   }
 
   close(): void {
@@ -483,6 +656,7 @@ export class MemoryDatabase {
     this.sqlite.run('CREATE INDEX IF NOT EXISTS idx_conversations_messages ON conversations (messages)');
 
     this.ensurePrunedMemoriesSchema();
+    this.ensureMemoryCandidatesSchema();
     this.removeEmptyConversationSessions();
   }
 
@@ -524,6 +698,51 @@ export class MemoryDatabase {
     this.sqlite.run('CREATE INDEX IF NOT EXISTS idx_pruned_memories_status ON pruned_memories (status)');
     this.sqlite.run('CREATE INDEX IF NOT EXISTS idx_pruned_memories_situation ON pruned_memories (location, time_bucket, day_type)');
     this.sqlite.run('CREATE INDEX IF NOT EXISTS idx_pruned_memories_content ON pruned_memories (content)');
+    this.ensurePrunedMemoriesFts();
+  }
+
+  private ensureMemoryCandidatesSchema(): void {
+    this.sqlite.run(`
+      CREATE TABLE IF NOT EXISTS memory_candidates (
+        candidate_id TEXT PRIMARY KEY,
+        source_conversation_id TEXT NOT NULL UNIQUE,
+        draft_json TEXT NOT NULL,
+        score INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        reviewed_at INTEGER
+      )
+    `);
+    this.sqlite.run('CREATE INDEX IF NOT EXISTS idx_memory_candidates_source_conversation_id ON memory_candidates (source_conversation_id)');
+    this.sqlite.run('CREATE INDEX IF NOT EXISTS idx_memory_candidates_status ON memory_candidates (status)');
+    this.sqlite.run('CREATE INDEX IF NOT EXISTS idx_memory_candidates_created_at ON memory_candidates (created_at)');
+  }
+
+  private ensurePrunedMemoriesFts(): void {
+    try {
+      this.sqlite.run(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS pruned_memories_fts USING fts5(
+          memory_id UNINDEXED,
+          content,
+          topic,
+          user_state,
+          behavior_signal,
+          interaction_result
+        )
+      `);
+      this.sqlite.run('DELETE FROM pruned_memories_fts');
+      this.sqlite.run(`
+        INSERT INTO pruned_memories_fts (
+          memory_id, content, topic, user_state, behavior_signal, interaction_result
+        )
+        SELECT memory_id, content, topic, user_state, behavior_signal, interaction_result
+        FROM pruned_memories
+      `);
+      this.hasMemoryFts = true;
+    } catch (error) {
+      this.hasMemoryFts = false;
+      console.log(`[Memory] FTS unavailable, falling back to LIKE search: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private migrateExchangeTableIfNeeded(): void {
@@ -596,6 +815,115 @@ export class MemoryDatabase {
     return { where: clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '', params };
   }
 
+  private buildMemoryCandidateWhere(options: Omit<MemoryCandidateSearchOptions, 'limit' | 'offset'>): {
+    where: string;
+    params: Record<string, SqlValue>;
+  } {
+    const clauses: string[] = [];
+    const params: Record<string, SqlValue> = {};
+    if (options.sourceConversationId) {
+      clauses.push('source_conversation_id = $sourceConversationId');
+      params.$sourceConversationId = options.sourceConversationId;
+    }
+    if (options.status) {
+      clauses.push('status = $status');
+      params.$status = options.status;
+    }
+    const query = options.query?.trim();
+    if (query) {
+      clauses.push('draft_json LIKE $query ESCAPE \'\\\'');
+      params.$query = `%${escapeLike(query)}%`;
+    }
+    return { where: clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '', params };
+  }
+
+  private searchContextMemoryCandidates(terms: string[], includeCold: boolean): MemoryRecord[] {
+    const byId = new Map<string, MemoryRecord>();
+    if (this.hasMemoryFts) {
+      for (const memory of this.searchContextMemoryCandidatesByFts(terms, includeCold)) {
+        byId.set(memory.id, memory);
+      }
+    }
+    for (const memory of this.searchContextMemoryCandidatesByLike(terms, includeCold)) {
+      byId.set(memory.id, memory);
+    }
+    return Array.from(byId.values());
+  }
+
+  private searchContextMemoryCandidatesByFts(terms: string[], includeCold: boolean): MemoryRecord[] {
+    const ftsQuery = toFtsQuery(terms);
+    if (!ftsQuery) return [];
+    try {
+      const rows = this.sqlite
+        .query<PrunedMemoryRow, Record<string, SqlValue>>(`
+          SELECT p.*
+          FROM pruned_memories p
+          JOIN pruned_memories_fts f ON p.memory_id = f.memory_id
+          WHERE pruned_memories_fts MATCH $query
+            ${includeCold ? '' : 'AND p.status = $status'}
+          ORDER BY p.last_accessed_at DESC, p.created_at DESC
+          LIMIT $limit
+        `)
+        .all({
+          $query: ftsQuery,
+          ...(includeCold ? {} : { $status: 'warm' }),
+          $limit: 200,
+        });
+      return rows.map(row => this.toMemoryRecord(row));
+    } catch (error) {
+      console.log(`[Memory] FTS query failed, using LIKE candidates only: ${error instanceof Error ? error.message : String(error)}`);
+      return [];
+    }
+  }
+
+  private searchContextMemoryCandidatesByLike(terms: string[], includeCold: boolean): MemoryRecord[] {
+    const clauses = terms.map((_, index) => `(
+      content LIKE $term${index} ESCAPE '\\'
+      OR topic LIKE $term${index} ESCAPE '\\'
+      OR user_state LIKE $term${index} ESCAPE '\\'
+      OR behavior_signal LIKE $term${index} ESCAPE '\\'
+      OR interaction_result LIKE $term${index} ESCAPE '\\'
+    )`);
+    const params: Record<string, SqlValue> = {
+      $limit: 200,
+    };
+    terms.forEach((term, index) => {
+      params[`$term${index}`] = `%${escapeLike(term)}%`;
+    });
+    const rows = this.sqlite
+      .query<PrunedMemoryRow, Record<string, SqlValue>>(`
+        SELECT *
+        FROM pruned_memories
+        WHERE (${clauses.join(' OR ')})
+          ${includeCold ? '' : 'AND status = $status'}
+        ORDER BY last_accessed_at DESC, created_at DESC
+        LIMIT $limit
+      `)
+      .all({
+        ...params,
+        ...(includeCold ? {} : { $status: 'warm' }),
+      });
+    return rows.map(row => this.toMemoryRecord(row));
+  }
+
+  private getPendingMemoryCandidateMatchCount(terms: string[]): number {
+    if (terms.length === 0) return 0;
+    const clauses = terms.map((_, index) => 'draft_json LIKE $term' + index + ' ESCAPE \'\\\'');
+    const params: Record<string, SqlValue> = {};
+    terms.forEach((term, index) => {
+      params[`$term${index}`] = `%${escapeLike(term)}%`;
+    });
+    const row = this.sqlite
+      .query<{ count: number }, Record<string, SqlValue>>(`
+        SELECT COUNT(*) AS count
+        FROM memory_candidates
+        WHERE status = 'pending'
+          AND (${clauses.join(' OR ')})
+      `)
+      .get(params);
+    return row?.count ?? 0;
+  }
+
   private touchMemory(memoryId: string, accessedAt: number, incrementHit: boolean): void {
     this.sqlite
       .query(`
@@ -609,6 +937,59 @@ export class MemoryDatabase {
         $lastAccessedAt: accessedAt,
         $hitIncrement: incrementHit ? 1 : 0,
       });
+  }
+
+  private updateMemoryCandidateStatus(candidateId: string, status: MemoryCandidateStatus): MemoryCandidateRecord | null {
+    const existing = this.getMemoryCandidate(candidateId);
+    if (!existing) return null;
+    this.sqlite
+      .query(`
+        UPDATE memory_candidates
+        SET status = $status,
+            reviewed_at = $reviewedAt
+        WHERE candidate_id = $candidateId
+      `)
+      .run({
+        $candidateId: candidateId,
+        $status: status,
+        $reviewedAt: Date.now(),
+      });
+    return this.getMemoryCandidate(candidateId);
+  }
+
+  private upsertPrunedMemoryFts(memory: MemoryRecord): void {
+    if (!this.hasMemoryFts) return;
+    try {
+      this.deletePrunedMemoryFts(memory.id);
+      this.sqlite
+        .query(`
+          INSERT INTO pruned_memories_fts (
+            memory_id, content, topic, user_state, behavior_signal, interaction_result
+          )
+          VALUES (
+            $memoryId, $content, $topic, $userState, $behaviorSignal, $interactionResult
+          )
+        `)
+        .run({
+          $memoryId: memory.id,
+          $content: memory.content,
+          $topic: memory.topic,
+          $userState: memory.userState,
+          $behaviorSignal: memory.behaviorSignal,
+          $interactionResult: memory.interactionResult,
+        });
+    } catch (error) {
+      console.log(`[Memory] FTS sync failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private deletePrunedMemoryFts(memoryId: string): void {
+    if (!this.hasMemoryFts) return;
+    try {
+      this.sqlite.query('DELETE FROM pruned_memories_fts WHERE memory_id = ?').run(memoryId);
+    } catch {
+      // FTS is an optimization; stale rows fall back to LIKE on the next query.
+    }
   }
 
   private toSessionRecord(row: ConversationSessionRow): ConversationSessionRecord {
@@ -637,6 +1018,18 @@ export class MemoryDatabase {
       location: row.location,
       timeBucket: row.time_bucket,
       dayType: row.day_type,
+    };
+  }
+
+  private toMemoryCandidateRecord(row: MemoryCandidateRow): MemoryCandidateRecord {
+    return {
+      id: row.candidate_id,
+      sourceConversationId: row.source_conversation_id,
+      draftJson: row.draft_json,
+      score: row.score,
+      status: row.status,
+      createdAt: row.created_at,
+      reviewedAt: row.reviewed_at,
     };
   }
 }
@@ -724,7 +1117,17 @@ function scoreMemory(memory: MemoryRecord, terms: string[], options: ContextMemo
 
 function calculateHeat(memory: MemoryRecord, now: number): number {
   const deltaDays = Math.max(0, (now - memory.lastAccessedAt) / MS_PER_DAY);
-  return (memory.baseScore * (memory.hitCount + 1)) / ((deltaDays + 1) ** MEMORY_HEAT_DECAY_GAMMA);
+  const rawHeat = (memory.baseScore * (memory.hitCount + 1)) / ((deltaDays + 1) ** MEMORY_HEAT_DECAY_GAMMA);
+  const statusAdjustedHeat = memory.status === 'cold' ? rawHeat * MEMORY_COLD_HEAT_MULTIPLIER : rawHeat;
+  return Math.min(MEMORY_HEAT_SCORE_CAP, statusAdjustedHeat);
+}
+
+function toFtsQuery(terms: string[]): string {
+  return terms
+    .map(term => term.replace(/["*]/g, '').trim())
+    .filter(Boolean)
+    .map(term => `"${term}"`)
+    .join(' OR ');
 }
 
 function escapeLike(value: string): string {
@@ -736,6 +1139,7 @@ function traceContextMemorySearch(
   candidateCount: number,
   matches: Array<{ memory: MemoryRecord; score: MemoryScore }>,
   mode = 'semantic',
+  reason?: 'no_terms' | 'below_semantic_threshold' | 'cold_filtered' | 'candidate_pending',
 ): void {
   const injected = matches.map(item => ({
     id: item.memory.id,
@@ -746,7 +1150,7 @@ function traceContextMemorySearch(
     totalScore: Number(item.score.totalScore.toFixed(3)),
   }));
 
-  console.log(`[Memory] mode=${mode} Context search query="${query}" candidates=${candidateCount} injected=${matches.length}`);
+  console.log(`[Memory] mode=${mode} Context search query="${query}" candidates=${candidateCount} injected=${matches.length}${reason ? ` reason=${reason}` : ''}`);
   if (injected.length > 0) {
     console.log(`[Memory] Injected memories: ${JSON.stringify(injected)}`);
     return;

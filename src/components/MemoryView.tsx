@@ -37,22 +37,36 @@ type PrunedMemoryRecord = {
   dayType: 'weekday' | 'weekend';
 };
 
+type MemoryCandidateRecord = {
+  id: string;
+  sourceConversationId: string;
+  draftJson: string;
+  score: number;
+  status: 'pending' | 'approved' | 'rejected';
+  createdAt: number;
+  reviewedAt: number | null;
+};
+
 const PAGE_SIZE = 20;
 
 export const MemoryView: FC = () => {
   const { language, t } = useI18n();
-  const [activeMemoryTab, setActiveMemoryTab] = useState<'raw' | 'brief'>('raw');
+  const [activeMemoryTab, setActiveMemoryTab] = useState<'raw' | 'brief' | 'candidates'>('raw');
   const [query, setQuery] = useState('');
   const [briefQuery, setBriefQuery] = useState('');
+  const [candidateQuery, setCandidateQuery] = useState('');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [offset, setOffset] = useState(0);
   const [refreshKey, setRefreshKey] = useState(0);
   const [briefRefreshKey, setBriefRefreshKey] = useState(0);
+  const [candidateRefreshKey, setCandidateRefreshKey] = useState(0);
   const [data, setData] = useState<ConversationResponse>({ conversations: [], total: 0, limit: PAGE_SIZE, offset: 0 });
   const [briefMemories, setBriefMemories] = useState<PrunedMemoryRecord[]>([]);
+  const [memoryCandidates, setMemoryCandidates] = useState<MemoryCandidateRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [briefLoading, setBriefLoading] = useState(false);
+  const [candidateLoading, setCandidateLoading] = useState(false);
   const [error, setError] = useState('');
   const [selectedConversation, setSelectedConversation] = useState<ConversationRecord | null>(null);
   const [pruneContent, setPruneContent] = useState('');
@@ -61,6 +75,7 @@ export const MemoryView: FC = () => {
   const [pruning, setPruning] = useState(false);
   const [savingPrunedMemory, setSavingPrunedMemory] = useState(false);
   const [memoryStatus, setMemoryStatus] = useState('');
+  const [candidateStatus, setCandidateStatus] = useState('');
 
   const params = useMemo(() => {
     const nextParams = new URLSearchParams({
@@ -143,6 +158,44 @@ export const MemoryView: FC = () => {
     void loadBriefMemories();
     return () => controller.abort();
   }, [briefParams, briefRefreshKey, t]);
+
+  const candidateParams = useMemo(() => {
+    const nextParams = new URLSearchParams({ limit: '100', status: 'pending' });
+    if (candidateQuery.trim()) nextParams.set('query', candidateQuery.trim());
+    return nextParams;
+  }, [candidateQuery]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function loadMemoryCandidates() {
+      setCandidateLoading(true);
+      setCandidateStatus('');
+      try {
+        const response = await fetch(`/api/memory-candidates?${candidateParams.toString()}`, {
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const data = await response.json() as { candidates: MemoryCandidateRecord[] };
+        setMemoryCandidates(data.candidates);
+      } catch (fetchError) {
+        if (!controller.signal.aborted) {
+          setCandidateStatus(fetchError instanceof Error ? fetchError.message : t('memory.error'));
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setCandidateLoading(false);
+        }
+      }
+    }
+
+    void loadMemoryCandidates();
+    return () => controller.abort();
+  }, [candidateParams, candidateRefreshKey, t]);
 
   const pageStart = data.total === 0 ? 0 : data.offset + 1;
   const pageEnd = Math.min(data.offset + data.conversations.length, data.total);
@@ -255,10 +308,41 @@ export const MemoryView: FC = () => {
     setBriefMemories((value) => value.filter((item) => item.id !== memoryId));
   }
 
+  async function approveMemoryCandidate(candidateId: string, content: string) {
+    const response = await fetch(`/api/memory-candidates/${encodeURIComponent(candidateId)}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+
+    if (!response.ok) {
+      setCandidateStatus(`${t('memory.error')}: HTTP ${response.status}`);
+      return;
+    }
+
+    setCandidateStatus(t('memory.candidateApproved'));
+    setMemoryCandidates((value) => value.filter((item) => item.id !== candidateId));
+    setBriefRefreshKey((value) => value + 1);
+  }
+
+  async function rejectMemoryCandidate(candidateId: string) {
+    const response = await fetch(`/api/memory-candidates/${encodeURIComponent(candidateId)}/reject`, {
+      method: 'POST',
+    });
+
+    if (!response.ok) {
+      setCandidateStatus(`${t('memory.error')}: HTTP ${response.status}`);
+      return;
+    }
+
+    setCandidateStatus(t('memory.candidateRejected'));
+    setMemoryCandidates((value) => value.filter((item) => item.id !== candidateId));
+  }
+
   return (
     <div className="max-w-6xl mx-auto space-y-6 animate-in fade-in duration-500">
       <div className="flex gap-2 border-b border-slate-800">
-        {(['raw', 'brief'] as const).map((tab) => (
+        {(['raw', 'brief', 'candidates'] as const).map((tab) => (
           <button
             key={tab}
             type="button"
@@ -269,7 +353,11 @@ export const MemoryView: FC = () => {
                 : 'border-transparent text-slate-500 hover:text-slate-300'
             }`}
           >
-            {tab === 'raw' ? t('memory.rawSessions') : t('memory.briefMemories')}
+            {tab === 'raw'
+              ? t('memory.rawSessions')
+              : tab === 'brief'
+                ? t('memory.briefMemories')
+                : t('memory.pendingCandidates')}
           </button>
         ))}
       </div>
@@ -405,7 +493,7 @@ export const MemoryView: FC = () => {
         </button>
       </div>
       </>
-      ) : (
+      ) : activeMemoryTab === 'brief' ? (
       <>
         <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
           <div className="grid grid-cols-1 items-end gap-3 lg:grid-cols-[1fr_auto]">
@@ -442,6 +530,48 @@ export const MemoryView: FC = () => {
                 language={language}
                 onUpdate={(content) => void updatePrunedMemory(item.id, content)}
                 onRemove={() => void removePrunedMemory(item.id)}
+              />
+            ))}
+          </div>
+        )}
+      </>
+      ) : (
+      <>
+        <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
+          <div className="grid grid-cols-1 items-end gap-3 lg:grid-cols-[1fr_auto]">
+            <input
+              type="search"
+              value={candidateQuery}
+              onChange={(event) => setCandidateQuery(event.target.value)}
+              placeholder={t('memory.candidateSearchPlaceholder')}
+              className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-600 focus:border-indigo-500"
+            />
+            <button
+              type="button"
+              onClick={() => setCandidateRefreshKey((value) => value + 1)}
+              className="h-10 rounded-lg border border-indigo-500/40 bg-indigo-600 px-4 text-sm font-medium text-white transition hover:bg-indigo-500"
+            >
+              {t('memory.refresh')}
+            </button>
+          </div>
+          <div className="mt-3 text-xs text-slate-500">{candidateLoading ? t('memory.loading') : `${memoryCandidates.length} ${t('memory.pendingCandidates')}`}</div>
+          {candidateStatus && <div className="mt-2 text-xs text-emerald-400">{candidateStatus}</div>}
+        </div>
+
+        {memoryCandidates.length === 0 && !candidateLoading ? (
+          <div className="flex h-48 items-center justify-center rounded-2xl border border-dashed border-slate-800 bg-slate-900/50 text-sm text-slate-500">
+            {t('memory.noCandidates')}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {memoryCandidates.map((item) => (
+              <MemoryCandidateEditor
+                key={item.id}
+                item={item}
+                t={t}
+                language={language}
+                onApprove={(content) => void approveMemoryCandidate(item.id, content)}
+                onReject={() => void rejectMemoryCandidate(item.id)}
               />
             ))}
           </div>
@@ -582,6 +712,60 @@ const PrunedMemoryEditor: FC<{
         value={content}
         onChange={(event) => setContent(event.target.value)}
         className="min-h-32 w-full resize-y rounded-lg border border-slate-700 bg-slate-950 p-3 text-sm leading-6 text-slate-100 outline-none transition focus:border-indigo-500"
+      />
+    </section>
+  );
+};
+
+const MemoryCandidateEditor: FC<{
+  item: MemoryCandidateRecord;
+  t: ReturnType<typeof useI18n>['t'];
+  language: 'zh' | 'en';
+  onApprove: (content: string) => void;
+  onReject: () => void;
+}> = ({ item, t, language, onApprove, onReject }) => {
+  const [content, setContent] = useState(item.draftJson);
+
+  useEffect(() => {
+    setContent(item.draftJson);
+  }, [item.draftJson]);
+
+  return (
+    <section className="mx-6 rounded-xl border border-slate-800 bg-slate-900 p-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="font-mono text-[11px] text-slate-500">{item.id}</div>
+          <div className="mt-1 text-xs text-slate-500">
+            {t('memory.sourceConversation')}: <span className="font-mono">{item.sourceConversationId}</span>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => onApprove(content)}
+            disabled={!content.trim()}
+            className="rounded-md border border-emerald-500/40 px-3 py-1 text-xs text-emerald-300 transition hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {t('memory.approve')}
+          </button>
+          <button
+            type="button"
+            onClick={onReject}
+            className="rounded-md border border-rose-500/30 px-3 py-1 text-xs text-rose-300 transition hover:bg-rose-500/10"
+          >
+            {t('memory.reject')}
+          </button>
+        </div>
+      </div>
+      <div className="mb-3 grid grid-cols-1 gap-2 text-xs text-slate-400 md:grid-cols-3">
+        <MemoryMeta label={t('memory.score')} value={`${item.score} / 5 · ${item.status}`} />
+        <MemoryMeta label={t('memory.createdAt')} value={formatEpochDate(item.createdAt, language)} />
+        <MemoryMeta label={t('memory.reviewedAt')} value={item.reviewedAt ? formatEpochDate(item.reviewedAt, language) : '-'} />
+      </div>
+      <textarea
+        value={content}
+        onChange={(event) => setContent(event.target.value)}
+        className="min-h-48 w-full resize-y rounded-lg border border-slate-700 bg-slate-950 p-3 text-sm leading-6 text-slate-100 outline-none transition focus:border-indigo-500"
       />
     </section>
   );
