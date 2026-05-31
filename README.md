@@ -1,20 +1,20 @@
 # Home Assistant - Sentinel
 
 <!-- TEST_REPORT_START -->
-# Performance Snapshot (May 27, 2026) ✅
+# Performance Snapshot (June 1, 2026) ✅
 
-The system has been verified with **65 automated tests**. Below are the latest local performance metrics from the server test suite:
+The system has been verified with **91 automated tests**. Below are the latest local performance metrics from the server test suite:
 
 | Component | Operation | Duration | Note |
 | :--- | :--- | :--- | :--- |
-| **Async_Voice_Video** | `safeSave` | **118.50 ms** | Optimized MP4 synthesis |
-| **FaceEngine** | `extractDescriptor` | **146.76 ms** | Per-face feature extraction |
-| **FaceEngine** | `loadModels` | **281.59 ms** | One-time startup / warmup |
-| **FaceEngine** | `recognizeFaces` | **44.88 ms** | Detection plus similarity-based identity check |
-| **Queue** | `push` | **78.42 ms** | Sequential task queue overhead |
+| **Async_Voice_Video** | `safeSave` | **120.61 ms** | Optimized MP4 synthesis |
+| **FaceEngine** | `extractDescriptor` | **153.41 ms** | Per-face feature extraction |
+| **FaceEngine** | `loadModels` | **283.29 ms** | One-time startup / warmup |
+| **FaceEngine** | `recognizeFaces` | **45.27 ms** | Detection plus similarity-based identity check |
+| **Queue** | `push` | **77.29 ms** | Sequential task queue overhead |
 | **Socket** | `calculatePcmLevel` | **<1 ms** | Audio volume analysis |
 | **SyncManager** | `addAudio` | **<1 ms** | Audio buffer push overhead |
-| **SyncManager** | `addVideo` | **<1 ms** | Frame push overhead |
+| **SyncManager** | `addVideo` | **1.11 ms** | Frame push overhead |
 
 Latest verification command:
 
@@ -22,7 +22,7 @@ Latest verification command:
 bun run test
 ```
 
-Result: **65 pass / 0 fail / 194 assertions** across 12 files in **2.89s**.
+Result: **88 pass / 0 fail / 295 assertions** across 13 files in **3.16s**.
 
 Generated reports:
 - `test-report.html`
@@ -96,7 +96,30 @@ Copy `.env.example` to `.env` when local overrides are needed:
 VITE_API_BASE_URL=http://localhost:3000
 VITE_SOCKET_URL=ws://localhost:3001/ws/realtime
 VITE_MODEL_BASE_PATH=/models
+SENTINEL_MODEL_TRACE=0
+SENTINEL_MODEL_TRACE_MAX_CHARS=4000
 ```
+
+#### Model Decision Trace Logs
+Set `SENTINEL_MODEL_TRACE=1` only during local debugging to print model prompts, decisions, summaries, and raw outputs:
+
+```bash
+SENTINEL_MODEL_TRACE=1 bun run dev
+```
+
+Use `SENTINEL_MODEL_TRACE_MAX_CHARS` to raise or lower the per-log truncation limit:
+
+```bash
+SENTINEL_MODEL_TRACE=1 SENTINEL_MODEL_TRACE_MAX_CHARS=8000 bun run dev
+```
+
+Trace logs are emitted with the `[ModelTrace:*]` prefix and currently cover:
+- `Intention` - request context, raw model JSON, normalized intent decision, and JSON repair output.
+- `Brain` - intent decision, injected memories, visual summary, recent conversation context, and final raw reply.
+- `Vision` - visual prompt, detector reference, prepared image size, and visual summary output.
+- `MemoryPrune` - pruning prompt and generated memory draft JSON.
+
+These logs may include user conversation content, approved memories, visual summaries, and model raw output. Keep `SENTINEL_MODEL_TRACE=0` outside local debugging.
 
 ---
 
@@ -138,7 +161,7 @@ The project is structured into modular layers for maximum performance and mainta
 - **Synthesizer**: Handles lazy MP4 synthesis via FFmpeg for emergency recording.
 
 ### 🎙️ Voice & Tools (`@server/tools`)
-- **Voice**: Text-to-Speech (TTS) using macOS native voices and FunASR transcription.
+- **Voice**: Text-to-Speech (TTS) uses the MLX CosyVoice service by default, keeps macOS `say` as fallback, and uses FunASR for transcription.
 - **WebRTC**: Real-time video/audio streaming via WebRTC (UDP).
 - **Frequency Control**: `WiseRelex` (DetectionValve) manages AI inference frequency to optimize CPU usage.
 - **Identity Verification**: Camera recognition context is passed to `HomeBrain` with `identityVerification`, `similarity`, and threshold details before command execution.
@@ -194,3 +217,20 @@ src/
 - **Voice Conversation Not Starting**: Voice transcription is enabled by default after startup. Check FunASR logs and microphone permission first; there is no subtitle switch to enable.
 - **Model Initialization**: Ensure `qwen2.5:7b` and `qwen2.5vl:7b` are available in Ollama; normal voice dialogue uses the text model, while vision is on demand.
 - **Face Recognition Mismatch**: If logs show `candidateLabel` but low `similarity`, re-register the member with `bun src/server/scripts/register_face.ts --name master --camera`.
+
+## CodeGraph
+
+This repository is initialized for [CodeGraph](https://github.com/colbymchenry/codegraph) to provide local semantic code navigation.
+
+Local maintenance notes:
+- The generated `.codegraph/` directory is ignored and should not be committed.
+- After changing source files, run `bun run codegraph:sync` or `bun run codegraph:index` to refresh the graph.
+- Check the graph with `bun run codegraph:status`.
+- The graph is best at static code structure; it will not fully understand runtime-only paths, environment-variable switches, or external process behavior.
+- Keep an eye on these manually maintained areas:
+  - server routes in `src/server/core`
+  - long-lived services in `src/server/services`
+  - cross-cutting UI flows in `src/components`
+  - Python helper scripts and shell-driven workflows under `src/server/scripts`
+- If the index becomes stale or locked, use `npx -y @colbymchenry/codegraph unlock .` before reindexing.
+- If you want agent access, run `npx -y @colbymchenry/codegraph install` for the assistant you use locally.

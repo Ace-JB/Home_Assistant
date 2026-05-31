@@ -1,16 +1,19 @@
 import { createOllama } from 'ollama-ai-provider';
-import { generateText, type CoreMessage, type UserContent } from 'ai';
+import { generateText, streamText, type CoreMessage, type UserContent } from 'ai';
 import { spawn } from 'child_process';
 import { GLOBAL_CONFIG } from '@/global_config';
 import { memory, type ConversationMessage, type DayType, type PrunedMemoryRecord, type TimeBucket } from '@modules/memory';
 import { analyzeCommand, type AnalyzeCommandInput, type IntentionAnalysis } from '@modules/intention';
 import {
     buildCommandContextPrompt,
+    buildMemoryPruneInstruction,
     buildMemoryPruneUserPrompt,
     buildVisionPrompt,
     getMemoryPruneSystemPrompt,
     getStewardSystemPrompt,
+    type MemoryPrunePurpose,
 } from '@server/prompts';
+import { traceModelDecision } from '@server/observability/modelTrace';
 import type { AssistantLanguage } from '@tools/Socket';
 
 const ollama = createOllama({
@@ -42,11 +45,14 @@ export interface BrainCommandResult {
 }
 
 type TextGenerate = typeof generateText;
+type TextStream = typeof streamText;
 type AnalyzeCommandFn = (input: AnalyzeCommandInput) => Promise<IntentionAnalysis>;
 
 interface BrainProcessDeps {
     analyzeCommand?: AnalyzeCommandFn;
     generateText?: TextGenerate;
+    streamText?: TextStream;
+    onTextDelta?: (delta: string) => void | Promise<void>;
     memory?: Pick<typeof memory, 'getRecentConversationMessages' | 'getContextMemories'>;
 }
 
@@ -86,8 +92,20 @@ function buildContextPrompt(
     language: AssistantLanguage = 'zh',
     contextMemories: PrunedMemoryRecord[] = [],
     visualSummary?: string,
+    memoryRetrieval?: IntentionAnalysis['memoryRetrieval'],
 ): string {
     const context = {
+        memoryRetrieval: memoryRetrieval
+            ? {
+                requested: memoryRetrieval.enabled && memoryRetrieval.mode !== 'none',
+                mode: memoryRetrieval.mode,
+                query: memoryRetrieval.query,
+                resultCount: contextMemories.length,
+                note: memoryRetrieval.mode === 'recent_recall'
+                    ? 'approvedMemories are the latest approved long-term memories, not just the current wake session.'
+                    : undefined,
+            }
+            : undefined,
         approvedMemories: contextMemories.map(item => ({
             id: item.id,
             content: item.content,
@@ -117,6 +135,7 @@ function buildConversationMessages(
     contextMemories: PrunedMemoryRecord[],
     visualSummary: string | undefined,
     recentConversationMessages: ConversationMessage[],
+    memoryRetrieval?: IntentionAnalysis['memoryRetrieval'],
 ): CoreMessage[] {
     const recentMessages: CoreMessage[] = recentConversationMessages.map(message => ({
         role: message.role === 'agent' ? 'assistant' : 'user',
@@ -133,6 +152,7 @@ function buildConversationMessages(
                 language,
                 contextMemories,
                 visualSummary,
+                memoryRetrieval,
             ),
         },
     ];
@@ -246,6 +266,7 @@ export class HomeBrain {
         const analyze = deps.analyzeCommand ?? analyzeCommand;
         const generate = deps.generateText ?? generateText;
         const now = new Date();
+        const traceId = createTraceId();
         const recentConversationMessages = conversationId
             ? memoryStore.getRecentConversationMessages({ conversationId, limit: 8 })
             : [];
@@ -253,11 +274,31 @@ export class HomeBrain {
             userCommand,
             language,
             recentConversationMessages,
+            traceId,
         });
-        const needsVision = intention.visualUnderstanding?.required === true;
+        const routingAction = intention.routingAction ?? intention.routing?.action;
+        const memoryPlan = intention.dataPlan?.memory;
+        const visionPlan = intention.dataPlan?.vision;
+        const needsVision = intention.intent === 'visual' || visionPlan?.needed === true || intention.visualUnderstanding?.required === true;
+        const requiresLongTermMemory = intention.requiresLongTermMemory ?? (memoryPlan?.needed === true || (intention.memoryRetrieval.enabled && intention.memoryRetrieval.mode !== 'none'));
+        const requiresToolsOrMCP = intention.requiresToolsOrMCP ?? (needsVision || intention.dataPlan?.deviceState?.needed === true);
         console.log(`[Brain] Camera context ${needsVision ? 'reserved for vision model' : 'withheld from text model'}: ${summarizeCameraContext(cameraContext)}`);
         console.log(`[Brain] Using text model ${TEXT_MODEL_ID}${needsVision ? ` with vision model ${VISION_MODEL_ID}` : ''}; visionReason="${intention.visualUnderstanding?.reason ?? 'not requested'}"`);
-        if (!intention.shouldRespond) {
+        traceModelDecision('Brain', 'intention_decision', {
+            traceId,
+            userCommand,
+            intention,
+            recentConversationCount: recentConversationMessages.length,
+            routingAction,
+            dataNeeds: {
+                memory: requiresLongTermMemory,
+                vision: visionPlan?.needed === true,
+                deviceState: intention.dataPlan?.deviceState?.needed === true,
+                toolsOrMCP: requiresToolsOrMCP,
+                safety: intention.dataPlan?.safety,
+            },
+        });
+        if (routingAction === 'ignore' || !intention.shouldRespond) {
             return {
                 text: '',
                 shouldRespond: false,
@@ -265,7 +306,7 @@ export class HomeBrain {
                 shouldRemember: false,
             };
         }
-        if (intention.shouldEndSession) {
+        if (routingAction === 'end_session' || intention.shouldEndSession) {
             return {
                 text: language === 'en' ? 'Okay, call me anytime.' : '好的，随时叫我。',
                 shouldRespond: true,
@@ -273,41 +314,91 @@ export class HomeBrain {
                 shouldRemember: false,
             };
         }
-        const responseCommand = intention.resolvedContext.rewrite || userCommand;
+        const responseCommand = intention.resolvedContext.rewriteQuery || intention.contextResolution?.responseRewrite || intention.resolvedContext.rewrite || userCommand;
         const retrieval = intention.memoryRetrieval;
-        const contextMemories = retrieval.enabled && retrieval.mode !== 'none'
-            ? memoryStore.getContextMemories({
-                query: retrieval.query || responseCommand,
-                location: 'unknown',
-                timeBucket: getTimeBucket(now),
-                dayType: getDayType(now),
-                limit: 5,
-                mode: retrieval.mode,
-            })
-            : [];
-        const visualSummary = needsVision
-            ? await this.describeVision(responseCommand, language, image, cameraContext, generate)
-            : undefined;
+        const shouldFetchMemory = requiresLongTermMemory;
+        const memoryMode = memoryPlan?.mode ?? retrieval.mode;
+        const memoryQuery = intention.resolvedContext.rewriteQuery || memoryPlan?.query || retrieval.query || intention.contextResolution?.memoryQueryRewrite || responseCommand;
+        const memoryFetchStartedAt = Date.now();
+        const toolFetchStartedAt = Date.now();
+        const [contextMemories, toolOrMcpContext] = await Promise.all([
+            shouldFetchMemory && memoryMode !== 'none'
+                ? Promise.resolve(memoryStore.getContextMemories({
+                        query: memoryQuery,
+                        location: 'unknown',
+                        timeBucket: getTimeBucket(now),
+                        dayType: getDayType(now),
+                        limit: 5,
+                        mode: memoryMode,
+                    }))
+                    .then(items => {
+                        traceModelDecision('Brain', 'rag_fetch_complete', {
+                            traceId,
+                            query: memoryQuery,
+                            mode: memoryMode,
+                            durationMs: Date.now() - memoryFetchStartedAt,
+                            resultCount: items.length,
+                        });
+                        return items;
+                    })
+                : Promise.resolve([]),
+            requiresToolsOrMCP
+                ? this.readToolOrMcpContext({
+                    responseCommand,
+                    language,
+                    image,
+                    cameraContext,
+                    generate,
+                    needsVision,
+                    traceId,
+                    startedAt: toolFetchStartedAt,
+                })
+                : Promise.resolve(undefined),
+        ]);
+        const visualSummary = toolOrMcpContext?.visualSummary;
+        const conversationMessages = buildConversationMessages(
+            userName,
+            responseCommand,
+            language,
+            contextMemories,
+            visualSummary,
+            recentConversationMessages,
+            retrieval,
+        );
 
-        // 生成响应
-        const result = await generate({
-            model: textModel as any,    // 👈 强制转换为 any 绕过类型冲突
-            system: getSystemPrompt(language),
-            maxTokens: GLOBAL_CONFIG.OLLAMA.TEXT_MAX_TOKENS,
-            temperature: GLOBAL_CONFIG.OLLAMA.TEXT_TEMPERATURE,
-            topP: GLOBAL_CONFIG.OLLAMA.TEXT_TOP_P,
-            messages: buildConversationMessages(
-                userName,
-                responseCommand,
-                language,
-                contextMemories,
-                visualSummary,
-                recentConversationMessages,
-            ),
+        traceModelDecision('Brain', 'response_context', {
+            traceId,
+            responseCommand,
+            routing: intention.routing,
+            dataPlan: intention.dataPlan,
+            responsePlan: intention.responsePlan,
+            memoryRetrieval: retrieval,
+            parallelFetch: {
+                memory: shouldFetchMemory && memoryMode !== 'none',
+                toolsOrMCP: requiresToolsOrMCP,
+                vision: Boolean(toolOrMcpContext?.visualSummary),
+            },
+            injectedMemories: contextMemories.map(item => ({
+                id: item.id,
+                topic: item.topic,
+                status: item.status,
+                baseScore: item.baseScore,
+                content: item.content,
+            })),
+            visualSummary,
+            recentConversationCount: recentConversationMessages.length,
+            messages: conversationMessages,
         });
 
+        const responseText = await this.generateResponseText(
+            conversationMessages,
+            language,
+            deps,
+        );
+        traceModelDecision('Brain', 'response_raw_output', responseText);
+
         return {
-            text: result.text,
+            text: responseText,
             shouldRespond: true,
             shouldEndSession: false,
             shouldRemember: true,
@@ -353,6 +444,12 @@ export class HomeBrain {
             detectorReference,
             language,
         });
+        traceModelDecision('Vision', 'request', {
+            userCommand,
+            detectorReference,
+            prompt,
+            imageBytes: preparedImage.length,
+        });
 
         const result = await generate({
             model: visionModel as any,
@@ -365,8 +462,73 @@ export class HomeBrain {
                 },
             ] satisfies CoreMessage[],
         });
+        traceModelDecision('Vision', 'summary_raw_output', result.text);
 
         return result.text.trim();
+    }
+
+    private async readToolOrMcpContext(input: {
+        responseCommand: string;
+        language: AssistantLanguage;
+        image?: Buffer | Uint8Array | string;
+        cameraContext?: CameraRecognitionContext;
+        generate: TextGenerate;
+        needsVision: boolean;
+        traceId: string;
+        startedAt: number;
+    }): Promise<{ visualSummary?: string }> {
+        const visualSummary = input.needsVision
+            ? await this.describeVision(
+                input.responseCommand,
+                input.language,
+                input.image,
+                input.cameraContext,
+                input.generate,
+            )
+            : undefined;
+
+        traceModelDecision('Brain', 'tool_or_mcp_fetch_complete', {
+            traceId: input.traceId,
+            durationMs: Date.now() - input.startedAt,
+            vision: Boolean(visualSummary),
+        });
+
+        return { visualSummary };
+    }
+
+    private async generateResponseText(
+        messages: CoreMessage[],
+        language: AssistantLanguage,
+        deps: BrainProcessDeps,
+    ): Promise<string> {
+        const options = {
+            model: textModel as any,
+            system: getSystemPrompt(language),
+            maxTokens: GLOBAL_CONFIG.OLLAMA.TEXT_MAX_TOKENS,
+            temperature: GLOBAL_CONFIG.OLLAMA.TEXT_TEMPERATURE,
+            topP: GLOBAL_CONFIG.OLLAMA.TEXT_TOP_P,
+            messages,
+        };
+
+        if (!deps.streamText && deps.generateText) {
+            const result = await deps.generateText(options);
+            if (result.text && deps.onTextDelta) {
+                await deps.onTextDelta(result.text);
+            }
+            return result.text;
+        }
+
+        const stream = deps.streamText ?? streamText;
+        const result = await stream(options);
+        let fullText = '';
+        for await (const delta of result.textStream) {
+            fullText += delta;
+            if (deps.onTextDelta) {
+                await deps.onTextDelta(delta);
+            }
+        }
+
+        return fullText;
     }
 }
 
@@ -374,11 +536,24 @@ export async function pruneConversationForMemory(
     messages: MemoryPruneMessage[],
     language: AssistantLanguage = 'zh',
     instruction?: string,
+    purpose?: MemoryPrunePurpose,
 ): Promise<string> {
     const transcript = messages
         .map(message => `${message.role === 'user' ? 'User' : 'Agent'}: ${message.content}`)
         .join('\n');
-    const prompt = buildMemoryPruneUserPrompt({ transcript, instruction });
+    const effectiveInstruction = buildMemoryPruneInstruction({ instruction, purpose, language });
+    const prompt = buildMemoryPruneUserPrompt({
+        transcript,
+        instruction,
+        purpose,
+        language,
+    });
+    traceModelDecision('MemoryPrune', 'request', {
+        messageCount: messages.length,
+        purpose: purpose ?? 'long_term_lifestyle',
+        instruction: effectiveInstruction,
+        prompt,
+    });
 
     const result = await generateText({
         model: textModel as any,
@@ -388,6 +563,7 @@ export async function pruneConversationForMemory(
         system: getMemoryPruneSystemPrompt(language),
         prompt,
     });
+    traceModelDecision('MemoryPrune', 'draft_raw_output', result.text);
 
     return result.text.trim();
 }
@@ -408,6 +584,10 @@ function getDayType(date: Date): DayType {
 
 function getSystemPrompt(language: AssistantLanguage): string {
     return getStewardSystemPrompt(language);
+}
+
+function createTraceId(): string {
+    return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 export const brain = new HomeBrain();

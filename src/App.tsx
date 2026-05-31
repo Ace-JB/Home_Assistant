@@ -3,11 +3,13 @@ import { Sidebar } from './components/Sidebar';
 import { DashboardView } from './components/DashboardView';
 import { LiveView } from './components/LiveView';
 import { MemoryView } from './components/MemoryView';
+import { VoiceControlView } from './components/VoiceControlView';
+import { ModelRecallLogsView } from './components/ModelRecallLogsView';
 import { DemoRouter } from './demos/DemoRouter';
 import { useRealtimeFeedback } from './hooks/useRealtimeFeedback';
 import { useI18n, type Language } from './i18n';
 
-type AppTab = 'dashboard' | 'live' | 'memory';
+type AppTab = 'dashboard' | 'live' | 'memory' | 'voice' | 'logs';
 
 const App = () => {
   const [activeTab, setActiveTab] = useState<AppTab>('dashboard');
@@ -63,6 +65,8 @@ const App = () => {
           {activeTab === 'dashboard' && <DashboardView />}
           {activeTab === 'live' && <LiveView realtime={realtime} />}
           {activeTab === 'memory' && <MemoryView />}
+          {activeTab === 'voice' && <VoiceControlView />}
+          {activeTab === 'logs' && <ModelRecallLogsView />}
         </div>
       </main>
     </div>
@@ -73,6 +77,8 @@ const App = () => {
 function getTabTitle(activeTab: AppTab, t: ReturnType<typeof useI18n>['t']): string {
   if (activeTab === 'dashboard') return t('app.title.dashboard');
   if (activeTab === 'live') return t('app.title.live');
+  if (activeTab === 'voice') return t('app.title.voice');
+  if (activeTab === 'logs') return t('app.title.logs');
   return t('app.title.memory');
 }
 

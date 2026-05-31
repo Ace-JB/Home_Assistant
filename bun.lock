@@ -17,6 +17,7 @@
         "werift": "^0.23.0",
       },
       "devDependencies": {
+        "@colbymchenry/codegraph": "^0.9.7",
         "@types/bun": "latest",
         "@types/react": "^19",
         "@types/react-dom": "^19",
@@ -49,6 +50,20 @@
     "@babel/runtime": ["@babel/runtime@7.29.2", "", {}, "sha512-JiDShH45zKHWyGe4ZNVRrCjBz8Nh9TMmZG1kh4QTK8hCBTWBi8Da+i7s1fJw7/lYpM4ccepSNfqzZ/QvABBi5g=="],
 
     "@babel/types": ["@babel/types@7.29.0", "", { "dependencies": { "@babel/helper-string-parser": "^7.27.1", "@babel/helper-validator-identifier": "^7.28.5" } }, "sha512-LwdZHpScM4Qz8Xw2iKSzS+cfglZzJGvofQICy7W7v4caru4EaAmyUuO6BGrbyQ2mYV11W0U8j5mBhd14dd3B0A=="],
+
+    "@colbymchenry/codegraph": ["@colbymchenry/codegraph@0.9.7", "", { "optionalDependencies": { "@colbymchenry/codegraph-darwin-arm64": "0.9.7", "@colbymchenry/codegraph-darwin-x64": "0.9.7", "@colbymchenry/codegraph-linux-arm64": "0.9.7", "@colbymchenry/codegraph-linux-x64": "0.9.7", "@colbymchenry/codegraph-win32-arm64": "0.9.7", "@colbymchenry/codegraph-win32-x64": "0.9.7" }, "bin": { "codegraph": "npm-shim.js" } }, "sha512-sBZnnKGkUdmM3BOkvfFq6wdK2OC/sA7nLMh28voan82xFzRp8irEVCakywfOXfDE4bkVModWvucz85f3+YMO6w=="],
+
+    "@colbymchenry/codegraph-darwin-arm64": ["@colbymchenry/codegraph-darwin-arm64@0.9.7", "", { "os": "darwin", "cpu": "arm64" }, "sha512-bQSQSBAeC2HRC4A0wH/T1sOxvLgtNlc7pIjz6vV03ccg0T7zhD0WfyO+HTQRdD1RzAdAILhIB1TJpCQsREoHrg=="],
+
+    "@colbymchenry/codegraph-darwin-x64": ["@colbymchenry/codegraph-darwin-x64@0.9.7", "", { "os": "darwin", "cpu": "x64" }, "sha512-sDXCnPS+4JDzQlH7euGKemq9hhOXmcswDTqt3IGs8vgyNAbUaBQZq9WUGb4d9EyEFlogr5I+I63SsCgwKOIWlw=="],
+
+    "@colbymchenry/codegraph-linux-arm64": ["@colbymchenry/codegraph-linux-arm64@0.9.7", "", { "os": "linux", "cpu": "arm64" }, "sha512-kLuElBr3WtkH/GCuVmXQ96bhFDmiFdQet0K/9AiVUynPdvQTRHNKpdFxdeA8yoJT1esfFDm63r/n7sl9ITN+AA=="],
+
+    "@colbymchenry/codegraph-linux-x64": ["@colbymchenry/codegraph-linux-x64@0.9.7", "", { "os": "linux", "cpu": "x64" }, "sha512-XPMb+Fux0r0yoceHSh4IVDME3tf+8f40aJbMTui2UHjdTI4FKXuUZRFsnmlspn8KrdYWn+VegeYyxMmvl+x8sQ=="],
+
+    "@colbymchenry/codegraph-win32-arm64": ["@colbymchenry/codegraph-win32-arm64@0.9.7", "", { "os": "win32", "cpu": "arm64" }, "sha512-YtPNwTJjNHhgTY+XSpt7L2t5zcSr77v3WodJdZwIvt8RR6347kTbfmAQkvH7OqQeWDc4Da5mY4SLomsaCbCTSA=="],
+
+    "@colbymchenry/codegraph-win32-x64": ["@colbymchenry/codegraph-win32-x64@0.9.7", "", { "os": "win32", "cpu": "x64" }, "sha512-WZ8pZM+Qc5PWl2oEyzDhrBVW1gWKCSi6A4JXqBVIn2A+AH/kKJGQ34QJg7BWsJA7R5Wk2lJ7+LM5DPFnlY09wg=="],
 
     "@fidm/asn1": ["@fidm/asn1@1.0.4", "", {}, "sha512-esd1jyNvRb2HVaQGq2Gg8Z0kbQPXzV9Tq5Z14KNIov6KfFD6PTaRIO8UpcsYiTNzOqJpmyzWgVTrUwFV3UF4TQ=="],
 

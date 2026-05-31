@@ -2,10 +2,12 @@ import { GLOBAL_CONFIG } from '@/global_config';
 import { initCamera } from "@tools/Camera";
 import {
     extractTextFromVoiceStream,
+    extractSpeechReadyChunk,
     initAudioListen,
     isEchoLikeTranscript,
     isValidBargeInTranscript,
     speakInterruptible,
+    validateTextToSpeechConfig,
     type InterruptibleSpeech,
 } from "@tools/Voice";
 import { realtimeSocket, startRealtimeSocketServer, calculatePcmLevel } from "@tools/Socket";
@@ -16,12 +18,34 @@ import { faceEngine, type HumanDetectionResult } from '@modules/media/face';
 import { memory } from '@modules/memory';
 import { faceValue } from '@tools/WiseRelex';
 import type { BrainCommandResult, CameraRecognitionContext } from '@server/modules/brain';
+import type { ConversationMessage } from '@modules/memory';
 
 const SUBTITLE_VAD_THRESHOLD = 0.05; // 过滤背景低频噪点
 const MAX_SUBTITLE_DURATION_MS = 10000; // 单次录音最长 10 秒
 const SILENCE_END_MS = 800; // 连续静音 800ms 认为说话结束
 
 let firstAudioReceived = false;
+type MonitorMode = 'full' | 'video' | 'audio';
+type MonitorStop = () => Promise<void>;
+type MonitorRuntime = {
+    mode: MonitorMode;
+    stop: MonitorStop;
+    startedAt: number;
+};
+type MonitorRuntimeState = {
+    runtime?: MonitorRuntime;
+    starting?: Promise<MonitorRuntime>;
+};
+
+const MONITOR_RUNTIME_KEY = Symbol.for('home-assistant.monitorRuntime');
+
+function getMonitorRuntimeState(): MonitorRuntimeState {
+    const globalScope = globalThis as typeof globalThis & { [MONITOR_RUNTIME_KEY]?: MonitorRuntimeState };
+    if (!globalScope[MONITOR_RUNTIME_KEY]) {
+        globalScope[MONITOR_RUNTIME_KEY] = {};
+    }
+    return globalScope[MONITOR_RUNTIME_KEY]!;
+}
 
 function buildCameraRecognitionContext(detection: HumanDetectionResult): CameraRecognitionContext {
     const { faces, bodies, hands, objects, ts } = detection;
@@ -94,8 +118,50 @@ function markRecognitionAge(context: CameraRecognitionContext | null): CameraRec
     };
 }
 
-async function monitor() {
+function shouldGenerateMemoryCandidate(messages: ConversationMessage[]): boolean {
+    const userMessages = messages.filter(message => message.role === 'user' && message.content.trim().length > 1);
+    const agentMessages = messages.filter(message => message.role === 'agent' && message.content.trim().length > 0);
+    return userMessages.length >= 2 && agentMessages.length >= 2 && messages.length >= 4;
+}
+
+function extractMemoryCandidateScore(draft: string): number {
+    const parsed = parseJsonLike(draft);
+    const retention = objectValue(parsed)?.retention_evaluation;
+    const score = numberValue(objectValue(retention)?.recommendation_score)
+        ?? numberValue(objectValue(parsed)?.base_score)
+        ?? numberValue(objectValue(parsed)?.baseScore);
+    return Number.isFinite(score) ? Math.max(1, Math.min(5, Math.round(score!))) : 3;
+}
+
+function parseJsonLike(value: string): unknown {
+    try {
+        return JSON.parse(value);
+    } catch {
+        const match = value.match(/\{[\s\S]*\}/);
+        if (!match) return null;
+        try {
+            return JSON.parse(match[0]);
+        } catch {
+            return null;
+        }
+    }
+}
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) return Number(value);
+    return undefined;
+}
+
+async function monitor(): Promise<MonitorStop> {
     startRealtimeSocketServer();
+    await validateTextToSpeechConfig().catch((error) => {
+        console.warn('[TTS] config validation failed; monitor will continue without blocking camera/audio startup:', error);
+    });
 
     const [{ stream: video, stop: stopVideo }, { stream: audio, stop: stopAudio }] = await Promise.all([
         initCamera(),
@@ -127,6 +193,7 @@ async function monitor() {
     let bargeInTranscribing = false;
     let bargeInPeak = 0;
     let bargeInLastProbeTs = 0;
+    let activeSpeechQueueCancelled = false;
 
     function resetBargeInBuffer(): void {
         bargeInBuffer = [];
@@ -146,6 +213,7 @@ async function monitor() {
             clearTimeout(wakeTimer);
         }
         wakeTimer = setTimeout(() => {
+            queueMemoryCandidateForSession(currentConversationId);
             isAwake = false;
             currentConversationId = null;
             console.log("💤 打断后监听超时，回到待机状态");
@@ -153,6 +221,7 @@ async function monitor() {
     }
 
     function endCurrentSession(reason: string): void {
+        queueMemoryCandidateForSession(currentConversationId);
         isAwake = false;
         currentConversationId = null;
         if (wakeTimer) {
@@ -162,7 +231,44 @@ async function monitor() {
         console.log(`💤 ${reason}`);
     }
 
-    async function handleCommand(command: string): Promise<BrainCommandResult | null> {
+    function queueMemoryCandidateForSession(conversationId: string | null): void {
+        if (!conversationId) return;
+        void generateMemoryCandidateForSession(conversationId);
+    }
+
+    async function generateMemoryCandidateForSession(conversationId: string): Promise<void> {
+        try {
+            memory.maintainMemoryLifecycle();
+            const conversation = memory.getConversationSession(conversationId);
+            if (!conversation || !shouldGenerateMemoryCandidate(conversation.messages)) {
+                return;
+            }
+            const existing = memory.searchMemoryCandidates({ sourceConversationId: conversationId, limit: 1 })[0];
+            if (existing) {
+                return;
+            }
+
+            const { pruneConversationForMemory } = await import('@server/modules/brain');
+            const draft = await pruneConversationForMemory(
+                conversation.messages,
+                realtimeSocket.getAssistantLanguage(),
+            );
+            const score = extractMemoryCandidateScore(draft);
+            memory.saveMemoryCandidate({
+                source_conversation_id: conversationId,
+                draft_json: draft,
+                score,
+            });
+            console.log(`[Memory] Candidate generated for conversation=${conversationId} score=${score}`);
+        } catch (error) {
+            console.error('[Memory] Candidate generation failed:', error);
+        }
+    }
+
+    async function handleCommand(
+        command: string,
+        deps: { onTextDelta?: (delta: string) => void | Promise<void> } = {},
+    ): Promise<BrainCommandResult | null> {
         const trimmed = command.trim();
         if (trimmed.length <= 1) return null;
 
@@ -176,6 +282,7 @@ async function monitor() {
             realtimeSocket.getAssistantLanguage(),
             latestVisionFrame ?? undefined,
             currentConversationId ?? undefined,
+            deps,
         );
         console.log(`🤖 AI 响应: ${result.text || '[no response]'}`);
         if (result.shouldEndSession && !result.shouldRespond) {
@@ -196,6 +303,84 @@ async function monitor() {
         });
 
         return result;
+    }
+
+    function enqueueSpeechChunks(
+        getToken: () => number,
+        onDone: (speech: InterruptibleSpeech | null) => void,
+    ): {
+        pushDelta: (delta: string) => Promise<void>;
+        flush: () => Promise<void>;
+        cancel: () => void;
+    } {
+        let buffer = '';
+        let tail = Promise.resolve();
+        let cancelled = false;
+        const speechToken = getToken();
+        const prewarmCosyVoice = GLOBAL_CONFIG.VOICE.TTS_PROVIDER === 'cosyvoice';
+        const pending: Array<{ text: string; speech?: InterruptibleSpeech }> = [];
+
+        const pump = async () => {
+            while (pending.length > 0) {
+                if (cancelled || activeSpeechQueueCancelled || activeSpeechToken !== speechToken) return;
+                const item = pending.shift()!;
+                const speech = item.speech ?? speakInterruptible(item.text);
+                activeSpeech = speech;
+                activeSpeechText = item.text;
+                activeSpeechStartedAt = Date.now();
+                resetBargeInBuffer();
+                onDone(speech);
+                try {
+                    await speech.done;
+                } finally {
+                    if (activeSpeech === speech) {
+                        activeSpeech = null;
+                        activeSpeechText = '';
+                        activeSpeechStartedAt = 0;
+                        resetBargeInBuffer();
+                    }
+                    onDone(null);
+                }
+            }
+        };
+
+        const enqueue = (text: string) => {
+            const chunk = text.trim();
+            if (!chunk || cancelled) return;
+            console.log(`[TTS:Queue] enqueue chars=${chunk.length} text="${chunk.slice(0, 80)}${chunk.length > 80 ? '...' : ''}"`);
+            pending.push({
+                text: chunk,
+                speech: prewarmCosyVoice ? speakInterruptible(chunk) : undefined,
+            });
+            tail = tail.then(pump);
+        };
+
+        return {
+            pushDelta: async (delta: string) => {
+                if (cancelled || activeSpeechToken !== speechToken) return;
+                buffer += delta;
+                let next = extractSpeechReadyChunk(buffer);
+                while (next) {
+                    buffer = next.rest;
+                    enqueue(next.chunk);
+                    next = extractSpeechReadyChunk(buffer);
+                }
+            },
+            flush: async () => {
+                if (cancelled || activeSpeechQueueCancelled || activeSpeechToken !== speechToken) return;
+                const rest = buffer.trim();
+                buffer = '';
+                enqueue(rest);
+                await tail;
+            },
+            cancel: () => {
+                cancelled = true;
+                buffer = '';
+                for (const item of pending.splice(0)) {
+                    item.speech?.stop();
+                }
+            },
+        };
     }
 
     async function speakResponse(response: string): Promise<void> {
@@ -230,6 +415,59 @@ async function monitor() {
         }
     }
 
+    async function handleAndSpeakCommand(command: string): Promise<BrainCommandResult | null> {
+        const speechToken = activeSpeechToken + 1;
+        activeSpeechToken = speechToken;
+        activeSpeechQueueCancelled = false;
+        systemSpeaking = true;
+        activeSpeechText = '';
+        activeSpeechStartedAt = Date.now();
+        resetBargeInBuffer();
+
+        const speechQueue = enqueueSpeechChunks(
+            () => speechToken,
+            (speech) => {
+                if (activeSpeechToken === speechToken) {
+                    activeSpeech = speech;
+                }
+            },
+        );
+
+        try {
+            const result = await handleCommand(command, {
+                onTextDelta: async (delta) => {
+                    if (activeSpeechToken !== speechToken || activeSpeechQueueCancelled) return;
+                    activeSpeechText += delta;
+                    await speechQueue.pushDelta(delta);
+                },
+            });
+            await speechQueue.flush();
+            return result;
+        } finally {
+            if (activeSpeechQueueCancelled) {
+                speechQueue.cancel();
+            }
+            if (activeSpeechToken === speechToken) {
+                activeSpeech = null;
+                activeSpeechText = '';
+                activeSpeechStartedAt = 0;
+                systemSpeaking = false;
+                resetBargeInBuffer();
+                await new Promise(r => setTimeout(r, 800));
+
+                if (wakeTimer) clearTimeout(wakeTimer);
+                wakeTimer = setTimeout(() => {
+                    queueMemoryCandidateForSession(currentConversationId);
+                    isAwake = false;
+                    currentConversationId = null;
+                    console.log("💤 会话超时，回到待机状态");
+                }, 15000);
+            } else {
+                speechQueue.cancel();
+            }
+        }
+    }
+
     async function flushBargeInBuffer(): Promise<void> {
         if (bargeInTranscribing || bargeInBuffer.length === 0 || !systemSpeaking || !activeSpeech) {
             return;
@@ -257,6 +495,7 @@ async function monitor() {
             }
 
             console.log(`[BargeIn] Stopping speech and entering listening mode. transcript="${text}", keyword=${hasKeyword}`);
+            activeSpeechQueueCancelled = true;
             activeSpeech.stop();
             systemSpeaking = false;
             activeSpeech = null;
@@ -296,11 +535,15 @@ async function monitor() {
                 const hasWakeWord = text.includes(wakeWord);
 
                 if (hasWakeWord || isAwake) {
+                    let command = hasWakeWord ? text.split(wakeWord).pop()?.trim() : text;
+
                     // 如果包含唤醒词，进入唤醒状态并开启/重置计时器
                     if (hasWakeWord) {
                         console.log(`🎯 检测到唤醒词 [${wakeWord}], 进入指令监听模式...`);
                         isAwake = true;
-                        void speakResponse('我在');
+                        if (!command && GLOBAL_CONFIG.VOICE.TTS_PROVIDER !== 'cosyvoice') {
+                            void speakResponse('我在');
+                        }
                     }
 
                     // 只要检测到可能是指令，立即清除旧的倒计时，防止在思考/说话期间超时
@@ -309,12 +552,9 @@ async function monitor() {
                         wakeTimer = null;
                     }
 
-                    let command = hasWakeWord ? text.split(wakeWord).pop()?.trim() : text;
-
                     if (command && command.length > 1) {
-                        const result = await handleCommand(command);
+                        const result = await handleAndSpeakCommand(command);
                         if (result?.shouldRespond && result.text) {
-                            await speakResponse(result.text);
                             realtimeSocket.publishVoiceText(`[AI] ${result.text}`, Date.now(), Date.now() + 2000);
                         }
                         if (result?.shouldEndSession) {
@@ -323,6 +563,7 @@ async function monitor() {
                     } else if (hasWakeWord) {
                         // 如果只有唤醒词而没有后续指令，启动基础超时计时
                         wakeTimer = setTimeout(() => {
+                            queueMemoryCandidateForSession(currentConversationId);
                             isAwake = false;
                             currentConversationId = null;
                             console.log("💤 指令监听超时，回到待机状态");
@@ -469,9 +710,22 @@ async function monitor() {
             }
         }
     });
+
+    return async () => {
+        if (wakeTimer) {
+            clearTimeout(wakeTimer);
+            wakeTimer = null;
+        }
+        activeSpeech?.stop();
+        audio.removeAllListeners('data');
+        p2j.removeAllListeners('data');
+        video.unpipe(p2j);
+        latestVisionFrame = null;
+        await Promise.allSettled([stopVideo(), stopAudio()]);
+    };
 }
 
-async function monitorVideoOnly() {
+async function monitorVideoOnly(): Promise<MonitorStop> {
     startRealtimeSocketServer();
 
     const { stream: video, stop: stopVideo } = await initCamera();
@@ -503,12 +757,14 @@ async function monitorVideoOnly() {
     });
 
     return async () => {
+        p2j.removeAllListeners('data');
+        video.unpipe(p2j);
         latestVisionFrame = null;
         await stopVideo();
     };
 }
 
-async function monitorAudioOnly() {
+async function monitorAudioOnly(): Promise<MonitorStop> {
     startRealtimeSocketServer();
 
     const { stream: audio, stop: stopAudio } = await initAudioListen();
@@ -577,24 +833,56 @@ async function monitorAudioOnly() {
     });
 
     return async () => {
+        audio.removeAllListeners('data');
+        subtitleBuffer = [];
         await stopAudio();
     };
 }
 
-export async function startMonitor(mode: 'full' | 'video' | 'audio' = 'full') {
+export async function stopMonitor(): Promise<void> {
+    const state = getMonitorRuntimeState();
+    const runtime = state.runtime;
+    state.runtime = undefined;
+    state.starting = undefined;
+    if (runtime) {
+        await runtime.stop();
+        console.log(`🛑 Sentinel Monitor stopped (${runtime.mode})`);
+    }
+}
+
+export async function startMonitor(mode: MonitorMode = 'full') {
+    const state = getMonitorRuntimeState();
+    if (state.runtime) {
+        if (state.runtime.mode === mode) {
+            console.log(`↩️ Sentinel Monitor already running (${mode}); skipping duplicate start.`);
+            return;
+        }
+        await stopMonitor();
+    }
+    if (state.starting) {
+        await state.starting;
+        return;
+    }
+
     const label = mode === 'video' ? 'Video Demo' : mode === 'audio' ? 'Audio Demo' : 'Camera & Audio';
-    console.log(`🚀 Starting Sentinel Monitor (${label})...`);
-    try {
+    state.starting = (async () => {
+        console.log(`🚀 Starting Sentinel Monitor (${label})...`);
+        let stop: MonitorStop;
         if (mode === 'video') {
-            await monitorVideoOnly();
-            return;
+            stop = await monitorVideoOnly();
+        } else if (mode === 'audio') {
+            stop = await monitorAudioOnly();
+        } else {
+            stop = await monitor();
         }
-        if (mode === 'audio') {
-            await monitorAudioOnly();
-            return;
-        }
-        await monitor();
+        return { mode, stop, startedAt: Date.now() };
+    })();
+
+    try {
+        state.runtime = await state.starting;
     } catch (error) {
         console.error('❌ Monitor failed to start:', error);
+    } finally {
+        state.starting = undefined;
     }
 }

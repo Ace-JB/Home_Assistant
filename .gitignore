@@ -17,6 +17,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # dotenv environment variable files
 .env
+.env.development
+.env.production
+.env.test
 .env.development.local
 .env.test.local
 .env.production.local
@@ -26,6 +29,8 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .eslintcache
 .cache
 *.tsbuildinfo
+.codegraph/
+__pycache__/
 
 # IntelliJ based IDEs
 .idea
@@ -36,8 +41,11 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # models
 models
 src/server/models
+src/server/tools/bin
+/voice
 
 # local data
+data/cosyvoice
 temp_cache
 src/server/temp_cache
 recordings
