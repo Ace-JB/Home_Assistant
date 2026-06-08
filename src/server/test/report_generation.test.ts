@@ -88,4 +88,35 @@ describe("Report Generation", () => {
             rmSync(dir, { recursive: true, force: true });
         }
     });
+
+    test("should preserve README feature docs when syncing the report block", () => {
+        const dir = mkdtempSync(join(tmpdir(), "ha-readme-feature-"));
+        const readmePath = join(dir, "README.md");
+
+        try {
+            writeFileSync(readmePath, [
+                "# Home Assistant - Sentinel",
+                "",
+                "<!-- TEST_REPORT_START -->",
+                "old report",
+                "<!-- TEST_REPORT_END -->",
+                "",
+                "## Hardware & Environment",
+                "- stable content",
+                "",
+                "### 🎙️ Voice & Tools (`@server/tools`)",
+                "- **Voice**: Text-to-Speech (TTS) uses the MLX CosyVoice service by default, keeps macOS `say` as fallback, and uses FunASR for transcription.",
+                "- **CosyVoice Material Workflow**: `VoiceControlView` extracts prompt audio and transcript candidates from local uploads or imported audio URLs, saves reusable speaker profiles, and applies the selected profile to the running TTS configuration.",
+            ].join("\n"));
+
+            syncReadme(parseOutput(SAMPLE_OUTPUT), readmePath);
+
+            const readme = readFileSync(readmePath, "utf8");
+            expect(readme).toContain("CosyVoice Material Workflow");
+            expect(readme).toContain("Voice & Tools");
+            expect(readme).not.toContain("old report");
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
 });

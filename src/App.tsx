@@ -4,7 +4,7 @@ import { DashboardView } from './components/DashboardView';
 import { LiveView } from './components/LiveView';
 import { MemoryView } from './components/MemoryView';
 import { VoiceControlView } from './components/VoiceControlView';
-import { ModelRecallLogsView } from './components/ModelRecallLogsView';
+import { LogsView } from './components/LogsView';
 import { DemoRouter } from './demos/DemoRouter';
 import { useRealtimeFeedback } from './hooks/useRealtimeFeedback';
 import { useI18n, type Language } from './i18n';
@@ -66,7 +66,7 @@ const App = () => {
           {activeTab === 'live' && <LiveView realtime={realtime} />}
           {activeTab === 'memory' && <MemoryView />}
           {activeTab === 'voice' && <VoiceControlView />}
-          {activeTab === 'logs' && <ModelRecallLogsView />}
+          {activeTab === 'logs' && <LogsView />}
         </div>
       </main>
     </div>
