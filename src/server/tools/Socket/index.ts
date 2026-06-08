@@ -1,25 +1,37 @@
 import { serve } from 'bun';
 import type { Server, ServerWebSocket } from 'bun';
 import { GLOBAL_CONFIG } from '@/global_config';
+import type { VisionProfile } from '@/shared/vision/types';
 
 export type SocketClientData = {
     id: string;
     connectedAt: number;
-    realtimeSubtitleEnabled: boolean;
 };
 
 export type AssistantLanguage = 'zh' | 'en';
+export type VoiceSessionMode = 'standby' | 'awake' | 'listening' | 'processing' | 'speaking';
 
 type SocketMessage =
-    | { type: 'socket.connected'; ts: number; clientId: string; clients: number; realtimeSubtitleEnabled: boolean; language: AssistantLanguage }
-    | { type: 'socket.status'; ts: number; clients: number; realtimeSubtitleEnabled: boolean; language: AssistantLanguage }
+    | { type: 'socket.connected'; ts: number; clientId: string; clients: number; language: AssistantLanguage; voiceSessionMode: VoiceSessionMode }
+    | { type: 'socket.status'; ts: number; clients: number; language: AssistantLanguage; voiceSessionMode: VoiceSessionMode }
     | { type: 'video.frame'; ts: number; mime: 'image/jpeg'; data: string; meta?: unknown }
     | { type: 'voice.level'; ts: number; bytes: number; rms: number; peak: number }
     | { type: 'voice.text'; ts: number; text: string; startTs: number; endTs: number }
-    | { type: 'vision.detection'; ts: number; faces: any[]; bodies: any[]; hands: any[]; objects: any[] };
+    | { type: 'voice.session'; ts: number; mode: VoiceSessionMode; reason: string; conversationId?: string | null; pipelineId?: string | null }
+    | {
+        type: 'vision.detection';
+        ts: number;
+        profile: VisionProfile;
+        requestedProfile: VisionProfile;
+        degraded: boolean;
+        degradeReason?: string;
+        faces: any[];
+        bodies: any[];
+        hands: any[];
+        objects: any[];
+    };
 
 type SocketCommand =
-    | { type: 'subtitle.enable'; enabled: boolean }
     | { type: 'language.set'; language: AssistantLanguage }
     | { type: 'ping' };
 
@@ -27,7 +39,7 @@ const SOCKET_PATH = '/ws/realtime';
 const clients = new Set<ServerWebSocket<SocketClientData>>();
 let standaloneServer: Server<SocketClientData> | null = null;
 let assistantLanguage: AssistantLanguage = 'zh';
-const REALTIME_SUBTITLE_ENABLED = true;
+let voiceSessionMode: VoiceSessionMode = 'standby';
 
 function createClientId(): string {
     return typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -64,9 +76,6 @@ function parseCommand(message: string | Buffer): SocketCommand | null {
 
     try {
         const parsed = JSON.parse(raw) as Partial<SocketCommand>;
-        if (parsed.type === 'subtitle.enable' && typeof parsed.enabled === 'boolean') {
-            return parsed as SocketCommand;
-        }
         if (parsed.type === 'language.set' && (parsed.language === 'zh' || parsed.language === 'en')) {
             return parsed as SocketCommand;
         }
@@ -109,7 +118,6 @@ export const realtimeSocket = {
             data: {
                 id: createClientId(),
                 connectedAt: Date.now(),
-                realtimeSubtitleEnabled: REALTIME_SUBTITLE_ENABLED,
             },
         });
 
@@ -128,8 +136,8 @@ export const realtimeSocket = {
                 ts: Date.now(),
                 clientId: ws.data.id,
                 clients: clients.size,
-                realtimeSubtitleEnabled: REALTIME_SUBTITLE_ENABLED,
                 language: assistantLanguage,
+                voiceSessionMode,
             });
             realtimeSocket.publishStatus();
         },
@@ -142,15 +150,10 @@ export const realtimeSocket = {
                     type: 'socket.status',
                     ts: Date.now(),
                     clients: clients.size,
-                    realtimeSubtitleEnabled: REALTIME_SUBTITLE_ENABLED,
                     language: assistantLanguage,
+                    voiceSessionMode,
                 });
                 return;
-            }
-
-            if (command?.type === 'subtitle.enable') {
-                ws.data.realtimeSubtitleEnabled = command.enabled;
-                realtimeSocket.publishStatus();
             }
 
             if (command?.type === 'language.set') {
@@ -171,8 +174,8 @@ export const realtimeSocket = {
                 type: 'socket.status',
                 ts: Date.now(),
                 clients: clients.size,
-                realtimeSubtitleEnabled: REALTIME_SUBTITLE_ENABLED,
                 language: assistantLanguage,
+                voiceSessionMode,
             });
         }
     },
@@ -181,8 +184,25 @@ export const realtimeSocket = {
         return assistantLanguage;
     },
 
-    isRealtimeSubtitleEnabled(): boolean {
-        return true;
+    publishVoiceSession(input: {
+        mode: VoiceSessionMode;
+        reason: string;
+        conversationId?: string | null;
+        pipelineId?: string | null;
+    }): void {
+        if (voiceSessionMode === input.mode) {
+            return;
+        }
+        voiceSessionMode = input.mode;
+        broadcast({
+            type: 'voice.session',
+            ts: Date.now(),
+            mode: input.mode,
+            reason: input.reason,
+            conversationId: input.conversationId ?? null,
+            pipelineId: input.pipelineId ?? null,
+        });
+        realtimeSocket.publishStatus();
     },
 
     publishVideoFrame(frame: Buffer, meta?: unknown): void {
@@ -221,11 +241,25 @@ export const realtimeSocket = {
         });
     },
 
-    publishVisionDetection(detection: { faces: any[]; bodies: any[]; hands: any[]; objects: any[]; ts: number }): void {
+    publishVisionDetection(detection: {
+        profile: VisionProfile;
+        requestedProfile: VisionProfile;
+        degraded: boolean;
+        degradeReason?: string;
+        faces: any[];
+        bodies: any[];
+        hands: any[];
+        objects: any[];
+        ts: number;
+    }): void {
         if (clients.size === 0) return;
         broadcast({
             type: 'vision.detection',
             ts: detection.ts,
+            profile: detection.profile,
+            requestedProfile: detection.requestedProfile,
+            degraded: detection.degraded,
+            ...(detection.degradeReason ? { degradeReason: detection.degradeReason } : {}),
             faces: detection.faces,
             bodies: detection.bodies,
             hands: detection.hands,
@@ -256,4 +290,20 @@ export function startRealtimeSocketServer(port: number = GLOBAL_CONFIG.SERVER.SO
 
     console.log(`🔌 Realtime socket server running at ws://localhost:${port}${realtimeSocket.path}`);
     return standaloneServer;
+}
+
+export function stopRealtimeSocketServer(): void {
+    for (const client of clients) {
+        try {
+            client.close();
+        } catch (error) {
+            console.warn('[Socket] failed to close realtime client:', error);
+        }
+    }
+    clients.clear();
+
+    if (standaloneServer) {
+        standaloneServer.stop(true);
+        standaloneServer = null;
+    }
 }
