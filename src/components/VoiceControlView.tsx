@@ -1,5 +1,6 @@
 import { type ChangeEvent, type FC, useEffect, useMemo, useState } from 'react';
 import { useI18n } from '../i18n';
+import type { TranslationKey } from '../i18n';
 
 type VoiceProvider = 'cosyvoice' | 'say';
 
@@ -31,6 +32,12 @@ type TaskTiming = {
   label: string;
   durationMs: number;
   detail?: string;
+};
+
+type ProcessingStage = {
+  key: string;
+  label: TranslationKey;
+  percent: number;
 };
 
 type MaterialCandidate = {
@@ -86,7 +93,7 @@ type SpeakerProfile = {
 
 const defaultConfig: VoiceConfig = {
   provider: 'cosyvoice',
-  baseUrl: 'http://localhost:50000',
+  baseUrl: 'http://localhost:10102',
   endpoint: '/inference_zero_shot',
   speakerId: '',
   speakerName: '默认音色',
@@ -95,6 +102,31 @@ const defaultConfig: VoiceConfig = {
   timeoutMs: 30000,
   fallbackToSay: false,
 };
+
+const extractStages: ProcessingStage[] = [
+  { key: 'upload', label: 'voice.progressUpload', percent: 12 },
+  { key: 'extract_wav', label: 'voice.progressExtract', percent: 26 },
+  { key: 'mdx_separation', label: 'voice.progressSeparate', percent: 48 },
+  { key: 'funasr_analyze', label: 'voice.progressAnalyze', percent: 68 },
+  { key: 'candidate_export', label: 'voice.progressCandidates', percent: 88 },
+  { key: 'done', label: 'voice.progressDone', percent: 100 },
+];
+
+const importStages: ProcessingStage[] = [
+  { key: 'download', label: 'voice.progressDownload', percent: 16 },
+  { key: 'extract_wav', label: 'voice.progressExtract', percent: 32 },
+  { key: 'mdx_separation', label: 'voice.progressSeparate', percent: 52 },
+  { key: 'funasr_analyze', label: 'voice.progressAnalyze', percent: 72 },
+  { key: 'candidate_export', label: 'voice.progressCandidates', percent: 90 },
+  { key: 'done', label: 'voice.progressDone', percent: 100 },
+];
+
+const saveStages: ProcessingStage[] = [
+  { key: 'save_profile', label: 'voice.progressSaveProfile', percent: 30 },
+  { key: 'cache_speaker', label: 'voice.progressCacheSpeaker', percent: 60 },
+  { key: 'apply_config', label: 'voice.progressApplyConfig', percent: 82 },
+  { key: 'done', label: 'voice.progressDone', percent: 100 },
+];
 
 export const VoiceControlView: FC = () => {
   const { t } = useI18n();
@@ -111,6 +143,9 @@ export const VoiceControlView: FC = () => {
   const [applyingSpeakerId, setApplyingSpeakerId] = useState('');
   const [deletingSpeakerId, setDeletingSpeakerId] = useState('');
   const [timings, setTimings] = useState<TaskTiming[]>([]);
+  const [progressStages, setProgressStages] = useState<ProcessingStage[]>([]);
+  const [progressPercent, setProgressPercent] = useState(0);
+  const [progressLabel, setProgressLabel] = useState<TranslationKey>('voice.progressWorking');
   const [extracting, setExtracting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState('');
@@ -119,6 +154,7 @@ export const VoiceControlView: FC = () => {
   const [resources, setResources] = useState<AudioResource[]>([]);
   const [selectedFormatId, setSelectedFormatId] = useState('');
   const [resourceStatus, setResourceStatus] = useState('');
+  const [resourceImportDone, setResourceImportDone] = useState(false);
   const [probing, setProbing] = useState(false);
   const [importing, setImporting] = useState(false);
   const [ytDlpStatus, setYtDlpStatus] = useState<YtDlpStatus | null>(null);
@@ -172,19 +208,21 @@ export const VoiceControlView: FC = () => {
   function applyExtractResult(data: Partial<ExtractResponse>) {
     applyTimings(data.timings);
     const nextCandidates = data.candidates ?? [];
-    setAudioUrl('');
-    setAudioPath('');
-    setTranscript('');
+    const bestCandidate = nextCandidates[0] ?? null;
+    setAudioUrl(bestCandidate?.audioUrl || data.audioUrl || '');
+    setAudioPath(bestCandidate?.audioPath || data.audioPath || '');
+    setTranscript(bestCandidate?.text || data.transcript || '');
     setCandidates(nextCandidates);
-    setSelectedCandidateId('');
+    setSelectedCandidateId(bestCandidate?.id ?? '');
     setConfig((value) => ({
       ...value,
       provider: 'cosyvoice',
       speakerId: '',
-      promptAudioPath: value.promptAudioPath,
-      promptText: value.promptText,
+      promptAudioPath: bestCandidate?.audioPath || data.audioPath || value.promptAudioPath,
+      promptText: bestCandidate?.text || data.transcript || value.promptText,
     }));
-    setStatus(nextCandidates.length > 0 ? t('voice.candidatePickRequired') : t('voice.noCandidates'));
+    setStatus(nextCandidates.length > 0 ? t('voice.candidateAutoSelected') : t('voice.noCandidates'));
+    completeProgress(data.timings);
   }
 
   function applyTimings(next?: TaskTiming[]) {
@@ -200,6 +238,27 @@ export const VoiceControlView: FC = () => {
     }
   }
 
+  function startProgress(stages: ProcessingStage[]) {
+    setProgressStages(stages);
+    setProgressPercent(stages[0]?.percent ?? 8);
+    setProgressLabel(stages[0]?.label ?? 'voice.progressWorking');
+  }
+
+  function completeProgress(next?: TaskTiming[]) {
+    const activeStages = progressStages.length > 0 ? progressStages : extractStages;
+    const doneStage = activeStages[activeStages.length - 1];
+    setProgressPercent(100);
+    setProgressLabel(doneStage?.label ?? 'voice.progressDone');
+    if (next && next.length > 0) {
+      setProgressStages(mergeProgressStages(activeStages, next));
+    }
+  }
+
+  function failProgress() {
+    setProgressPercent(100);
+    setProgressLabel('voice.progressFailed');
+  }
+
   async function extractMaterial() {
     if (!videoFile) {
       setStatus(t('voice.videoRequired'));
@@ -208,6 +267,7 @@ export const VoiceControlView: FC = () => {
 
     setExtracting(true);
     setStatus(t('voice.extracting'));
+    startProgress(extractStages);
     try {
       const form = new FormData();
       form.set('video', videoFile);
@@ -224,6 +284,7 @@ export const VoiceControlView: FC = () => {
       applyExtractResult(data);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Extract failed');
+      failProgress();
     } finally {
       setExtracting(false);
     }
@@ -296,7 +357,9 @@ export const VoiceControlView: FC = () => {
     if (!selectedFormatId) return;
 
     setImporting(true);
+    setResourceImportDone(false);
     setResourceStatus(t('voice.resourceImporting'));
+    startProgress(importStages);
     try {
       const response = await fetch('/api/voice/cosyvoice/import-url', {
         method: 'POST',
@@ -314,9 +377,11 @@ export const VoiceControlView: FC = () => {
       setVideoFile(null);
       setVideoUrl(data.videoUrl || '');
       applyExtractResult(data);
-      closeResourceDialog();
+      setResourceImportDone(true);
+      setResourceStatus(t('voice.resourceImportDone'));
     } catch (error) {
       setResourceStatus(error instanceof Error ? error.message : 'Import failed');
+      failProgress();
     } finally {
       setImporting(false);
     }
@@ -344,6 +409,7 @@ export const VoiceControlView: FC = () => {
     setResourceStatus('');
     setProbing(false);
     setImporting(false);
+    setResourceImportDone(false);
   }
 
   async function saveMaterial() {
@@ -354,6 +420,7 @@ export const VoiceControlView: FC = () => {
 
     setSaving(true);
     setStatus(t('voice.saving'));
+    startProgress(saveStages);
     try {
       const response = await fetch('/api/voice/cosyvoice/save', {
         method: 'POST',
@@ -388,11 +455,13 @@ export const VoiceControlView: FC = () => {
         setConfig((value) => ({ ...value, speakerId: data.speaker!.id }));
       }
       applyTimings(data.timings);
+      completeProgress(data.timings);
       setStatus(data.cached === false && data.cacheWarning
         ? `${t('voice.savedWithCacheWarning')} ${data.speaker?.id ?? ''} · ${data.cacheWarning}`
         : `${t('voice.saved')} ${data.speaker?.id ?? ''}`.trim());
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Save failed');
+      failProgress();
     } finally {
       setSaving(false);
     }
@@ -554,6 +623,14 @@ export const VoiceControlView: FC = () => {
                     ) : null}
                   </div>
                   <div className="mb-3 max-h-10 overflow-hidden text-xs leading-5 text-slate-400">{speaker.promptText}</div>
+                  {speaker.promptAudioPath ? (
+                    <audio
+                      src={getCosyVoiceAudioUrl(speaker.promptAudioPath)}
+                      controls
+                      preload="none"
+                      className="mb-3 w-full"
+                    />
+                  ) : null}
                   <div className="flex justify-end gap-2">
                     <button
                       type="button"
@@ -634,7 +711,19 @@ export const VoiceControlView: FC = () => {
               </button>
             )}
             <div className="mt-4 min-h-[220px] overflow-y-auto rounded-md border border-slate-800 bg-slate-900">
-              {resources.length > 0 ? (
+              {importing || resourceImportDone ? (
+                <div className="p-4">
+                  <ProcessingProgress
+                    active={importing}
+                    percent={progressPercent}
+                    label={t(progressLabel)}
+                    stages={progressStages}
+                    timings={timings}
+                    t={t}
+                    compact
+                  />
+                </div>
+              ) : resources.length > 0 ? (
                 <div className="divide-y divide-slate-800">
                   {resources.map((resource) => (
                     <label key={resource.formatId} className="flex cursor-pointer items-start gap-3 p-3 hover:bg-slate-800/70">
@@ -677,21 +766,33 @@ export const VoiceControlView: FC = () => {
                   onClick={closeResourceDialog}
                   className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:border-slate-500"
                 >
-                  {t('voice.cancel')}
+                  {resourceImportDone ? t('voice.close') : t('voice.cancel')}
                 </button>
-                <button
-                  type="button"
-                  onClick={confirmResourceImport}
-                  disabled={!selectedFormatId || importing || probing}
-                  className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
-                >
-                  {importing ? t('voice.resourceImporting') : t('voice.confirm')}
-                </button>
+                {!resourceImportDone ? (
+                  <button
+                    type="button"
+                    onClick={confirmResourceImport}
+                    disabled={!selectedFormatId || importing || probing}
+                    className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+                  >
+                    {importing ? t('voice.resourceImporting') : t('voice.confirm')}
+                  </button>
+                ) : null}
               </div>
             </div>
           </div>
         </div>
       )}
+
+      <ProcessingProgress
+        active={extracting || importing || saving}
+        percent={progressPercent}
+        label={t(progressLabel)}
+        stages={progressStages}
+        timings={timings}
+        t={t}
+        hidden={resourceDialogOpen && (importing || resourceImportDone)}
+      />
 
       <section className="flex min-h-[320px] flex-col rounded-lg border border-slate-800 bg-slate-900/60 p-4 xl:col-span-2">
         <div className="mb-3 flex items-center justify-between gap-3">
@@ -846,41 +947,89 @@ export const VoiceControlView: FC = () => {
         </div>
       </section>
 
-      <section className="flex min-h-[180px] flex-col rounded-lg border border-slate-800 bg-slate-900/60 p-4 xl:col-span-2">
-        <div className="mb-3 flex items-center justify-between gap-3">
-          <h3 className="text-sm font-semibold text-white">{t('voice.timingsTitle')}</h3>
-          <div className="text-xs text-slate-500">{timings.length ? `${timings.length}` : ''}</div>
-        </div>
-        {timings.length > 0 ? (
-          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-            {timings.map((item, index) => (
-              <div key={`${item.key}-${index}`} className="rounded-md border border-slate-800 bg-slate-950 p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm text-slate-200">{item.label}</span>
-                  <span className="font-mono text-sm text-emerald-300">{formatDurationMs(item.durationMs)}</span>
-                </div>
-                {item.detail ? <div className="mt-1 truncate text-xs text-slate-500">{item.detail}</div> : null}
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="flex min-h-[100px] items-center justify-center rounded-md border border-slate-800 bg-slate-950 px-4 text-center text-sm text-slate-500">
-            {t('voice.timingsEmpty')}
-          </div>
-        )}
-      </section>
     </div>
   );
 };
 
 function getCosyVoiceAudioUrl(path: string): string {
   const normalized = path.replace(/\\/g, '/');
-  const marker = '/data/cosyvoice/';
-  const markerIndex = normalized.indexOf(marker);
-  const relativePath = markerIndex >= 0
-    ? normalized.slice(markerIndex + marker.length)
-    : normalized.split('/').pop() ?? '';
+  const unifiedCosyMarker = '/data/voice/cosyvoice/';
+  const unifiedAssetMarker = '/data/voice/assets/';
+  const unifiedCosyIndex = normalized.indexOf(unifiedCosyMarker);
+  const unifiedAssetIndex = normalized.indexOf(unifiedAssetMarker);
+  const relativePath = unifiedCosyIndex >= 0
+    ? normalized.slice(unifiedCosyIndex + unifiedCosyMarker.length)
+    : unifiedAssetIndex >= 0
+      ? `voice-assets/${normalized.slice(unifiedAssetIndex + unifiedAssetMarker.length)}`
+      : normalized.startsWith('data/voice/assets/')
+        ? `voice-assets/${normalized.slice('data/voice/assets/'.length)}`
+        : normalized.startsWith('data/voice/cosyvoice/')
+          ? normalized.slice('data/voice/cosyvoice/'.length)
+          : normalized.split('/').pop() ?? '';
   return relativePath ? `/api/voice/cosyvoice/audio/${encodeURIComponent(relativePath)}` : '';
+}
+
+function mergeProgressStages(stages: ProcessingStage[], timings: TaskTiming[]): ProcessingStage[] {
+  const timingKeys = new Set(timings.map(item => item.key));
+  return stages.map(stage => timingKeys.has(stage.key) || stage.key === 'done'
+    ? stage
+    : { ...stage, percent: Math.min(stage.percent, 96) });
+}
+
+function ProcessingProgress({
+  active,
+  percent,
+  label,
+  stages,
+  timings,
+  t,
+  compact = false,
+  hidden = false,
+}: {
+  active: boolean;
+  percent: number;
+  label: string;
+  stages: ProcessingStage[];
+  timings: TaskTiming[];
+  t: (key: TranslationKey) => string;
+  compact?: boolean;
+  hidden?: boolean;
+}) {
+  if (hidden) return null;
+  if (!active && timings.length === 0 && stages.length === 0) return null;
+  const timingMap = new Map(timings.map(item => [item.key, item]));
+  const visibleStages = stages.length > 0 ? stages : extractStages;
+
+  return (
+    <section className={`rounded-lg border border-slate-800 bg-slate-900/60 p-4 ${compact ? '' : 'xl:col-span-2'}`}>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-white">{t('voice.progressTitle')}</h3>
+        <span className="font-mono text-sm text-emerald-300">{Math.round(percent)}%</span>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-slate-800">
+        <div
+          className="h-full rounded-full bg-emerald-500 transition-all duration-500"
+          style={{ width: `${Math.max(0, Math.min(100, percent))}%` }}
+        />
+      </div>
+      <div className="mt-2 text-sm text-slate-300">{label}</div>
+      <div className={`mt-4 grid gap-2 ${compact ? 'md:grid-cols-2' : 'md:grid-cols-2 xl:grid-cols-3'}`}>
+        {visibleStages.map((stage) => {
+          const timing = timingMap.get(stage.key);
+          const done = Boolean(timing) || stage.percent <= percent;
+          return (
+            <div key={stage.key} className={`rounded-md border p-3 ${done ? 'border-emerald-500/40 bg-emerald-500/10' : 'border-slate-800 bg-slate-950'}`}>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm text-slate-200">{t(stage.label)}</span>
+                <span className="font-mono text-xs text-slate-400">{timing ? formatDurationMs(timing.durationMs) : `${stage.percent}%`}</span>
+              </div>
+              {timing?.detail ? <div className="mt-1 truncate text-xs text-slate-500">{timing.detail}</div> : null}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
 }
 
 function formatDurationMs(durationMs: number): string {

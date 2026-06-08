@@ -31,6 +31,12 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 *.tsbuildinfo
 .codegraph/
 __pycache__/
+**/__pycache__/
+.mypy_cache/
+.pytest_cache/
+src/server/python_services/envs/
+src/server/python_services/run/
+src/server/python_services/models_cache/
 
 # IntelliJ based IDEs
 .idea
@@ -43,9 +49,19 @@ models
 src/server/models
 src/server/tools/bin
 /voice
+data/models
+data/tools
 
 # local data
+data/voice
 data/cosyvoice
+data/voice-assets
+data/python_services/envs
+data/python_services/models_cache
+data/python_services/run
+data/db/*.sqlite
+data/db/*.sqlite-shm
+data/db/*.sqlite-wal
 temp_cache
 src/server/temp_cache
 recordings

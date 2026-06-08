@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+mlx-audio-plus==0.1.8

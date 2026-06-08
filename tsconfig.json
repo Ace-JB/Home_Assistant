@@ -36,5 +36,18 @@
     "noPropertyAccessFromIndexSignature": false
   },
 
-  "exclude": ["dist", "node_modules", "src/server/models/whisper.cpp"]
+  "exclude": [
+    "dist",
+    "node_modules",
+    "data",
+    "src/server/models",
+    "src/server/models/whisper.cpp",
+    "src/server/tools/bin",
+    "src/server/db/*.sqlite",
+    "src/server/db/*.sqlite-shm",
+    "src/server/db/*.sqlite-wal",
+    "src/server/python_services/envs",
+    "src/server/python_services/models_cache",
+    "src/server/python_services/run"
+  ]
 }

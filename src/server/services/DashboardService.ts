@@ -1,15 +1,12 @@
 import { spawn } from 'child_process';
-import type { ChildProcess } from 'child_process';
 import { execFile } from 'child_process';
-import { existsSync } from 'fs';
 import { loadavg } from 'os';
-import { resolve } from 'path';
 import { promisify } from 'util';
 import si, { type Systeminformation } from 'systeminformation';
 import { GLOBAL_CONFIG } from '@/global_config';
 import { funasrService } from '@/server/services/FunASRService';
 import { checkCosyVoiceService, getYtDlpStatus } from '@/server/services/CosyVoiceMaterialService';
-import { getCosyVoicePaths, isCosyVoiceInstalled } from '@/server/scripts/cosyvoice_common';
+import { mdxSeparationService } from '@/server/services/voice-assets/MdxSeparationService';
 
 export type DashboardServiceStatus = 'running' | 'starting' | 'stopping' | 'stopped' | 'degraded' | 'error' | 'unknown';
 export type DashboardInterfaceStatus = 'ok' | 'failed' | 'unknown';
@@ -124,11 +121,9 @@ type MacProcessSnapshot = {
   uptimeSeconds: number | null;
 };
 
-const SERVICE_IDS = new Set(['main', 'realtime-socket', 'webrtc', 'monitor', 'funasr', 'cosyvoice', 'ffmpeg', 'yt-dlp']);
+const SERVICE_IDS = new Set(['main', 'realtime-socket', 'webrtc', 'monitor', 'funasr', 'cosyvoice', 'voice-separation', 'ffmpeg', 'yt-dlp']);
 const dashboardLogs = new Map<string, DashboardLogEntry[]>();
 const execFileAsync = promisify(execFile);
-let cosyVoiceProcess: ChildProcess | null = null;
-let cosyVoiceStartedAt = 0;
 let cosyVoiceStarting = false;
 let cosyVoiceLastError: string | null = null;
 
@@ -146,6 +141,7 @@ export async function getDashboardStatus(): Promise<DashboardStatus> {
     getMonitorStatus(metrics),
     funasr,
     cosyVoice,
+    getVoiceSeparationDashboardStatus(metrics),
     getFfmpegStatus(),
     ytDlp,
   ];
@@ -168,6 +164,10 @@ export async function startDashboardService(serviceId: string): Promise<Dashboar
     await startManagedCosyVoice();
     return getCosyVoiceDashboardStatus(await collectDashboardMetrics());
   }
+  if (serviceId === 'voice-separation') {
+    await mdxSeparationService.start();
+    return getVoiceSeparationDashboardStatus(await collectDashboardMetrics());
+  }
   throw new Error(`Service ${serviceId} is read-only from dashboard.`);
 }
 
@@ -175,20 +175,46 @@ export async function stopDashboardService(serviceId: string): Promise<Dashboard
   assertKnownService(serviceId);
   if (serviceId === 'funasr') {
     appendLog('funasr', 'info', 'Stop requested from dashboard');
-    funasrService.stop();
+    await funasrService.stop();
     return getFunAsrDashboardStatus(await collectDashboardMetrics());
   }
   if (serviceId === 'cosyvoice') {
     await stopManagedCosyVoice();
     return getCosyVoiceDashboardStatus(await collectDashboardMetrics());
   }
+  if (serviceId === 'voice-separation') {
+    await mdxSeparationService.stop();
+    return getVoiceSeparationDashboardStatus(await collectDashboardMetrics());
+  }
   throw new Error(`Service ${serviceId} is read-only from dashboard.`);
+}
+
+export type StopAllDashboardManagedServicesDeps = {
+  stopFunASR?: () => Promise<void>;
+  stopCosyVoice?: () => Promise<void>;
+  stopMdx?: () => Promise<void>;
+};
+
+export async function stopAllDashboardManagedServices(deps?: StopAllDashboardManagedServicesDeps): Promise<void> {
+  if (deps) {
+    await deps.stopFunASR?.();
+    await deps.stopCosyVoice?.();
+    await deps.stopMdx?.();
+    return;
+  }
+
+  appendLog('main', 'info', 'Stopping all dashboard-managed Python services...');
+  await runPythonServiceManager(['stop', 'all']);
+  cosyVoiceStarting = false;
 }
 
 export function getDashboardServiceLogs(serviceId: string, limit = 200): DashboardLogEntry[] {
   assertKnownService(serviceId);
   if (serviceId === 'funasr') {
     return mergeLogs(funasrService.getLogs(limit), dashboardLogs.get('funasr') ?? [], limit);
+  }
+  if (serviceId === 'voice-separation') {
+    return mergeLogs(mdxSeparationService.getLogs(limit), dashboardLogs.get('voice-separation') ?? [], limit);
   }
   return (dashboardLogs.get(serviceId) ?? []).slice(-normalizeLimit(limit));
 }
@@ -371,8 +397,8 @@ function getFunAsrDashboardStatus(metrics: DashboardMetrics): DashboardServiceIt
       uptimeSeconds: status.uptimeSeconds ?? processInfo.uptimeSeconds,
     },
     interfaces: [{
-      label: 'stdin worker',
-      url: GLOBAL_CONFIG.VOICE.FUNASR_CMD,
+      label: 'HTTP',
+      url: status.url,
       status: status.ready ? 'ok' : status.starting ? 'unknown' : 'failed',
       statusCode: null,
       latencyMs: null,
@@ -385,13 +411,10 @@ function getFunAsrDashboardStatus(metrics: DashboardMetrics): DashboardServiceIt
 }
 
 async function getCosyVoiceDashboardStatus(metrics: DashboardMetrics): Promise<DashboardServiceItem> {
-  const paths = getCosyVoicePaths();
-  const installed = isCosyVoiceInstalled(paths.installDir);
   const service = await checkCosyVoiceService();
-  const isManaged = cosyVoiceProcess !== null;
-  const systemProcessInfo = findProcessByPid(metrics, cosyVoiceProcess?.pid ?? null)
-    ?? findProcessByCommand(metrics, 'cosyvoice_mlx_fastapi_server.py');
-  const processInfo = getProcessSnapshot(metrics, cosyVoiceProcess?.pid ?? systemProcessInfo?.pid);
+  const systemProcessInfo = findProcessByCommand(metrics, 'cosyvoice_service')
+    ?? findProcessByCommand(metrics, 'cosyvoice_run');
+  const processInfo = getProcessSnapshot(metrics, systemProcessInfo?.pid);
   const status: DashboardServiceStatus = cosyVoiceStarting
     ? 'starting'
     : service.ok
@@ -404,13 +427,13 @@ async function getCosyVoiceDashboardStatus(metrics: DashboardMetrics): Promise<D
     id: 'cosyvoice',
     name: 'CosyVoice MLX',
     status,
-    controllable: installed,
-    controlReason: installed ? null : `CosyVoice is not installed at ${paths.installDir}.`,
-    pid: cosyVoiceProcess?.pid ?? systemProcessInfo?.pid ?? null,
+    controllable: true,
+    controlReason: null,
+    pid: systemProcessInfo?.pid ?? null,
     resources: {
       cpuPercent: processInfo.cpuPercent,
       memoryMb: processInfo.memoryMb,
-      uptimeSeconds: cosyVoiceStartedAt ? Math.floor((Date.now() - cosyVoiceStartedAt) / 1000) : processInfo.uptimeSeconds,
+      uptimeSeconds: processInfo.uptimeSeconds,
     },
     interfaces: [{
       label: 'TTS endpoint',
@@ -421,10 +444,46 @@ async function getCosyVoiceDashboardStatus(metrics: DashboardMetrics): Promise<D
       error: service.error,
     }],
     logsAvailable: true,
-    actions: service.ok
-      ? (isManaged ? ['stop'] : [])
-      : (installed && !cosyVoiceStarting ? ['start'] : []),
+    actions: service.ok ? ['stop'] : (!cosyVoiceStarting ? ['start'] : []),
     lastError: cosyVoiceLastError ?? service.error,
+  };
+}
+
+function getVoiceSeparationDashboardStatus(metrics: DashboardMetrics): DashboardServiceItem {
+  const status = mdxSeparationService.getStatus();
+  const processInfo = getProcessSnapshot(metrics, status.pid);
+  const dashboardStatus: DashboardServiceStatus = status.status === 'ready' || status.status === 'busy'
+    ? 'running'
+    : status.status === 'starting'
+      ? 'starting'
+      : status.status === 'disabled'
+        ? 'stopped'
+        : status.status === 'error'
+          ? 'error'
+          : 'stopped';
+  return {
+    id: 'voice-separation',
+    name: 'MDX-Net Separation',
+    status: dashboardStatus,
+    controllable: status.enabled,
+    controlReason: status.enabled ? 'Optional lazy worker; prompt import starts it on demand.' : 'Voice separation is disabled by VOICE_SEPARATION_ENABLED.',
+    pid: status.pid,
+    resources: {
+      cpuPercent: processInfo.cpuPercent,
+      memoryMb: processInfo.memoryMb,
+      uptimeSeconds: status.uptimeSeconds ?? processInfo.uptimeSeconds,
+    },
+    interfaces: [{
+      label: 'HTTP',
+      url: status.url,
+      status: status.ready ? 'ok' : status.lastError ? 'failed' : 'unknown',
+      statusCode: null,
+      latencyMs: null,
+      error: status.lastError,
+    }],
+    logsAvailable: true,
+    actions: status.ready || status.status === 'starting' || status.status === 'busy' ? ['stop'] : status.enabled ? ['start'] : [],
+    lastError: status.lastError,
   };
 }
 
@@ -509,101 +568,44 @@ async function getYtDlpDashboardStatus(): Promise<DashboardServiceItem> {
 }
 
 async function startManagedCosyVoice(): Promise<void> {
-  const paths = getCosyVoicePaths();
-  if (!isCosyVoiceInstalled(paths.installDir)) {
-    throw new Error(`CosyVoice is not installed at ${paths.installDir}.`);
-  }
   const health = await checkCosyVoiceService();
   if (health.ok) {
-    appendLog('cosyvoice', 'info', `CosyVoice already online at ${health.url}; treating as external service.`);
+    await postCosyVoiceStart().catch(() => undefined);
+    appendLog('cosyvoice', 'info', `CosyVoice already online at ${health.url}.`);
     cosyVoiceLastError = null;
     return;
   }
-  if (cosyVoiceProcess || cosyVoiceStarting) {
+  if (cosyVoiceStarting) {
     appendLog('cosyvoice', 'info', 'CosyVoice start requested while already starting/running.');
     return;
   }
 
-  const envPrefix = resolve(paths.installDir, '.conda');
-  const serverPath = resolve('src/server/scripts/cosyvoice_mlx_fastapi_server.py');
-  if (!existsSync(envPrefix) || !existsSync(serverPath)) {
-    throw new Error('CosyVoice runtime files are missing. Run bun run cosyvoice:install first.');
-  }
-
   cosyVoiceStarting = true;
   cosyVoiceLastError = null;
-  appendLog('cosyvoice', 'info', `Starting CosyVoice at http://${paths.host}:${paths.port}`);
-  cosyVoiceProcess = spawn(resolve(envPrefix, 'bin/python'), [
-    serverPath,
-    '--port', paths.port,
-    '--model_dir', paths.modelDir,
-    '--cache_dir', resolve('data/cosyvoice/mlx-speaker-cache'),
-  ], {
-    cwd: paths.installDir,
-    env: process.env,
-  });
-
-  cosyVoiceProcess.stdout?.on('data', chunk => appendLog('cosyvoice', 'info', chunk.toString().trim()));
-  cosyVoiceProcess.stderr?.on('data', chunk => appendLog('cosyvoice', 'warn', chunk.toString().trim()));
-  cosyVoiceProcess.once('spawn', () => {
-    cosyVoiceStartedAt = Date.now();
-    appendLog('cosyvoice', 'info', `Spawned CosyVoice process pid=${cosyVoiceProcess?.pid ?? 'unknown'}`);
-  });
-  cosyVoiceProcess.once('error', (error) => {
-    cosyVoiceLastError = error.message;
-    cosyVoiceStarting = false;
-    appendLog('cosyvoice', 'error', `Process error: ${error.message}`);
-  });
-  cosyVoiceProcess.once('exit', (code, signal) => {
-    const message = `CosyVoice process exited code=${code}, signal=${signal}`;
-    if (code === 0 || code === null) {
-      appendLog('cosyvoice', 'info', message);
-    } else {
-      cosyVoiceLastError = message;
-      appendLog('cosyvoice', 'error', message);
-    }
-    cosyVoiceProcess = null;
-    cosyVoiceStartedAt = 0;
-    cosyVoiceStarting = false;
-  });
-
+  const startedAt = Date.now();
+  appendLog('cosyvoice', 'info', `Starting CosyVoice at ${GLOBAL_CONFIG.VOICE.COSYVOICE_BASE_URL}`);
   try {
+    await runPythonServiceManager(['start', 'cosyvoice']);
+    await postCosyVoiceStart();
     await waitForCosyVoiceReady();
     cosyVoiceStarting = false;
     cosyVoiceLastError = null;
-    appendLog('cosyvoice', 'info', 'CosyVoice service is ready.');
+    appendLog('cosyvoice', 'info', `CosyVoice service is ready in ${Date.now() - startedAt}ms.`);
   } catch (error) {
     cosyVoiceStarting = false;
     cosyVoiceLastError = error instanceof Error ? error.message : 'CosyVoice startup failed.';
-    appendLog('cosyvoice', 'error', cosyVoiceLastError);
+    appendLog('cosyvoice', 'error', `${cosyVoiceLastError} (${Date.now() - startedAt}ms)`);
     throw error;
   }
 }
 
 async function stopManagedCosyVoice(): Promise<void> {
-  if (!cosyVoiceProcess) {
-    appendLog('cosyvoice', 'warn', 'Stop requested, but CosyVoice was not started by dashboard.');
-    return;
-  }
   appendLog('cosyvoice', 'info', 'Stopping dashboard-managed CosyVoice process...');
-  await new Promise<void>((resolveStop) => {
-    const child = cosyVoiceProcess;
-    if (!child) {
-      resolveStop();
-      return;
-    }
-    const timeout = setTimeout(() => {
-      child.kill('SIGKILL');
-      resolveStop();
-    }, 5000);
-    child.once('exit', () => {
-      clearTimeout(timeout);
-      resolveStop();
-    });
-    child.kill('SIGTERM');
-  });
-  cosyVoiceProcess = null;
-  cosyVoiceStartedAt = 0;
+  await fetch(new URL('/stop', withTrailingSlash(GLOBAL_CONFIG.VOICE.COSYVOICE_BASE_URL)), {
+    method: 'POST',
+    signal: AbortSignal.timeout(2000),
+  }).catch(() => undefined);
+  await runPythonServiceManager(['stop', 'cosyvoice']);
   cosyVoiceStarting = false;
 }
 
@@ -615,6 +617,43 @@ async function waitForCosyVoiceReady(): Promise<void> {
     await new Promise(resolveWait => setTimeout(resolveWait, 1000));
   }
   throw new Error('CosyVoice Service startup timeout (60s)');
+}
+
+async function postCosyVoiceStart(): Promise<void> {
+  const response = await fetch(new URL('/start', withTrailingSlash(GLOBAL_CONFIG.VOICE.COSYVOICE_BASE_URL)), {
+    method: 'POST',
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`CosyVoice start failed status=${response.status}${detail ? ` detail=${detail.slice(0, 300)}` : ''}`);
+  }
+}
+
+async function runPythonServiceManager(args: string[]): Promise<void> {
+  const { stdout, stderr } = await execFileAsync(`${GLOBAL_CONFIG.VOICE.PYTHON_SERVICES_SCRIPT_ROOT}/bin/manage`, args, {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PYTHON_SERVICES_ROOT: GLOBAL_CONFIG.VOICE.PYTHON_SERVICES_ROOT,
+      PYTHON_SERVICES_DEVICE: GLOBAL_CONFIG.VOICE.PYTHON_SERVICES_DEVICE,
+      FUNASR_PORT: String(GLOBAL_CONFIG.VOICE.FUNASR_PORT),
+      COSYVOICE_PORT: String(GLOBAL_CONFIG.VOICE.COSYVOICE_PORT),
+      MDX_PORT: String(GLOBAL_CONFIG.VOICE.MDX_PORT),
+      VOICE_SEPARATION_MODEL_DIR: GLOBAL_CONFIG.VOICE.SEPARATION_MODEL_DIR,
+      VOICE_SEPARATION_MODEL: GLOBAL_CONFIG.VOICE.SEPARATION_MODEL,
+      VOICE_SEPARATION_DEVICE: GLOBAL_CONFIG.VOICE.SEPARATION_DEVICE,
+      VOICE_SEPARATION_ONNX_PROVIDERS: GLOBAL_CONFIG.VOICE.SEPARATION_ONNX_PROVIDERS,
+      COSYVOICE_MODEL_DIR: GLOBAL_CONFIG.VOICE.COSYVOICE_MODEL_DIR,
+    },
+    timeout: 90_000,
+  });
+  const output = `${stdout}${stderr}`.trim();
+  if (output) appendLog(args[1] === 'cosyvoice' ? 'cosyvoice' : 'main', 'info', output);
+}
+
+function withTrailingSlash(value: string): string {
+  return value.endsWith('/') ? value : `${value}/`;
 }
 
 function buildRecommendations(services: DashboardServiceItem[]): DashboardStatus['recommendations'] {
