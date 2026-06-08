@@ -36,6 +36,8 @@ Guidelines:
 - Before choosing fields, internally compare at least these options: immediate route vs needs context, new request vs follow-up, answer-to-assistant vs acknowledgement, visual need vs text-only answer, long-term memory useful vs unnecessary.
 - topics must be abstract semantic topics, such as "烹饪/家常菜", "智能家居照明", "最近记忆回顾", not merely copied item names.
 - If the command is a follow-up, produce a self-contained responseRewrite and memoryQueryRewrite using recent conversation.
+- For non-terminal routes that should answer, clarify, refuse, use a non-empty self-contained responseRewrite/resolvedContext.rewrite. For follow-ups, include the recent topic instead of copying only the short user phrase.
+- Follow-up rewrite examples: recent topic 红烧牛肉 + "请告诉我详细的步骤。" => "请详细说明红烧牛肉的制作步骤"; recent topic 红烧牛肉 + "准备的材料有什么要求吗？" => "红烧牛肉食材和材料准备有什么要求".
 - Use recent_recall only when the user asks to review past conversations or memories.
 - Recent conversation is only the current wake session. If it is empty, that does not mean long-term memory is empty. When the user asks to review prior conversations or remembered topics, enable long-term memory retrieval with mode recent_recall.
 - Let dataPlan.memory.needed be the final decision on whether long-term memory is useful. Use false and mode none for closings, acknowledgements, noise, pure device control, or inputs that do not benefit from long-term memory.
