@@ -6,6 +6,9 @@ import {
     initAudioListen,
     isEchoLikeTranscript,
     isValidBargeInTranscript,
+    isWakeAckAudioCached,
+    playWakeAckInterruptible,
+    prewarmWakeAckAudio,
     speakInterruptible,
     validateTextToSpeechConfig,
     type InterruptibleSpeech,
@@ -19,10 +22,38 @@ import { memory } from '@modules/memory';
 import { faceValue } from '@tools/WiseRelex';
 import type { BrainCommandResult, CameraRecognitionContext } from '@server/modules/brain';
 import type { ConversationMessage } from '@modules/memory';
+import { pipelineLogs } from '@server/services/PipelineLogService';
+import { AudioSegmenter, type AudioSegment } from '@server/services/audio/AudioSegmenter';
+import {
+    visionAttention,
+} from '@server/modules/vision/attention';
+import type { VisionProfile } from '@/shared/vision/types';
+import {
+    extractWakeCommand,
+    hasMeaningfulWakeCommand,
+    hasWakeWordInText,
+    normalizeWakeText,
+} from '@server/services/audio/wakeText';
 
-const SUBTITLE_VAD_THRESHOLD = 0.05; // 过滤背景低频噪点
-const MAX_SUBTITLE_DURATION_MS = 10000; // 单次录音最长 10 秒
-const SILENCE_END_MS = 800; // 连续静音 800ms 认为说话结束
+const ASR_VAD_DIAGNOSTIC_INTERVAL_MS = 10_000;
+const ASR_DEDUPE_CACHE_TTL_MS = 20_000;
+const ASR_DEDUPE_MIN_OVERLAP = 0.95;
+const ASR_DEDUPE_MAX_ENTRIES = 8;
+const VISION_PROFILE_CLEANUP_INTERVAL_MS = 30_000;
+const VISION_PROFILE_IDLE_MIN_MS = 60_000;
+const VISION_PROFILE_IDLE_MAX_MS = 300_000;
+
+type AsrCacheReason = 'wake' | 'command' | 'subtitle' | 'audio-only' | 'barge-in';
+type AsrCacheEntry = {
+    reason: AsrCacheReason;
+    startTs: number;
+    endTs: number;
+    audioBytes: number;
+    hash: number;
+    text: string;
+    createdAt: number;
+};
+type AsrLogOptions = Parameters<typeof extractTextFromVoiceStream>[1];
 
 let firstAudioReceived = false;
 type MonitorMode = 'full' | 'video' | 'audio';
@@ -59,6 +90,10 @@ function buildCameraRecognitionContext(detection: HumanDetectionResult): CameraR
 
     return {
         ts,
+        profile: detection.profile,
+        requestedProfile: detection.requestedProfile,
+        degraded: detection.degraded,
+        degradeReason: detection.degradeReason,
         faces,
         recognizedLabels,
         hasStranger: faces.some(face => face.label === '未知陌生人'),
@@ -157,7 +192,90 @@ function numberValue(value: unknown): number | undefined {
     return undefined;
 }
 
+function requestWakeVisionAttention(reason: string): void {
+    visionAttention.request({
+        id: 'wake-session',
+        source: 'wake',
+        profile: GLOBAL_CONFIG.VISION.WAKE_PROFILE,
+        priority: 20,
+        reason,
+        ttlMs: GLOBAL_CONFIG.VOICE.WAKE_SESSION_IDLE_MS,
+    });
+    faceEngine.prewarm(GLOBAL_CONFIG.VISION.WAKE_PROFILE);
+}
+
+function getVisionProfileIdleTtlMs(): number {
+    return Math.min(
+        VISION_PROFILE_IDLE_MAX_MS,
+        Math.max(VISION_PROFILE_IDLE_MIN_MS, GLOBAL_CONFIG.VISION.PROFILE_IDLE_TTL_MS),
+    );
+}
+
+function cleanupIdleVisionProfiles(reason: string): void {
+    const now = Date.now();
+    const attention = visionAttention.snapshot(now);
+    if (attention.idleSince === null || attention.idleMs < getVisionProfileIdleTtlMs()) {
+        return;
+    }
+
+    for (const result of faceEngine.cleanupIdleProfiles({
+        now,
+        idleTtlMs: getVisionProfileIdleTtlMs(),
+        activeProfile: attention.activeProfile,
+        hasActiveRequest: attention.hasActiveRequest,
+    })) {
+        if (result.action !== 'released' && result.reason !== 'release_failed') {
+            continue;
+        }
+        pipelineLogs.append({
+            category: 'vision',
+            level: result.action === 'released' ? 'info' : 'warn',
+            title: result.action === 'released' ? 'vision.profile.unloaded' : 'vision.profile.unload_failed',
+            message: result.action === 'released'
+                ? `Vision profile unloaded: ${result.profile}`
+                : `Vision profile unload failed: ${result.profile}`,
+            metadata: {
+                profile: result.profile,
+                idleMs: result.idleMs,
+                reason,
+                releaseMode: result.releaseMode,
+                error: result.error,
+            },
+            pipelineId: 'vision-attention',
+        });
+    }
+}
+
+async function detectVisionFrame(
+    jpegBuffer: Buffer,
+    onDetection: (detection: HumanDetectionResult) => void,
+): Promise<void> {
+    const attention = visionAttention.resolve();
+    const requestedProfile = attention.activeProfile as VisionProfile;
+    const detection = await faceEngine.detect(jpegBuffer, requestedProfile, { allowDegraded: true });
+
+    if (detection.degraded) {
+        pipelineLogs.append({
+            category: 'vision',
+            level: 'debug',
+            title: 'vision.detection.degraded',
+            message: `Vision detection degraded ${detection.requestedProfile} -> ${detection.profile}`,
+            metadata: {
+                requestedProfile: detection.requestedProfile,
+                profile: detection.profile,
+                degradeReason: detection.degradeReason,
+                activeReason: attention.activeReason,
+            },
+            pipelineId: 'vision-attention',
+        });
+    }
+
+    onDetection(detection);
+    realtimeSocket.publishVisionDetection(detection);
+}
+
 async function monitor(): Promise<MonitorStop> {
+    const startupStartedAt = Date.now();
     startRealtimeSocketServer();
     await validateTextToSpeechConfig().catch((error) => {
         console.warn('[TTS] config validation failed; monitor will continue without blocking camera/audio startup:', error);
@@ -167,22 +285,65 @@ async function monitor(): Promise<MonitorStop> {
         initCamera(),
         initAudioListen(),
     ]);
+    pipelineLogs.append({
+        category: 'system',
+        level: 'info',
+        title: 'system.ready',
+        message: 'Monitor media streams are ready.',
+        timings: [{ key: 'monitor_media_startup', label: 'Monitor media startup', durationMs: Date.now() - startupStartedAt }],
+        metadata: {
+            mode: 'full',
+            camera: true,
+            audio: true,
+        },
+        pipelineId: 'system',
+    });
 
     const p2j = new Pipe2Jpeg();
     video.pipe(p2j);
 
-    let subtitleBuffer: Buffer[] = [];
-    let subtitleBufferStartedAt = 0;
-    let lastActiveTs = 0;
-    let isSpeaking = false;
+    const wakeSegmenter = new AudioSegmenter({
+        speechThreshold: GLOBAL_CONFIG.VOICE.WAKE_VAD_THRESHOLD,
+        startFrames: GLOBAL_CONFIG.VOICE.VAD_START_FRAMES,
+        endFrames: GLOBAL_CONFIG.VOICE.VAD_END_FRAMES,
+        softMaxDurationMs: GLOBAL_CONFIG.VOICE.WAKE_WINDOW_MS,
+        hardMaxDurationMs: GLOBAL_CONFIG.VOICE.WAKE_WINDOW_MS,
+        cooldownMs: GLOBAL_CONFIG.VOICE.VAD_COOLDOWN_MS,
+    });
+    const commandSegmenter = new AudioSegmenter({
+        speechThreshold: GLOBAL_CONFIG.VOICE.COMMAND_VAD_THRESHOLD,
+        startFrames: GLOBAL_CONFIG.VOICE.VAD_START_FRAMES,
+        endFrames: GLOBAL_CONFIG.VOICE.VAD_END_FRAMES,
+        softMaxDurationMs: GLOBAL_CONFIG.VOICE.COMMAND_SOFT_MAX_MS,
+        hardMaxDurationMs: GLOBAL_CONFIG.VOICE.COMMAND_HARD_MAX_MS,
+        cooldownMs: GLOBAL_CONFIG.VOICE.VAD_COOLDOWN_MS,
+    });
+    const subtitleSegmenter = new AudioSegmenter({
+        speechThreshold: GLOBAL_CONFIG.VOICE.SUBTITLE_VAD_THRESHOLD,
+        startFrames: GLOBAL_CONFIG.VOICE.VAD_START_FRAMES,
+        endFrames: GLOBAL_CONFIG.VOICE.VAD_END_FRAMES,
+        softMaxDurationMs: GLOBAL_CONFIG.VOICE.SUBTITLE_SOFT_MAX_MS,
+        hardMaxDurationMs: GLOBAL_CONFIG.VOICE.SUBTITLE_HARD_MAX_MS,
+        cooldownMs: GLOBAL_CONFIG.VOICE.VAD_COOLDOWN_MS,
+    });
     let systemSpeaking = false; // 新增：系统是否正在说话
     let subtitleTranscribing = false;
+    let wakeTranscribing = false;
+    let commandTranscribing = false;
+    let wakeWindowFrames: Array<{ data: Buffer; ts: number; peak: number; rms: number; active: boolean }> = [];
+    let lastWakeProbeAt = 0;
     let isAwake = false;
     let currentConversationId: string | null = null;
+    let currentConversationPipelineId: string | null = null;
+    let currentConversationPipelineStartedAt = 0;
     let wakeTimer: any = null;
     let latestCameraRecognition: CameraRecognitionContext | null = null;
     let latestVisionFrame: Buffer | null = null;
     let faceRecognitionRunning = false;
+    const visionProfileCleanupTimer = setInterval(
+        () => cleanupIdleVisionProfiles('monitor_interval'),
+        VISION_PROFILE_CLEANUP_INTERVAL_MS,
+    );
     let activeSpeech: InterruptibleSpeech | null = null;
     let activeSpeechText = '';
     let activeSpeechStartedAt = 0;
@@ -194,6 +355,35 @@ async function monitor(): Promise<MonitorStop> {
     let bargeInPeak = 0;
     let bargeInLastProbeTs = 0;
     let activeSpeechQueueCancelled = false;
+    let activeSpeechQueueCancel: (() => void) | null = null;
+    let lastAsrVadDiagnosticAt = 0;
+    const asrCache: AsrCacheEntry[] = [];
+
+    function prewarmWakeAckInBackground(reason: string): void {
+        const startedAt = Date.now();
+        void isWakeAckAudioCached()
+            .then((cached) => {
+                if (cached) {
+                    pipelineLogs.append({
+                        category: 'voice-tts',
+                        level: 'debug',
+                        title: 'wake_ack.prewarm',
+                        message: 'Wake acknowledgement audio already cached.',
+                        timings: [{ key: 'wake_ack_prewarm', label: '唤醒应答预热', durationMs: Date.now() - startedAt }],
+                        metadata: {
+                            reason,
+                            cached: true,
+                        },
+                        pipelineId: 'wake-ack',
+                    });
+                    return null;
+                }
+                return prewarmWakeAckAudio();
+            })
+            .catch((error) => {
+                console.warn('[TTS] wake ack prewarm failed:', error);
+            });
+    }
 
     function resetBargeInBuffer(): void {
         bargeInBuffer = [];
@@ -203,31 +393,120 @@ async function monitor(): Promise<MonitorStop> {
         bargeInLastProbeTs = 0;
     }
 
-    function listenAfterInterruption(): void {
-        isAwake = true;
-        subtitleBuffer = [];
-        subtitleBufferStartedAt = 0;
-        lastActiveTs = 0;
-        isSpeaking = false;
-        if (wakeTimer) {
-            clearTimeout(wakeTimer);
+    function logAsrVadDiagnostic(reason: string, peak: number): void {
+        const now = Date.now();
+        if (now - lastAsrVadDiagnosticAt < ASR_VAD_DIAGNOSTIC_INTERVAL_MS) return;
+        lastAsrVadDiagnosticAt = now;
+        if (GLOBAL_CONFIG.OLLAMA.TRACE_ENABLED) {
+            console.debug('[ASR:VAD] waiting', {
+                reason,
+                peak: Number(peak.toFixed(4)),
+                threshold: GLOBAL_CONFIG.VOICE.SUBTITLE_VAD_THRESHOLD,
+                wakeState: wakeSegmenter.getState(),
+                commandState: commandSegmenter.getState(),
+                subtitleState: subtitleSegmenter.getState(),
+                subtitleBufferedChunks: subtitleSegmenter.getBufferedFrameCount(),
+                systemSpeaking,
+            });
         }
+    }
+
+    function ensureCurrentConversationId(): string {
+        if (!currentConversationId) {
+            currentConversationId = memory.createConversationSession().conversationId;
+            console.log(`🧠 新会话记忆已创建: ${currentConversationId}`);
+        }
+        return currentConversationId!;
+    }
+
+    function ensureCurrentConversationPipelineId(conversationId: string, startedAt = Date.now()): string {
+        if (!currentConversationPipelineId) {
+            currentConversationPipelineStartedAt = startedAt;
+            currentConversationPipelineId = `conv-${conversationId}-${startedAt}`;
+            pipelineLogs.startPipeline({
+                id: currentConversationPipelineId,
+                kind: 'conversation',
+                title: 'Conversation pipeline',
+                conversationId,
+                startedAt,
+                metadata: {
+                    conversationId,
+                    conversation_id: conversationId,
+                    startedBy: 'wake_session',
+                },
+            });
+        }
+        return currentConversationPipelineId;
+    }
+
+    function completeCurrentConversationPipeline(reason: string): void {
+        if (!currentConversationPipelineId) return;
+        pipelineLogs.completePipeline(currentConversationPipelineId, {
+            status: 'completed',
+            metadata: {
+                conversationId: currentConversationId,
+                reason,
+            },
+        });
+        currentConversationPipelineId = null;
+        currentConversationPipelineStartedAt = 0;
+    }
+
+    function clearWakeSessionTimeout(): void {
+        if (!wakeTimer) return;
+        clearTimeout(wakeTimer);
+        wakeTimer = null;
+    }
+
+    function refreshWakeSessionTimeout(reason: string): void {
+        if (!isAwake) return;
+        clearWakeSessionTimeout();
         wakeTimer = setTimeout(() => {
             queueMemoryCandidateForSession(currentConversationId);
+            realtimeSocket.publishVoiceSession({
+                mode: 'standby',
+                reason,
+                conversationId: currentConversationId,
+                pipelineId: currentConversationPipelineId,
+            });
+            completeCurrentConversationPipeline(reason);
+            visionAttention.clearSource('wake');
             isAwake = false;
             currentConversationId = null;
-            console.log("💤 打断后监听超时，回到待机状态");
-        }, 15000);
+            commandSegmenter.reset('manual_reset');
+            wakeWindowFrames = [];
+            console.log(`💤 ${reason}，回到待机状态`);
+        }, GLOBAL_CONFIG.VOICE.WAKE_SESSION_IDLE_MS);
+    }
+
+    function listenAfterInterruption(): void {
+        isAwake = true;
+        requestWakeVisionAttention('barge_in_interruption');
+        wakeSegmenter.reset('manual_reset');
+        commandSegmenter.reset('manual_reset');
+        subtitleSegmenter.reset('manual_reset');
+        realtimeSocket.publishVoiceSession({
+            mode: 'listening',
+            reason: 'barge_in_interruption',
+            conversationId: currentConversationId,
+            pipelineId: currentConversationPipelineId,
+        });
+        refreshWakeSessionTimeout('打断后监听超时');
     }
 
     function endCurrentSession(reason: string): void {
         queueMemoryCandidateForSession(currentConversationId);
+        realtimeSocket.publishVoiceSession({
+            mode: 'standby',
+            reason,
+            conversationId: currentConversationId,
+            pipelineId: currentConversationPipelineId,
+        });
+        completeCurrentConversationPipeline(reason);
+        visionAttention.clearSource('wake');
         isAwake = false;
         currentConversationId = null;
-        if (wakeTimer) {
-            clearTimeout(wakeTimer);
-            wakeTimer = null;
-        }
+        clearWakeSessionTimeout();
         console.log(`💤 ${reason}`);
     }
 
@@ -267,7 +546,7 @@ async function monitor(): Promise<MonitorStop> {
 
     async function handleCommand(
         command: string,
-        deps: { onTextDelta?: (delta: string) => void | Promise<void> } = {},
+        deps: { onTextDelta?: (delta: string) => void | Promise<void>; pipelineId?: string } = {},
     ): Promise<BrainCommandResult | null> {
         const trimmed = command.trim();
         if (trimmed.length <= 1) return null;
@@ -292,12 +571,9 @@ async function monitor(): Promise<MonitorStop> {
         if (!result.shouldRemember) {
             return result;
         }
-        if (!currentConversationId) {
-            currentConversationId = memory.createConversationSession().conversationId;
-            console.log(`🧠 新会话记忆已创建: ${currentConversationId}`);
-        }
+        const conversationId = ensureCurrentConversationId();
         memory.appendConversationTurn({
-            conversation_id: currentConversationId,
+            conversation_id: conversationId,
             user_content: trimmed,
             agent_content: result.text,
         });
@@ -308,6 +584,7 @@ async function monitor(): Promise<MonitorStop> {
     function enqueueSpeechChunks(
         getToken: () => number,
         onDone: (speech: InterruptibleSpeech | null) => void,
+        speechOptions: { conversationId?: string; logGroupId?: string } = {},
     ): {
         pushDelta: (delta: string) => Promise<void>;
         flush: () => Promise<void>;
@@ -324,7 +601,7 @@ async function monitor(): Promise<MonitorStop> {
             while (pending.length > 0) {
                 if (cancelled || activeSpeechQueueCancelled || activeSpeechToken !== speechToken) return;
                 const item = pending.shift()!;
-                const speech = item.speech ?? speakInterruptible(item.text);
+                const speech = item.speech ?? speakInterruptible(item.text, speechOptions);
                 activeSpeech = speech;
                 activeSpeechText = item.text;
                 activeSpeechStartedAt = Date.now();
@@ -350,7 +627,7 @@ async function monitor(): Promise<MonitorStop> {
             console.log(`[TTS:Queue] enqueue chars=${chunk.length} text="${chunk.slice(0, 80)}${chunk.length > 80 ? '...' : ''}"`);
             pending.push({
                 text: chunk,
-                speech: prewarmCosyVoice ? speakInterruptible(chunk) : undefined,
+                speech: prewarmCosyVoice ? speakInterruptible(chunk, speechOptions) : undefined,
             });
             tail = tail.then(pump);
         };
@@ -386,40 +663,14 @@ async function monitor(): Promise<MonitorStop> {
     async function speakResponse(response: string): Promise<void> {
         const speechToken = activeSpeechToken + 1;
         activeSpeechToken = speechToken;
-        systemSpeaking = true;
-        activeSpeechText = response;
-        activeSpeechStartedAt = Date.now();
-        resetBargeInBuffer();
-        activeSpeech = speakInterruptible(response);
-        try {
-            await activeSpeech.done;
-        } finally {
-            if (activeSpeechToken === speechToken) {
-                activeSpeech = null;
-                activeSpeechText = '';
-                activeSpeechStartedAt = 0;
-                systemSpeaking = false;
-                resetBargeInBuffer();
-            }
-            await new Promise(r => setTimeout(r, 800));
-
-            if (activeSpeechToken !== speechToken) {
-                return;
-            }
-            if (wakeTimer) clearTimeout(wakeTimer);
-            wakeTimer = setTimeout(() => {
-                isAwake = false;
-                currentConversationId = null;
-                console.log("💤 会话超时，回到待机状态");
-            }, 15000);
-        }
-    }
-
-    async function handleAndSpeakCommand(command: string): Promise<BrainCommandResult | null> {
-        const speechToken = activeSpeechToken + 1;
-        activeSpeechToken = speechToken;
         activeSpeechQueueCancelled = false;
         systemSpeaking = true;
+        realtimeSocket.publishVoiceSession({
+            mode: 'speaking',
+            reason: 'assistant_response_started',
+            conversationId: currentConversationId,
+            pipelineId: currentConversationPipelineId,
+        });
         activeSpeechText = '';
         activeSpeechStartedAt = Date.now();
         resetBargeInBuffer();
@@ -431,10 +682,144 @@ async function monitor(): Promise<MonitorStop> {
                     activeSpeech = speech;
                 }
             },
+            {
+                conversationId: currentConversationId ?? undefined,
+                logGroupId: currentConversationPipelineId ?? currentConversationId ?? `response-${speechToken}`,
+            },
         );
+        activeSpeechQueueCancel = speechQueue.cancel;
+
+        try {
+            activeSpeechText = response;
+            await speechQueue.pushDelta(response);
+            await speechQueue.flush();
+        } finally {
+            if (activeSpeechQueueCancelled) {
+                speechQueue.cancel();
+            }
+            if (activeSpeechToken === speechToken) {
+                activeSpeech = null;
+                activeSpeechText = '';
+                activeSpeechStartedAt = 0;
+                systemSpeaking = false;
+                activeSpeechQueueCancel = null;
+                resetBargeInBuffer();
+                realtimeSocket.publishVoiceSession({
+                    mode: isAwake ? 'listening' : 'standby',
+                    reason: 'assistant_response_finished',
+                    conversationId: currentConversationId,
+                    pipelineId: currentConversationPipelineId,
+                });
+            }
+            await new Promise(r => setTimeout(r, 800));
+
+            if (activeSpeechToken !== speechToken) {
+                speechQueue.cancel();
+                return;
+            }
+            refreshWakeSessionTimeout('会话超时');
+        }
+    }
+
+    async function speakWakeAck(): Promise<void> {
+        const startedAt = Date.now();
+        const speechToken = activeSpeechToken + 1;
+        activeSpeechToken = speechToken;
+        systemSpeaking = true;
+        realtimeSocket.publishVoiceSession({
+            mode: 'speaking',
+            reason: 'wake_ack_started',
+            conversationId: currentConversationId,
+            pipelineId: currentConversationPipelineId,
+        });
+        activeSpeechText = GLOBAL_CONFIG.VOICE.WAKE_ACK_TEXT;
+        activeSpeechStartedAt = Date.now();
+        resetBargeInBuffer();
+        const conversationId = currentConversationId ?? undefined;
+        const pipelineId = currentConversationPipelineId ?? conversationId;
+        activeSpeech = playWakeAckInterruptible();
+        try {
+            await activeSpeech.done;
+            pipelineLogs.append({
+                category: 'voice-tts',
+                level: 'info',
+                title: 'wake_ack.completed',
+                message: 'Wake acknowledgement finished.',
+                timings: [{ key: 'wake_ack_total', label: '唤醒应答总耗时', durationMs: Date.now() - startedAt }],
+                metadata: {
+                    conversationId: conversationId ?? null,
+                    conversation_id: conversationId ?? null,
+                    provider: GLOBAL_CONFIG.VOICE.TTS_PROVIDER,
+                    text: GLOBAL_CONFIG.VOICE.WAKE_ACK_TEXT,
+                },
+                conversationId,
+                pipelineId,
+            });
+        } catch (error) {
+            console.warn('[TTS] wake ack playback failed:', error);
+            pipelineLogs.append({
+                category: 'voice-tts',
+                level: 'error',
+                title: 'wake_ack.failed',
+                message: error instanceof Error ? error.message : String(error),
+                timings: [{ key: 'wake_ack_total', label: '唤醒应答总耗时', durationMs: Date.now() - startedAt }],
+                metadata: {
+                    conversationId: conversationId ?? null,
+                    conversation_id: conversationId ?? null,
+                    provider: GLOBAL_CONFIG.VOICE.TTS_PROVIDER,
+                    text: GLOBAL_CONFIG.VOICE.WAKE_ACK_TEXT,
+                },
+                conversationId,
+                pipelineId,
+            });
+        } finally {
+            if (activeSpeechToken === speechToken) {
+                activeSpeech = null;
+                activeSpeechText = '';
+                activeSpeechStartedAt = 0;
+                systemSpeaking = false;
+                resetBargeInBuffer();
+                realtimeSocket.publishVoiceSession({
+                    mode: isAwake ? 'listening' : 'standby',
+                    reason: 'wake_ack_finished',
+                    conversationId: currentConversationId,
+                    pipelineId: currentConversationPipelineId,
+                });
+                refreshWakeSessionTimeout('指令监听超时');
+            }
+        }
+    }
+
+    async function handleAndSpeakCommand(command: string, commandPipelineId: string): Promise<BrainCommandResult | null> {
+        const speechToken = activeSpeechToken + 1;
+        activeSpeechToken = speechToken;
+        activeSpeechQueueCancelled = false;
+        systemSpeaking = true;
+        realtimeSocket.publishVoiceSession({
+            mode: 'processing',
+            reason: 'voice_command_started',
+            conversationId: currentConversationId,
+            pipelineId: commandPipelineId,
+        });
+        activeSpeechText = '';
+        activeSpeechStartedAt = Date.now();
+        resetBargeInBuffer();
+        const conversationId = ensureCurrentConversationId();
+
+        const speechQueue = enqueueSpeechChunks(
+            () => speechToken,
+            (speech) => {
+                if (activeSpeechToken === speechToken) {
+                    activeSpeech = speech;
+                }
+            },
+            { conversationId, logGroupId: commandPipelineId },
+        );
+        activeSpeechQueueCancel = speechQueue.cancel;
 
         try {
             const result = await handleCommand(command, {
+                pipelineId: commandPipelineId,
                 onTextDelta: async (delta) => {
                     if (activeSpeechToken !== speechToken || activeSpeechQueueCancelled) return;
                     activeSpeechText += delta;
@@ -452,18 +837,22 @@ async function monitor(): Promise<MonitorStop> {
                 activeSpeechText = '';
                 activeSpeechStartedAt = 0;
                 systemSpeaking = false;
+                activeSpeechQueueCancel = null;
                 resetBargeInBuffer();
+                realtimeSocket.publishVoiceSession({
+                    mode: isAwake ? 'listening' : 'standby',
+                    reason: 'voice_command_finished',
+                    conversationId: currentConversationId,
+                    pipelineId: commandPipelineId,
+                });
                 await new Promise(r => setTimeout(r, 800));
 
-                if (wakeTimer) clearTimeout(wakeTimer);
-                wakeTimer = setTimeout(() => {
-                    queueMemoryCandidateForSession(currentConversationId);
-                    isAwake = false;
-                    currentConversationId = null;
-                    console.log("💤 会话超时，回到待机状态");
-                }, 15000);
+                refreshWakeSessionTimeout('会话超时');
             } else {
                 speechQueue.cancel();
+                if (activeSpeechQueueCancel === speechQueue.cancel) {
+                    activeSpeechQueueCancel = null;
+                }
             }
         }
     }
@@ -477,11 +866,23 @@ async function monitor(): Promise<MonitorStop> {
         resetBargeInBuffer();
         bargeInTranscribing = true;
         try {
-            const text = await extractTextFromVoiceStream(audioBuffer);
+            const utteranceId = `barge-in-${Date.now()}`;
+            const text = await transcribeSegmentWithCache({
+                audio: audioBuffer,
+                segmentStartTs: bargeInStartedAt,
+                segmentEndTs: bargeInLastActiveTs || Date.now(),
+                reason: 'barge-in',
+                logOptions: {
+                conversationId: currentConversationId,
+                logGroupId: currentConversationPipelineId ?? currentConversationId,
+                utteranceId,
+                reason: 'barge-in',
+                },
+            });
             const hasKeyword = GLOBAL_CONFIG.VOICE.BARGE_IN_KEYWORDS.some(keyword =>
                 text.toLowerCase().includes(keyword.toLowerCase()),
             );
-            const hasWakeWord = text.includes(GLOBAL_CONFIG.VOICE.WAKE_WORD);
+            const hasWakeWord = hasWakeWordInText(text, GLOBAL_CONFIG.VOICE.WAKE_WORD);
             if (!isValidBargeInTranscript(text, GLOBAL_CONFIG.VOICE.WAKE_WORD, GLOBAL_CONFIG.VOICE.BARGE_IN_KEYWORDS)) {
                 return;
             }
@@ -496,6 +897,8 @@ async function monitor(): Promise<MonitorStop> {
 
             console.log(`[BargeIn] Stopping speech and entering listening mode. transcript="${text}", keyword=${hasKeyword}`);
             activeSpeechQueueCancelled = true;
+            activeSpeechQueueCancel?.();
+            activeSpeechQueueCancel = null;
             activeSpeech.stop();
             systemSpeaking = false;
             activeSpeech = null;
@@ -509,67 +912,349 @@ async function monitor(): Promise<MonitorStop> {
         }
     }
 
-    async function flushSubtitleBuffer() {
-        if (subtitleTranscribing || subtitleBuffer.length === 0 || systemSpeaking) {
-            return;
+    function segmentTimings(segment: AudioSegment, asrMs?: number) {
+        return [
+            { key: 'audio_segment_duration', label: '音频段长度', durationMs: segment.segmentEndTs - segment.segmentStartTs },
+            { key: 'vad_tail_wait', label: 'VAD 静音收尾等待', durationMs: Math.max(0, segment.segmentEndTs - segment.lastActiveTs) },
+            ...(asrMs !== undefined ? [{ key: 'asr_latency', label: 'ASR 耗时', durationMs: asrMs }] : []),
+        ];
+    }
+
+    function resetListeningSegments(reason: 'system_speaking' | 'manual_reset'): void {
+        wakeSegmenter.reset(reason);
+        commandSegmenter.reset(reason);
+        subtitleSegmenter.reset(reason);
+        wakeWindowFrames = [];
+    }
+
+    function pushWakeWindowFrame(data: Buffer, level: { peak: number; rms: number }, ts: number): void {
+        const active = level.peak >= GLOBAL_CONFIG.VOICE.WAKE_VAD_THRESHOLD;
+        wakeWindowFrames.push({ data, ts, peak: level.peak, rms: level.rms, active });
+        const windowStart = ts - GLOBAL_CONFIG.VOICE.WAKE_WINDOW_MS;
+        let removeCount = 0;
+        while (removeCount < wakeWindowFrames.length && wakeWindowFrames[removeCount]!.ts < windowStart) {
+            removeCount++;
+        }
+        if (removeCount > 0) wakeWindowFrames.splice(0, removeCount);
+    }
+
+    function buildWakeProbeSegment(ts: number): AudioSegment | null {
+        if (!wakeWindowFrames.length) return null;
+        const first = wakeWindowFrames[0];
+        const last = wakeWindowFrames[wakeWindowFrames.length - 1];
+        if (!first || !last) return null;
+        const activeFrames = wakeWindowFrames.filter(frame => frame.active);
+        if (activeFrames.length < GLOBAL_CONFIG.VOICE.VAD_START_FRAMES) return null;
+        const durationMs = ts - first.ts;
+        if (durationMs < 250) return null;
+        let totalBytes = 0;
+        let peak = 0;
+        let rmsPeak = 0;
+        const buffers: Buffer[] = [];
+        for (const frame of wakeWindowFrames) {
+            buffers.push(frame.data);
+            totalBytes += frame.data.length;
+            peak = Math.max(peak, frame.peak);
+            rmsPeak = Math.max(rmsPeak, frame.rms);
+        }
+        return {
+            audio: Buffer.concat(buffers, totalBytes),
+            segmentStartTs: first.ts,
+            segmentEndTs: ts,
+            lastActiveTs: activeFrames[activeFrames.length - 1]?.ts ?? last.ts,
+            endReason: 'soft_max_duration',
+            forced: false,
+            frameCount: wakeWindowFrames.length,
+            activeFrameCount: activeFrames.length,
+            peak,
+            rmsPeak,
+        };
+    }
+
+    async function transcribeSegmentWithCache(input: {
+        audio: Buffer;
+        segmentStartTs: number;
+        segmentEndTs: number;
+        reason: AsrCacheReason;
+        logOptions: AsrLogOptions;
+    }): Promise<string> {
+        const now = Date.now();
+        pruneAsrCache(now);
+        const hash = hashAudioWindow(input.audio);
+        const cached = asrCache.find(entry =>
+            entry.reason === input.reason
+            && entry.audioBytes === input.audio.length
+            && entry.hash === hash
+            && getSegmentOverlapRatio(entry, input.segmentStartTs, input.segmentEndTs) >= ASR_DEDUPE_MIN_OVERLAP
+        );
+        if (cached) {
+            pipelineLogs.append({
+                category: 'voice-asr',
+                level: 'debug',
+                title: 'asr.cache_hit',
+                message: `Reused ${input.reason} ASR transcript for overlapping audio window.`,
+                metadata: {
+                    reason: input.reason,
+                    audioBytes: input.audio.length,
+                    segmentStartTs: input.segmentStartTs,
+                    segmentEndTs: input.segmentEndTs,
+                    cachedStartTs: cached.startTs,
+                    cachedEndTs: cached.endTs,
+                },
+                pipelineId: input.logOptions?.logGroupId ?? undefined,
+                conversationId: input.logOptions?.conversationId ?? undefined,
+            });
+            input.logOptions?.resolveLogGroup?.(cached.text);
+            return cached.text;
         }
 
-        const audioStartTs = subtitleBufferStartedAt;
-        const audioEndTs = Date.now();
-        const audioBuffer = Buffer.concat(subtitleBuffer);
+        const text = await extractTextFromVoiceStream(input.audio, input.logOptions);
+        asrCache.push({
+            reason: input.reason,
+            startTs: input.segmentStartTs,
+            endTs: input.segmentEndTs,
+            audioBytes: input.audio.length,
+            hash,
+            text,
+            createdAt: now,
+        });
+        if (asrCache.length > ASR_DEDUPE_MAX_ENTRIES) {
+            asrCache.splice(0, asrCache.length - ASR_DEDUPE_MAX_ENTRIES);
+        }
+        return text;
+    }
 
-        // 重置状态
-        subtitleBuffer = [];
-        subtitleBufferStartedAt = 0;
-        lastActiveTs = 0;
-        isSpeaking = false;
+    function pruneAsrCache(now: number): void {
+        let removeCount = 0;
+        while (removeCount < asrCache.length && now - asrCache[removeCount]!.createdAt > ASR_DEDUPE_CACHE_TTL_MS) {
+            removeCount++;
+        }
+        if (removeCount > 0) asrCache.splice(0, removeCount);
+    }
 
-        subtitleTranscribing = true;
+    function getSegmentOverlapRatio(entry: AsrCacheEntry, startTs: number, endTs: number): number {
+        const duration = Math.max(1, endTs - startTs);
+        const overlap = Math.max(0, Math.min(entry.endTs, endTs) - Math.max(entry.startTs, startTs));
+        return overlap / duration;
+    }
+
+    function hashAudioWindow(audio: Buffer): number {
+        let hash = 2166136261;
+        const sampleCount = Math.min(4096, audio.length);
+        const stride = Math.max(1, Math.floor(audio.length / sampleCount));
+        for (let index = 0; index < audio.length; index += stride) {
+            hash ^= audio[index] ?? 0;
+            hash = Math.imul(hash, 16777619);
+        }
+        return hash >>> 0;
+    }
+
+    async function runCommandFromVoice(command: string, commandPipelineId: string): Promise<void> {
+        clearWakeSessionTimeout();
+        let endedSession = false;
         try {
-            const text = await extractTextFromVoiceStream(audioBuffer);
-            if (text) {
-                realtimeSocket.publishVoiceText(text, audioStartTs, audioEndTs);
+            const result = await handleAndSpeakCommand(command, commandPipelineId);
+            if (result?.shouldRespond && result.text) {
+                realtimeSocket.publishVoiceText(`[AI] ${result.text}`, Date.now(), Date.now() + 2000);
+            }
+            if (result?.shouldEndSession) {
+                endedSession = true;
+                endCurrentSession('用户结束对话，回到待机状态');
+            }
+        } finally {
+            if (!endedSession && isAwake) {
+                refreshWakeSessionTimeout('会话超时');
+            }
+        }
+    }
 
-                // --- 语音指令逻辑：唤醒词 & 会话状态检测 ---
-                const wakeWord = GLOBAL_CONFIG.VOICE.WAKE_WORD;
-                const hasWakeWord = text.includes(wakeWord);
-
-                if (hasWakeWord || isAwake) {
-                    let command = hasWakeWord ? text.split(wakeWord).pop()?.trim() : text;
-
-                    // 如果包含唤醒词，进入唤醒状态并开启/重置计时器
-                    if (hasWakeWord) {
-                        console.log(`🎯 检测到唤醒词 [${wakeWord}], 进入指令监听模式...`);
-                        isAwake = true;
-                        if (!command && GLOBAL_CONFIG.VOICE.TTS_PROVIDER !== 'cosyvoice') {
-                            void speakResponse('我在');
-                        }
-                    }
-
-                    // 只要检测到可能是指令，立即清除旧的倒计时，防止在思考/说话期间超时
-                    if (wakeTimer) {
-                        clearTimeout(wakeTimer);
-                        wakeTimer = null;
-                    }
-
-                    if (command && command.length > 1) {
-                        const result = await handleAndSpeakCommand(command);
-                        if (result?.shouldRespond && result.text) {
-                            realtimeSocket.publishVoiceText(`[AI] ${result.text}`, Date.now(), Date.now() + 2000);
-                        }
-                        if (result?.shouldEndSession) {
-                            endCurrentSession('用户结束对话，回到待机状态');
-                        }
-                    } else if (hasWakeWord) {
-                        // 如果只有唤醒词而没有后续指令，启动基础超时计时
-                        wakeTimer = setTimeout(() => {
-                            queueMemoryCandidateForSession(currentConversationId);
-                            isAwake = false;
-                            currentConversationId = null;
-                            console.log("💤 指令监听超时，回到待机状态");
-                        }, 15000);
-                    }
+    async function flushWakeSegment(segment: AudioSegment): Promise<void> {
+        if (wakeTranscribing || systemSpeaking || isAwake) return;
+        wakeTranscribing = true;
+        const pipelineId = `wake-${segment.segmentStartTs}-${segment.segmentEndTs}`;
+        const utteranceId = `wake-${segment.segmentStartTs}-${segment.segmentEndTs}`;
+        const asrStartedAt = Date.now();
+        try {
+            const text = await transcribeSegmentWithCache({
+                audio: segment.audio,
+                segmentStartTs: segment.segmentStartTs,
+                segmentEndTs: segment.segmentEndTs,
+                reason: 'wake',
+                logOptions: {
+                logGroupId: pipelineId,
+                utteranceId,
+                reason: 'wake',
+                },
+            });
+            const asrMs = Date.now() - asrStartedAt;
+            if (!text) return;
+            const wake = extractWakeCommand(text, GLOBAL_CONFIG.VOICE.WAKE_WORD);
+            if (!wake.hasWakeWord) {
+                if (GLOBAL_CONFIG.OLLAMA.TRACE_ENABLED) {
+                    console.debug('[Wake] Wake word not detected', {
+                        utteranceId,
+                        wakeWord: GLOBAL_CONFIG.VOICE.WAKE_WORD,
+                        text,
+                        normalizedText: normalizeWakeText(text),
+                        normalizedWakeWord: normalizeWakeText(GLOBAL_CONFIG.VOICE.WAKE_WORD),
+                        audioBytes: segment.audio.length,
+                        segmentStartTs: segment.segmentStartTs,
+                        segmentEndTs: segment.segmentEndTs,
+                        lastActiveTs: segment.lastActiveTs,
+                        endReason: segment.endReason,
+                        forcedSegment: segment.forced,
+                        wakeWindowDurationMs: segment.segmentEndTs - segment.segmentStartTs,
+                        wakeVadThreshold: GLOBAL_CONFIG.VOICE.WAKE_VAD_THRESHOLD,
+                        asrMs,
+                    });
                 }
+                return;
+            }
+
+            const conversationId = ensureCurrentConversationId();
+            const commandPipelineId = ensureCurrentConversationPipelineId(conversationId, segment.segmentStartTs);
+            isAwake = true;
+            requestWakeVisionAttention('wake_word_detected');
+            wakeWindowFrames = [];
+            const hasCommand = hasMeaningfulWakeCommand(wake.command);
+            realtimeSocket.publishVoiceSession({
+                mode: hasCommand ? 'processing' : 'awake',
+                reason: 'wake_word_detected',
+                conversationId,
+                pipelineId: commandPipelineId,
+            });
+            pipelineLogs.append({
+                category: 'wake',
+                level: 'info',
+                title: 'wake_word.detected',
+                message: `Wake word detected: ${GLOBAL_CONFIG.VOICE.WAKE_WORD}`,
+                timings: segmentTimings(segment, asrMs),
+                metadata: {
+                    conversationId,
+                    conversation_id: conversationId,
+                    utteranceId,
+                    wakeWord: GLOBAL_CONFIG.VOICE.WAKE_WORD,
+                    hasCommand,
+                    commandChars: wake.command.length,
+                    normalizedCommandChars: wake.normalizedCommandChars,
+                    wakePrefixNoiseChars: wake.prefixNoiseChars,
+                    text,
+                    audioBytes: segment.audio.length,
+                    segmentStartTs: segment.segmentStartTs,
+                    segmentEndTs: segment.segmentEndTs,
+                    lastActiveTs: segment.lastActiveTs,
+                    endReason: segment.endReason,
+                    forcedSegment: segment.forced,
+                    wakeWindowDurationMs: segment.segmentEndTs - segment.segmentStartTs,
+                    bufferAgeBeforeAsr: asrStartedAt - segment.segmentEndTs,
+                },
+                conversationId,
+                pipelineId: commandPipelineId,
+            });
+            if (wake.prefixNoiseChars >= GLOBAL_CONFIG.VOICE.WAKE_PREFIX_NOISE_WARN_CHARS) {
+                pipelineLogs.recordIncident({
+                    pipelineId: commandPipelineId,
+                    stage: 'wake',
+                    severity: 'warn',
+                    reason: 'wake_prefix_noise_too_long',
+                    outputSnapshot: text,
+                    recommendedAction: 'Only use text after the wake word as command input.',
+                    metadata: { wakePrefixNoiseChars: wake.prefixNoiseChars },
+                });
+            }
+            console.log(`🎯 检测到唤醒词 [${GLOBAL_CONFIG.VOICE.WAKE_WORD}], 进入指令监听模式...`);
+            if (hasCommand) {
+                await runCommandFromVoice(wake.command, commandPipelineId);
+            } else {
+                void speakWakeAck();
+                refreshWakeSessionTimeout('指令监听超时');
+            }
+        } catch (error) {
+            console.error('Wake transcription failed:', error);
+        } finally {
+            wakeTranscribing = false;
+        }
+    }
+
+    async function flushCommandSegment(segment: AudioSegment): Promise<void> {
+        if (commandTranscribing || systemSpeaking || !isAwake) return;
+        commandTranscribing = true;
+        const conversationId = ensureCurrentConversationId();
+        const pipelineId = ensureCurrentConversationPipelineId(conversationId, segment.segmentStartTs);
+        const utteranceId = `command-${segment.segmentStartTs}-${segment.segmentEndTs}`;
+        try {
+            const text = await transcribeSegmentWithCache({
+                audio: segment.audio,
+                segmentStartTs: segment.segmentStartTs,
+                segmentEndTs: segment.segmentEndTs,
+                reason: 'command',
+                logOptions: {
+                conversationId,
+                logGroupId: pipelineId,
+                utteranceId,
+                reason: 'command',
+                },
+            });
+            if (!text) {
+                refreshWakeSessionTimeout('指令监听超时');
+                return;
+            }
+            realtimeSocket.publishVoiceText(text, segment.segmentStartTs, segment.segmentEndTs);
+            const command = hasWakeWordInText(text, GLOBAL_CONFIG.VOICE.WAKE_WORD)
+                ? extractWakeCommand(text, GLOBAL_CONFIG.VOICE.WAKE_WORD).command
+                : text;
+            if (!hasMeaningfulWakeCommand(command)) {
+                refreshWakeSessionTimeout('指令监听超时');
+                return;
+            }
+            pipelineLogs.append({
+                category: 'wake',
+                level: 'info',
+                title: 'wake_session.command_detected',
+                message: 'Awake session speech detected.',
+                timings: segmentTimings(segment),
+                metadata: {
+                    conversationId,
+                    conversation_id: conversationId,
+                    utteranceId,
+                    commandChars: command.length,
+                    normalizedCommandChars: normalizeWakeText(command).length,
+                    text,
+                    audioBytes: segment.audio.length,
+                    segmentStartTs: segment.segmentStartTs,
+                    segmentEndTs: segment.segmentEndTs,
+                    endReason: segment.endReason,
+                    forcedSegment: segment.forced,
+                },
+                conversationId,
+                pipelineId,
+            });
+            await runCommandFromVoice(command, pipelineId);
+        } catch (error) {
+            console.error('Command transcription failed:', error);
+        } finally {
+            commandTranscribing = false;
+        }
+    }
+
+    async function flushSubtitleSegment(segment: AudioSegment): Promise<void> {
+        if (subtitleTranscribing || systemSpeaking) return;
+        subtitleTranscribing = true;
+        const utteranceId = `subtitle-${segment.segmentStartTs}-${segment.segmentEndTs}`;
+        try {
+            const text = await transcribeSegmentWithCache({
+                audio: segment.audio,
+                segmentStartTs: segment.segmentStartTs,
+                segmentEndTs: segment.segmentEndTs,
+                reason: 'subtitle',
+                logOptions: {
+                logGroupId: utteranceId,
+                utteranceId,
+                reason: 'subtitle',
+                },
+            });
+            if (text) {
+                realtimeSocket.publishVoiceText(text, segment.segmentStartTs, segment.segmentEndTs);
             }
         } catch (error) {
             console.error('Subtitle transcription failed:', error);
@@ -584,30 +1269,26 @@ async function monitor(): Promise<MonitorStop> {
 
         if (!faceRecognitionRunning && faceValue.canExecute()) {
             faceRecognitionRunning = true;
-            void faceEngine.detectAll(jpegBuffer)
-                .then((detection: HumanDetectionResult) => {
-                    latestCameraRecognition = buildCameraRecognitionContext(detection);
+            void detectVisionFrame(jpegBuffer, (detection: HumanDetectionResult) => {
+                latestCameraRecognition = buildCameraRecognitionContext(detection);
 
-                    // 广播完整感知数据到前端
-                    realtimeSocket.publishVisionDetection(detection);
-
-                    // console.log(`[Vision] Face recognition context updated: ${JSON.stringify({
-                    //     recognizedLabels: latestCameraRecognition.recognizedLabels,
-                    //     hasStranger: latestCameraRecognition.hasStranger,
-                    //     faces: latestCameraRecognition.faces.map(face => ({
-                    //         label: face.label,
-                    //         matched: face.matched,
-                    //         candidateLabel: face.candidateLabel,
-                    //         distance: typeof face.distance === 'number' ? Number(face.distance.toFixed(4)) : face.distance,
-                    //         threshold: face.threshold,
-                    //         similarity: typeof face.similarity === 'number' ? Number(face.similarity.toFixed(4)) : face.similarity,
-                    //     })),
-                    //     identityVerification: latestCameraRecognition.identityVerification,
-                    //     bodies: detection.bodies.length,
-                    //     hands: detection.hands.length,
-                    //     objects: detection.objects.map(o => o.label),
-                    // })}`);
-                })
+                // console.log(`[Vision] Face recognition context updated: ${JSON.stringify({
+                //     recognizedLabels: latestCameraRecognition.recognizedLabels,
+                //     hasStranger: latestCameraRecognition.hasStranger,
+                //     faces: latestCameraRecognition.faces.map(face => ({
+                //         label: face.label,
+                //         matched: face.matched,
+                //         candidateLabel: face.candidateLabel,
+                //         distance: typeof face.distance === 'number' ? Number(face.distance.toFixed(4)) : face.distance,
+                //         threshold: face.threshold,
+                //         similarity: typeof face.similarity === 'number' ? Number(face.similarity.toFixed(4)) : face.similarity,
+                //     })),
+                //     identityVerification: latestCameraRecognition.identityVerification,
+                //     bodies: detection.bodies.length,
+                //     hands: detection.hands.length,
+                //     objects: detection.objects.map(o => o.label),
+                // })}`);
+            })
                 .catch((error) => {
                     console.error('Face recognition failed:', error);
                 })
@@ -626,11 +1307,11 @@ async function monitor(): Promise<MonitorStop> {
         syncManager.addAudio(data);
         realtimeSocket.publishVoiceChunk(data);
 
-        // 计算当前音频块的能量
-        const { peak } = calculatePcmLevel(data);
+        const level = calculatePcmLevel(data);
         const now = Date.now();
 
         if (systemSpeaking) {
+            resetListeningSegments('system_speaking');
             if (
                 !GLOBAL_CONFIG.VOICE.BARGE_IN_ENABLED
                 || !activeSpeech
@@ -640,13 +1321,13 @@ async function monitor(): Promise<MonitorStop> {
                 return;
             }
 
-            if (peak >= GLOBAL_CONFIG.VOICE.BARGE_IN_VAD_THRESHOLD) {
+            if (level.peak >= GLOBAL_CONFIG.VOICE.BARGE_IN_VAD_THRESHOLD) {
                 if (bargeInBuffer.length === 0) {
                     bargeInStartedAt = now;
                     bargeInLastProbeTs = now;
                 }
                 bargeInLastActiveTs = now;
-                bargeInPeak = Math.max(bargeInPeak, peak);
+                bargeInPeak = Math.max(bargeInPeak, level.peak);
                 bargeInBuffer.push(data);
                 const bufferedDuration = now - bargeInStartedAt;
                 const sinceLastProbe = now - bargeInLastProbeTs;
@@ -682,34 +1363,38 @@ async function monitor(): Promise<MonitorStop> {
             return;
         }
 
-        if (!realtimeSocket.isRealtimeSubtitleEnabled()) {
-            subtitleBuffer = [];
-            isSpeaking = false;
-            return;
-        }
-
-        if (peak >= SUBTITLE_VAD_THRESHOLD) {
-            // 检测到声音
-            if (!isSpeaking) {
-                isSpeaking = true;
-                subtitleBufferStartedAt = now;
+        if (isAwake) {
+            wakeSegmenter.reset('manual_reset');
+            if (level.peak >= GLOBAL_CONFIG.VOICE.COMMAND_VAD_THRESHOLD) {
+                refreshWakeSessionTimeout('指令监听超时');
             }
-            lastActiveTs = now;
-            subtitleBuffer.push(data);
+            const commandSegment = commandSegmenter.push(data, level, now);
+            if (commandSegment) void flushCommandSegment(commandSegment);
         } else {
-            // 静音阶段
-            if (isSpeaking) {
-                subtitleBuffer.push(data);
-                // 检查是否静音超过阈值 或者 录音时间过长
-                const silenceDuration = now - lastActiveTs;
-                const totalDuration = now - subtitleBufferStartedAt;
-
-                if (silenceDuration > SILENCE_END_MS || totalDuration > MAX_SUBTITLE_DURATION_MS) {
-                    void flushSubtitleBuffer();
+            commandSegmenter.reset('manual_reset');
+            pushWakeWindowFrame(data, level, now);
+            if (!wakeTranscribing && now - lastWakeProbeAt >= GLOBAL_CONFIG.VOICE.WAKE_PROBE_INTERVAL_MS) {
+                const wakeProbe = buildWakeProbeSegment(now);
+                if (wakeProbe) {
+                    lastWakeProbeAt = now;
+                    void flushWakeSegment(wakeProbe);
                 }
             }
+            const wakeSegment = wakeSegmenter.push(data, level, now);
+            if (wakeSegment) void flushWakeSegment(wakeSegment);
+        }
+
+        // This transcript branch is display/observability output. Wake-word and
+        // command ASR remain the input path and should not be gated by UI state.
+        const subtitleSegment = subtitleSegmenter.push(data, level, now);
+        if (subtitleSegment) {
+            void flushSubtitleSegment(subtitleSegment);
+        } else {
+            logAsrVadDiagnostic('below_vad_threshold', level.peak);
         }
     });
+
+    prewarmWakeAckInBackground('monitor_start');
 
     return async () => {
         if (wakeTimer) {
@@ -717,6 +1402,8 @@ async function monitor(): Promise<MonitorStop> {
             wakeTimer = null;
         }
         activeSpeech?.stop();
+        clearInterval(visionProfileCleanupTimer);
+        resetListeningSegments('manual_reset');
         audio.removeAllListeners('data');
         p2j.removeAllListeners('data');
         video.unpipe(p2j);
@@ -735,6 +1422,10 @@ async function monitorVideoOnly(): Promise<MonitorStop> {
     let latestCameraRecognition: CameraRecognitionContext | null = null;
     let latestVisionFrame: Buffer | null = null;
     let faceRecognitionRunning = false;
+    const visionProfileCleanupTimer = setInterval(
+        () => cleanupIdleVisionProfiles('video_monitor_interval'),
+        VISION_PROFILE_CLEANUP_INTERVAL_MS,
+    );
 
     p2j.on('data', (jpegBuffer: Buffer) => {
         latestVisionFrame = jpegBuffer;
@@ -742,10 +1433,8 @@ async function monitorVideoOnly(): Promise<MonitorStop> {
 
         if (!faceRecognitionRunning && faceValue.canExecute()) {
             faceRecognitionRunning = true;
-            void faceEngine.detectAll(jpegBuffer)
-                .then((detection: HumanDetectionResult) => {
+            void detectVisionFrame(jpegBuffer, (detection: HumanDetectionResult) => {
                     latestCameraRecognition = buildCameraRecognitionContext(detection);
-                    realtimeSocket.publishVisionDetection(detection);
                 })
                 .catch((error) => {
                     console.error('Face recognition failed:', error);
@@ -758,6 +1447,7 @@ async function monitorVideoOnly(): Promise<MonitorStop> {
 
     return async () => {
         p2j.removeAllListeners('data');
+        clearInterval(visionProfileCleanupTimer);
         video.unpipe(p2j);
         latestVisionFrame = null;
         await stopVideo();
@@ -769,30 +1459,31 @@ async function monitorAudioOnly(): Promise<MonitorStop> {
 
     const { stream: audio, stop: stopAudio } = await initAudioListen();
 
-    let subtitleBuffer: Buffer[] = [];
-    let subtitleBufferStartedAt = 0;
-    let lastActiveTs = 0;
-    let isSpeaking = false;
+    const audioOnlySegmenter = new AudioSegmenter({
+        speechThreshold: GLOBAL_CONFIG.VOICE.SUBTITLE_VAD_THRESHOLD,
+        startFrames: GLOBAL_CONFIG.VOICE.VAD_START_FRAMES,
+        endFrames: GLOBAL_CONFIG.VOICE.VAD_END_FRAMES,
+        softMaxDurationMs: GLOBAL_CONFIG.VOICE.SUBTITLE_SOFT_MAX_MS,
+        hardMaxDurationMs: GLOBAL_CONFIG.VOICE.SUBTITLE_HARD_MAX_MS,
+        cooldownMs: GLOBAL_CONFIG.VOICE.VAD_COOLDOWN_MS,
+    });
     let subtitleTranscribing = false;
 
-    async function flushSubtitleBuffer() {
-        if (subtitleTranscribing || subtitleBuffer.length === 0) {
+    async function flushAudioOnlySegment(segment: AudioSegment) {
+        if (subtitleTranscribing) {
             return;
         }
 
-        const audioStartTs = subtitleBufferStartedAt;
-        const audioEndTs = Date.now();
-        const audioBuffer = Buffer.concat(subtitleBuffer);
-
-        subtitleBuffer = [];
-        subtitleBufferStartedAt = 0;
-        lastActiveTs = 0;
-        isSpeaking = false;
         subtitleTranscribing = true;
         try {
-            const text = await extractTextFromVoiceStream(audioBuffer);
+            const utteranceId = `audio-only-${segment.segmentStartTs}-${segment.segmentEndTs}`;
+            const text = await extractTextFromVoiceStream(segment.audio, {
+                logGroupId: utteranceId,
+                utteranceId,
+                reason: 'audio-only',
+            });
             if (text) {
-                realtimeSocket.publishVoiceText(text, audioStartTs, audioEndTs);
+                realtimeSocket.publishVoiceText(text, segment.segmentStartTs, segment.segmentEndTs);
             }
         } catch (error) {
             console.error('Audio transcription failed:', error);
@@ -802,52 +1493,47 @@ async function monitorAudioOnly(): Promise<MonitorStop> {
     }
 
     audio.on('data', (data: Buffer) => {
-        if (!realtimeSocket.isRealtimeSubtitleEnabled()) {
-            subtitleBuffer = [];
-            isSpeaking = false;
-            return;
-        }
-
         realtimeSocket.publishVoiceChunk(data);
-        const { peak } = calculatePcmLevel(data);
+        const level = calculatePcmLevel(data);
         const now = Date.now();
-
-        if (peak >= SUBTITLE_VAD_THRESHOLD) {
-            if (!isSpeaking) {
-                isSpeaking = true;
-                subtitleBufferStartedAt = now;
-            }
-            lastActiveTs = now;
-            subtitleBuffer.push(data);
-            return;
-        }
-
-        if (isSpeaking) {
-            subtitleBuffer.push(data);
-            const silenceDuration = now - lastActiveTs;
-            const totalDuration = now - subtitleBufferStartedAt;
-            if (silenceDuration > SILENCE_END_MS || totalDuration > MAX_SUBTITLE_DURATION_MS) {
-                void flushSubtitleBuffer();
-            }
-        }
+        const segment = audioOnlySegmenter.push(data, level, now);
+        if (segment) void flushAudioOnlySegment(segment);
     });
 
     return async () => {
         audio.removeAllListeners('data');
-        subtitleBuffer = [];
+        audioOnlySegmenter.reset('manual_reset');
         await stopAudio();
     };
 }
 
 export async function stopMonitor(): Promise<void> {
     const state = getMonitorRuntimeState();
-    const runtime = state.runtime;
+    let runtime = state.runtime;
+    const starting = state.starting;
     state.runtime = undefined;
     state.starting = undefined;
+
+    if (!runtime && starting) {
+        runtime = await starting.catch((error) => {
+            console.warn('Monitor startup failed while stopping:', error);
+            return undefined;
+        });
+    }
+
     if (runtime) {
         await runtime.stop();
         console.log(`🛑 Sentinel Monitor stopped (${runtime.mode})`);
     }
+}
+
+export function __setMonitorRuntimeForTest(state: MonitorRuntimeState): void {
+    if (process.env.NODE_ENV !== 'test') {
+        throw new Error('__setMonitorRuntimeForTest is only available in test.');
+    }
+    const runtimeState = getMonitorRuntimeState();
+    runtimeState.runtime = state.runtime;
+    runtimeState.starting = state.starting;
 }
 
 export async function startMonitor(mode: MonitorMode = 'full') {
@@ -866,6 +1552,7 @@ export async function startMonitor(mode: MonitorMode = 'full') {
 
     const label = mode === 'video' ? 'Video Demo' : mode === 'audio' ? 'Audio Demo' : 'Camera & Audio';
     state.starting = (async () => {
+        const startedAt = Date.now();
         console.log(`🚀 Starting Sentinel Monitor (${label})...`);
         let stop: MonitorStop;
         if (mode === 'video') {
@@ -875,6 +1562,18 @@ export async function startMonitor(mode: MonitorMode = 'full') {
         } else {
             stop = await monitor();
         }
+        pipelineLogs.append({
+            category: 'system',
+            level: 'info',
+            title: 'system.ready',
+            message: `Sentinel Monitor ready (${label}).`,
+            timings: [{ key: 'monitor_startup', label: 'Monitor startup', durationMs: Date.now() - startedAt }],
+            metadata: {
+                mode,
+                label,
+            },
+            pipelineId: 'system',
+        });
         return { mode, stop, startedAt: Date.now() };
     })();
 
@@ -882,6 +1581,17 @@ export async function startMonitor(mode: MonitorMode = 'full') {
         state.runtime = await state.starting;
     } catch (error) {
         console.error('❌ Monitor failed to start:', error);
+        pipelineLogs.append({
+            category: 'system',
+            level: 'error',
+            title: 'system.ready',
+            message: error instanceof Error ? error.message : String(error),
+            metadata: {
+                mode,
+                error: error instanceof Error ? error.message : String(error),
+            },
+            pipelineId: 'system',
+        });
     } finally {
         state.starting = undefined;
     }
