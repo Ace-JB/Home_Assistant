@@ -3,7 +3,7 @@ import { dirname, resolve } from 'path';
 
 const DEFAULT_VERSION = '2025.05.22';
 const version = process.env.YT_DLP_VERSION || DEFAULT_VERSION;
-const targetPath = resolve(process.env.YT_DLP_BIN || 'src/server/tools/bin/yt-dlp');
+const targetPath = resolve(process.env.YT_DLP_BIN || 'data/tools/bin/yt-dlp');
 const downloadUrl = `https://github.com/yt-dlp/yt-dlp/releases/download/${version}/yt-dlp`;
 
 async function main() {

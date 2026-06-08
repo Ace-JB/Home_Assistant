@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="${PYTHON_SERVICES_ROOT:-data/python_services}"
+SERVICE="${1:-all}"
+COSYVOICE_MODEL_DIR="${COSYVOICE_MODEL_DIR:-$ROOT/models_cache/cosyvoice/Fun-CosyVoice3-0.5B-2512-4bit}"
+
+services_for() {
+  case "$1" in
+    all) printf '%s\n' funasr cosyvoice mdx ;;
+    funasr|cosyvoice|mdx) printf '%s\n' "$1" ;;
+    *) echo "Unknown service: $1" >&2; exit 2 ;;
+  esac
+}
+
+ensure_cosyvoice_model() {
+  local missing=()
+  for file in config.json model.safetensors tokenizer.json; do
+    if [ ! -f "$COSYVOICE_MODEL_DIR/$file" ]; then
+      missing+=("$file")
+    fi
+  done
+  if [ "${#missing[@]}" -gt 0 ]; then
+    echo "CosyVoice model is incomplete at $COSYVOICE_MODEL_DIR" >&2
+    echo "Missing files: ${missing[*]}" >&2
+    echo "Place the model files in the fixed directory, then rerun: bun run python-services:setup cosyvoice" >&2
+    exit 1
+  fi
+}
+
+mkdir -p "$ROOT/envs" "$ROOT/models_cache/funasr" "$ROOT/models_cache/cosyvoice" "$ROOT/models_cache/mdx" "$ROOT/run"
+
+for service in $(services_for "$SERVICE"); do
+  env_dir="$ROOT/envs/${service}_env"
+  requirements="$SCRIPT_ROOT/requirements/${service}.txt"
+  if [ ! -x "$env_dir/bin/python" ]; then
+    python3 -m venv "$env_dir"
+  fi
+  "$env_dir/bin/python" -m pip install --upgrade pip
+  "$env_dir/bin/python" -m pip install -r "$requirements"
+  if [ "$service" = "cosyvoice" ]; then
+    ensure_cosyvoice_model
+  fi
+done

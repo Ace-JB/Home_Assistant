@@ -1,6 +1,7 @@
-import { spawn } from 'child_process';
-import type { ChildProcess } from 'child_process';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { GLOBAL_CONFIG } from '@/global_config';
+import { pipelineLogs } from '@/server/services/PipelineLogService';
 
 export type FunASRMaterialSegment = {
     start_ms: number;
@@ -16,30 +17,29 @@ export type FunASRMaterialAnalysis = {
     raw?: unknown;
 };
 
-type FunASRRequestMode = 'text' | 'material';
+type FunASRHealth = {
+    ok?: boolean;
+    ready?: boolean;
+    pid?: number | null;
+    startedAt?: number | null;
+    uptimeSeconds?: number | null;
+    queueLength?: number;
+    lastError?: string | null;
+    model?: string;
+};
+
+const execFileAsync = promisify(execFile);
 
 /**
- * FunASR 持续服务类 (Singleton)
- * 管理常驻内存的 Python 模型进程
+ * HTTP client for the isolated FunASR FastAPI service.
  */
 export class FunASRService {
     private static instance: FunASRService;
-    private process: ChildProcess | null = null;
-    private isReady = false;
-    private activeRequest: {
-        wavPath: string;
-        mode: FunASRRequestMode;
-        resolve: (value: string | FunASRMaterialAnalysis) => void;
-    } | null = null;
-    private requestQueue: Array<{
-        wavPath: string;
-        mode: FunASRRequestMode;
-        resolve: (value: string | FunASRMaterialAnalysis) => void;
-    }> = [];
     private startPromise: Promise<void> | null = null;
-    private startedAt = 0;
-    private lastError: string | null = null;
+    private status: FunASRHealth = { ready: false, pid: null, lastError: null };
     private logs: Array<{ ts: number; level: 'info' | 'warn' | 'error'; message: string }> = [];
+    private lastReadyLogAt = 0;
+    private readyConsolePrinted = false;
 
     private constructor() {}
 
@@ -51,106 +51,48 @@ export class FunASRService {
     }
 
     async start() {
-        if (this.isReady) return;
+        const current = await this.refreshStatus().catch(() => null);
+        if (current?.ready) {
+            this.recordReady('already_ready', 0);
+            return;
+        }
         if (this.startPromise) return this.startPromise;
 
-        this.startPromise = new Promise<void>((resolve, reject) => {
-            const cmdParts = parseCommand(GLOBAL_CONFIG.VOICE.FUNASR_CMD);
-            const cmd = cmdParts[0]!;
-            const baseArgs = cmdParts.slice(1);
-
-            console.log('⏳ Loading FunASR model into memory...');
-            this.appendLog('info', 'Loading FunASR model into memory...');
-            this.appendLog('info', `Starting FunASR command: ${GLOBAL_CONFIG.VOICE.FUNASR_CMD}`);
-
-            this.process = spawn(cmd, [
-                ...baseArgs,
-                '--model', GLOBAL_CONFIG.VOICE.FUNASR_MODEL,
-                '--material-model', GLOBAL_CONFIG.VOICE.FUNASR_MATERIAL_MODEL,
-                '--cache', GLOBAL_CONFIG.MODELS.BASE_PATH,
-                '--punc-model', GLOBAL_CONFIG.VOICE.FUNASR_PUNC_MODEL,
-                '--spk-model', GLOBAL_CONFIG.VOICE.FUNASR_SPK_MODEL,
-            ]);
-
-            const timeout = setTimeout(() => {
-                const error = new Error('FunASR Service startup timeout (60s)');
-                this.lastError = error.message;
-                this.appendLog('error', error.message);
-                this.process?.kill();
-                this.process = null;
-                this.startPromise = null;
-                reject(error);
-            }, 60000);
-
-            this.process.stdout?.on('data', (data) => {
-                const lines = data.toString().split('\n');
-                for (const line of lines) {
-                    const trimmedLine = line.trim();
-                    if (trimmedLine === 'READY') {
-                        clearTimeout(timeout);
-                        this.isReady = true;
-                        this.startedAt = Date.now();
-                        this.lastError = null;
-                        console.log('✅ FunASR Service Ready (Model Loaded)');
-                        this.appendLog('info', 'FunASR Service Ready (Model Loaded)');
-                        resolve();
-                    } else if (trimmedLine.startsWith('RESULT:')) {
-                        const text = trimmedLine.replace('RESULT:', '').trim();
-                        this.resolveActive(text);
-                    } else if (trimmedLine.startsWith('JSON_RESULT:')) {
-                        const json = trimmedLine.replace('JSON_RESULT:', '').trim();
-                        this.resolveActive(this.parseAnalysis(json));
-                    } else if (trimmedLine.startsWith('ERROR:')) {
-                        console.error('[FunASR Service Error]', trimmedLine);
-                        this.lastError = trimmedLine;
-                        this.appendLog('error', trimmedLine);
-                        this.resolveActive('');
-                    }
-                }
-            });
-
-            this.process.stderr?.on('data', (data) => {
-                const msg = data.toString().trim();
-                // 仅记录严重错误，忽略加载日志
-                if (msg.includes('Traceback') || msg.includes('Error')) {
-                    console.error(`[FunASR Service Stderr] ${msg}`);
-                    const normalized = normalizeStartupError(msg);
-                    this.lastError = normalized;
-                    this.appendLog('error', normalized);
-                } else if (msg) {
-                    this.appendLog('info', msg);
-                }
-            });
-
-            this.process.once('error', (error) => {
-                this.lastError = error.message;
-                this.appendLog('error', `Process error: ${error.message}`);
-                clearTimeout(timeout);
-                this.startPromise = null;
-                reject(error);
-            });
-
-            this.process.on('exit', (code) => {
-                if (code !== 0 && code !== null) {
-                    console.error(`❌ FunASR Service crashed with code ${code}`);
-                    this.lastError = `FunASR Service exited with code ${code}`;
-                    this.appendLog('error', this.lastError);
-                } else {
-                    this.appendLog('info', 'FunASR Service stopped');
-                }
-                this.isReady = false;
-                this.process = null;
-                this.startPromise = null;
-                this.startedAt = 0;
-                this.resolveActive('');
-                while (this.requestQueue.length > 0) {
-                    this.requestQueue.shift()?.resolve('');
-                }
-            });
-
-            this.process.once('spawn', () => {
-                this.appendLog('info', `Spawned FunASR process pid=${this.process?.pid ?? 'unknown'}`);
-            });
+        this.startPromise = (async () => {
+            const startedAt = Date.now();
+            this.appendLog('info', 'Starting FunASR HTTP service...');
+            try {
+                await runPythonServiceManager(['start', 'funasr']);
+                await this.postJson('/start', {});
+                await this.waitUntilReady();
+                const durationMs = Date.now() - startedAt;
+                this.recordReady('started', durationMs);
+            } catch (error) {
+                const durationMs = Date.now() - startedAt;
+                pipelineLogs.append({
+                    category: 'dashboard-service',
+                    level: 'error',
+                    title: 'service.start',
+                    message: getErrorMessage(error),
+                    timings: [{ key: 'service_start', label: 'FunASR 启动', durationMs, detail: getErrorMessage(error) }],
+                    metadata: {
+                        serviceId: 'funasr',
+                        ready: false,
+                        durationMs,
+                        url: serviceUrl(),
+                        error: getErrorMessage(error),
+                    },
+                    pipelineId: 'funasr',
+                });
+                throw error;
+            }
+        })().catch(error => {
+            const message = getErrorMessage(error);
+            this.status = { ...this.status, ready: false, lastError: message };
+            this.appendLog('error', message);
+            throw error;
+        }).finally(() => {
+            this.startPromise = null;
         });
 
         return this.startPromise;
@@ -158,58 +100,82 @@ export class FunASRService {
 
     async transcribe(wavPath: string): Promise<string> {
         await this.start();
-        return new Promise((resolve) => {
-            this.requestQueue.push({
-                wavPath,
-                mode: 'text',
-                resolve: (value) => resolve(typeof value === 'string' ? value : value.text),
-            });
-            this.processNext();
-        });
+        const response = await this.postJson('/transcribe', { wavPath });
+        return typeof response.text === 'string' ? response.text : '';
     }
 
     async analyzeMaterial(wavPath: string): Promise<FunASRMaterialAnalysis> {
         await this.start();
-        return new Promise((resolve) => {
-            this.requestQueue.push({
-                wavPath,
-                mode: 'material',
-                resolve: (value) => resolve(typeof value === 'string' ? emptyAnalysis(value) : value),
-            });
-            this.processNext();
-        });
+        const response = await this.postJson('/analyze-material', { wavPath });
+        return normalizeAnalysis(response);
     }
 
-    stop() {
-        if (this.process) {
-            this.appendLog('info', 'Stopping FunASR Service...');
-            this.process.stdin?.write('EXIT\n');
-            this.process.kill();
-            this.process = null;
-            this.isReady = false;
-            this.startPromise = null;
-            this.startedAt = 0;
-            this.resolveActive('');
-            while (this.requestQueue.length > 0) {
-                this.requestQueue.shift()?.resolve('');
-            }
-        }
+    async stop() {
+        this.appendLog('info', 'Stopping FunASR HTTP service...');
+        await this.postJson('/stop', {}).catch(() => undefined);
+        await runPythonServiceManager(['stop', 'funasr']).catch(error => {
+            this.appendLog('warn', getErrorMessage(error));
+        });
+        this.status = { ready: false, pid: null, startedAt: null, uptimeSeconds: null, queueLength: 0, lastError: null };
     }
 
     getStatus() {
+        void this.refreshStatus().catch(() => undefined);
         return {
-            ready: this.isReady,
-            starting: this.startPromise !== null && !this.isReady,
-            pid: this.process?.pid ?? null,
-            startedAt: this.startedAt || null,
-            uptimeSeconds: this.startedAt ? Math.floor((Date.now() - this.startedAt) / 1000) : null,
-            queueLength: this.requestQueue.length + (this.activeRequest ? 1 : 0),
-            lastError: this.lastError,
+            ready: Boolean(this.status.ready),
+            starting: this.startPromise !== null && !this.status.ready,
+            pid: this.status.pid ?? null,
+            startedAt: this.status.startedAt ?? null,
+            uptimeSeconds: this.status.uptimeSeconds ?? null,
+            queueLength: this.status.queueLength ?? 0,
+            lastError: this.status.lastError ?? null,
+            url: serviceUrl(),
         };
     }
 
     getLogs(limit = 200) {
         return this.logs.slice(-Math.max(1, Math.min(limit, 500)));
+    }
+
+    private async waitUntilReady(): Promise<void> {
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < 60_000) {
+            const health = await this.refreshStatus().catch(() => null);
+            if (health?.ready) return;
+            await Bun.sleep(1000);
+        }
+        throw new Error('FunASR HTTP service startup timeout (60s)');
+    }
+
+    private async refreshStatus(): Promise<FunASRHealth> {
+        const response = await fetch(new URL('/health', serviceUrl()), {
+            signal: AbortSignal.timeout(1500),
+        });
+        const health = await response.json() as FunASRHealth;
+        this.status = {
+            ...health,
+            ready: response.ok && Boolean(health.ready ?? health.ok),
+            lastError: response.ok ? health.lastError ?? null : `HTTP ${response.status}`,
+        };
+        return this.status;
+    }
+
+    private async postJson(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+        const response = await fetch(new URL(path, serviceUrl()), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(120_000),
+        }).catch(error => {
+            throw new Error(`FunASR service is unreachable at ${serviceUrl()}: ${getErrorMessage(error)}`);
+        });
+        if (!response.ok) {
+            const detail = await response.text().catch(() => '');
+            throw new Error(`FunASR request failed status=${response.status}${detail ? ` detail=${detail.slice(0, 300)}` : ''}`);
+        }
+        const parsed = await response.json() as Record<string, unknown>;
+        await this.refreshStatus().catch(() => undefined);
+        return parsed;
     }
 
     private appendLog(level: 'info' | 'warn' | 'error', message: string): void {
@@ -219,47 +185,61 @@ export class FunASRService {
         }
     }
 
-    private processNext(): void {
-        if (this.activeRequest || !this.process || !this.process.stdin) {
+    private recordReady(trigger: 'started' | 'already_ready', durationMs: number): void {
+        const now = Date.now();
+        const message = trigger === 'already_ready'
+            ? '✅ FunASR 转译引擎加载成功. (已是就绪状态)'
+            : '✅ FunASR 转译引擎加载成功.';
+        this.appendLog('info', message);
+        if (!this.readyConsolePrinted) {
+            this.readyConsolePrinted = true;
+            const detail = [
+                `url=${serviceUrl()}`,
+                `pid=${this.status.pid ?? 'unknown'}`,
+                `model=${this.status.model ?? 'unknown'}`,
+                `durationMs=${durationMs}`,
+                `trigger=${trigger}`,
+            ].join(' ');
+            console.log(`[FunASR] ${message} ${detail}`);
+        }
+        if (trigger === 'already_ready' && now - this.lastReadyLogAt < 30_000) {
             return;
         }
-        const request = this.requestQueue.shift();
-        if (!request) {
-            return;
-        }
-        this.activeRequest = request;
-        if (request.mode === 'material') {
-            this.process.stdin.write(`${JSON.stringify({ mode: 'material', path: request.wavPath })}\n`);
-            return;
-        }
-        this.process.stdin.write(`${request.wavPath}\n`);
-    }
-
-    private resolveActive(value: string | FunASRMaterialAnalysis): void {
-        const request = this.activeRequest;
-        this.activeRequest = null;
-        request?.resolve(value);
-        this.processNext();
-    }
-
-    private parseAnalysis(json: string): FunASRMaterialAnalysis {
-        try {
-            const parsed = JSON.parse(json) as Partial<FunASRMaterialAnalysis>;
-            return {
-                text: typeof parsed.text === 'string' ? parsed.text : '',
-                segments: Array.isArray(parsed.segments)
-                    ? parsed.segments.map(normalizeSegment).filter((segment): segment is FunASRMaterialSegment => segment !== null)
-                    : [],
-                raw: parsed.raw,
-            };
-        } catch (error) {
-            console.error('[FunASR Service Error] failed to parse JSON result:', error);
-            return emptyAnalysis('');
-        }
+        this.lastReadyLogAt = now;
+        pipelineLogs.append({
+            category: 'dashboard-service',
+            level: 'info',
+            title: 'service.start',
+            message,
+            timings: [{ key: 'service_start', label: 'FunASR 启动', durationMs }],
+            metadata: {
+                serviceId: 'funasr',
+                ready: true,
+                durationMs,
+                url: serviceUrl(),
+                trigger,
+                pid: this.status.pid ?? null,
+                uptimeSeconds: this.status.uptimeSeconds ?? null,
+                model: this.status.model ?? null,
+            },
+            pipelineId: 'funasr',
+        });
     }
 }
 
 export const funasrService = FunASRService.getInstance();
+
+function normalizeAnalysis(value: unknown): FunASRMaterialAnalysis {
+    if (!value || typeof value !== 'object') return emptyAnalysis('');
+    const parsed = value as Partial<FunASRMaterialAnalysis>;
+    return {
+        text: typeof parsed.text === 'string' ? parsed.text : '',
+        segments: Array.isArray(parsed.segments)
+            ? parsed.segments.map(normalizeSegment).filter((segment): segment is FunASRMaterialSegment => segment !== null)
+            : [],
+        raw: parsed.raw,
+    };
+}
 
 function normalizeSegment(value: unknown): FunASRMaterialSegment | null {
     if (!value || typeof value !== 'object') return null;
@@ -286,23 +266,35 @@ function emptyAnalysis(text: string): FunASRMaterialAnalysis {
     };
 }
 
-function parseCommand(command: string): string[] {
-    const parts = command.match(/"[^"]+"|'[^']+'|\S+/g) ?? [];
-    return parts.map(part => {
-        if ((part.startsWith('"') && part.endsWith('"')) || (part.startsWith("'") && part.endsWith("'"))) {
-            return part.slice(1, -1);
-        }
-        return part;
+async function runPythonServiceManager(args: string[]): Promise<void> {
+    await execFileAsync(resolveServiceManager(), args, {
+        cwd: process.cwd(),
+        env: getPythonServiceEnv(),
+        timeout: 90_000,
     });
 }
 
-function normalizeStartupError(message: string): string {
-    if (message.includes('torch/_C') && message.includes('library load denied by system policy')) {
-        return [
-            message,
-            'Hint: the active Python can import funasr but its PyTorch binary is blocked by macOS code-signing policy.',
-            'Set FUNASR_CMD to a healthy Python environment, for example: FUNASR_CMD="/path/to/venv/bin/python src/server/scripts/funasr_service.py".',
-        ].join('\n');
-    }
-    return message;
+function resolveServiceManager(): string {
+    return `${GLOBAL_CONFIG.VOICE.PYTHON_SERVICES_SCRIPT_ROOT}/bin/manage`;
+}
+
+function getPythonServiceEnv(): NodeJS.ProcessEnv {
+    return {
+        ...process.env,
+        PYTHON_SERVICES_ROOT: GLOBAL_CONFIG.VOICE.PYTHON_SERVICES_ROOT,
+        PYTHON_SERVICES_DEVICE: GLOBAL_CONFIG.VOICE.PYTHON_SERVICES_DEVICE,
+        FUNASR_PORT: String(GLOBAL_CONFIG.VOICE.FUNASR_PORT),
+        FUNASR_MODEL: GLOBAL_CONFIG.VOICE.FUNASR_MODEL,
+        FUNASR_MATERIAL_MODEL: GLOBAL_CONFIG.VOICE.FUNASR_MATERIAL_MODEL,
+        FUNASR_PUNC_MODEL: GLOBAL_CONFIG.VOICE.FUNASR_PUNC_MODEL,
+        FUNASR_SPK_MODEL: GLOBAL_CONFIG.VOICE.FUNASR_SPK_MODEL,
+    };
+}
+
+function serviceUrl(): string {
+    return GLOBAL_CONFIG.VOICE.FUNASR_BASE_URL;
+}
+
+function getErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
 }

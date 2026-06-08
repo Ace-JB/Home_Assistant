@@ -155,6 +155,17 @@ export const HumanPerceptionPanel: FC<{ detection: VisionDetection | null }> = (
           <span className="text-[10px] font-mono bg-indigo-500/20 text-indigo-300 px-2 py-0.5 rounded-full border border-indigo-500/30">
             {t('live.statusLive')}
           </span>
+          {detection && (
+            <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
+              detection.degraded
+                ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                : 'bg-slate-800 text-slate-300 border-slate-700'
+            }`}>
+              {detection.degraded
+                ? `${detection.profile} / ${detection.requestedProfile}`
+                : detection.profile}
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-2 font-mono text-[11px]">

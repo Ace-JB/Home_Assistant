@@ -115,11 +115,11 @@
         <div class="summary-cards">
             <div class="card">
                 <div class="label">Total Tests</div>
-                <div class="value">91</div>
+                <div class="value">160</div>
             </div>
             <div class="card pass">
                 <div class="label">Passed</div>
-                <div class="value">88</div>
+                <div class="value">160</div>
             </div>
             <div class="card fail">
                 <div class="label">Failed</div>
@@ -127,7 +127,7 @@
             </div>
             <div class="card">
                 <div class="label">Execution Time</div>
-                <div class="value">3.16s</div>
+                <div class="value">3.22s</div>
             </div>
         </div>
 
@@ -144,71 +144,71 @@
                     </tr>
                 </thead>
                 <tbody>
-                    
+
         <tr>
             <td>1</td>
-            <td>FaceEngine.loadModels</td>
+            <td>FaceEngine.detectAll.faces</td>
             <td>face-inference</td>
-            <td class="perf-val">283.29 ms</td>
+            <td class="perf-val">390.72 ms</td>
             <td>No baseline</td>
         </tr>
-    
+
         <tr>
             <td>2</td>
-            <td>FaceEngine.extractDescriptor</td>
-            <td>face-inference</td>
-            <td class="perf-val">153.41 ms</td>
-            <td>No baseline</td>
-        </tr>
-    
-        <tr>
-            <td>3</td>
             <td>Async_Voice_Video.safeSave</td>
             <td>media-synthesis</td>
-            <td class="perf-val">120.61 ms</td>
+            <td class="perf-val">117.34 ms</td>
             <td>No baseline</td>
         </tr>
-    
+
+        <tr>
+            <td>3</td>
+            <td>FaceEngine.loadModels</td>
+            <td>face-inference</td>
+            <td class="perf-val">82.63 ms</td>
+            <td>No baseline</td>
+        </tr>
+
         <tr>
             <td>4</td>
             <td>Queue.push</td>
             <td>media-synthesis</td>
-            <td class="perf-val">77.29 ms</td>
+            <td class="perf-val">78.43 ms</td>
             <td>No baseline</td>
         </tr>
-    
+
         <tr>
             <td>5</td>
-            <td>FaceEngine.recognizeFaces</td>
+            <td>FaceEngine.extractDescriptor</td>
             <td>face-inference</td>
-            <td class="perf-val">45.27 ms</td>
+            <td class="perf-val">45.35 ms</td>
             <td>No baseline</td>
         </tr>
-    
+
         <tr>
             <td>6</td>
-            <td>SyncManager.addVideo</td>
-            <td>media-synthesis</td>
-            <td class="perf-val">1.11 ms</td>
-            <td>No baseline</td>
-        </tr>
-    
-        <tr>
-            <td>7</td>
             <td>Socket.calculatePcmLevel</td>
             <td>socket-audio</td>
-            <td class="perf-val">0.80 ms</td>
+            <td class="perf-val">0.48 ms</td>
             <td>No baseline</td>
         </tr>
-    
+
+        <tr>
+            <td>7</td>
+            <td>SyncManager.addVideo</td>
+            <td>media-synthesis</td>
+            <td class="perf-val">0.07 ms</td>
+            <td>No baseline</td>
+        </tr>
+
         <tr>
             <td>8</td>
             <td>SyncManager.addAudio</td>
             <td>sync-buffer</td>
-            <td class="perf-val">0.09 ms</td>
+            <td class="perf-val">0.04 ms</td>
             <td>No baseline</td>
         </tr>
-    
+
                 </tbody>
             </table>
         </section>
@@ -217,9 +217,9 @@
             <h2>Algorithm Candidates</h2>
             <ul>
         <li>SyncManager.cleanOld: prune expired frames in batches instead of repeated front-array deletion.</li>
-    
+
         <li>FaceEngine matching: centralize best-match selection and prepare descriptor caching/vectorized distance checks if records grow.</li>
-    
+
         <li>calculatePcmLevel: keep the linear scan, then benchmark larger PCM buffers before considering typed-array alternatives.</li>
     </ul>
         </section>
@@ -235,543 +235,974 @@
                     </tr>
                 </thead>
                 <tbody>
-                    
+
         <tr class="pass">
             <td>PASS</td>
             <td>Media Save Performance &gt; should save a small snapshot as MP4 and measure performance</td>
-            <td>122.47ms</td>
+            <td>117.87ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
-            <td>Intention analysis &gt; should parse layered direct answer without memory retrieval</td>
-            <td>3.05ms</td>
+            <td>VisionAttentionManager &gt; defaults to identity without persisted runtime state</td>
+            <td>-</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
-            <td>Intention analysis &gt; should parse layered memory recall into recent recall retrieval</td>
-            <td>6.48ms</td>
+            <td>VisionAttentionManager &gt; expires requests and falls back to identity</td>
+            <td>0.19ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
-            <td>Intention analysis &gt; should parse layered clarification route without memory retrieval</td>
-            <td>0.91ms</td>
+            <td>VisionAttentionManager &gt; snapshot reflects expired requests without explicit resolve</td>
+            <td>0.09ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
-            <td>Intention analysis &gt; should use model output for abstract cooking topic instead of keyword rules</td>
-            <td>0.70ms</td>
+            <td>VisionAttentionManager &gt; starts idle metadata when requests expire</td>
+            <td>0.03ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
-            <td>Intention analysis &gt; should use model output for recent memory recall</td>
-            <td>0.44ms</td>
+            <td>VisionAttentionManager &gt; accumulates idle time while baseline has no active requests</td>
+            <td>0.01ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
-            <td>Intention analysis &gt; should correct contradictory memory recall output that disables memory</td>
-            <td>0.47ms</td>
+            <td>VisionAttentionManager &gt; new requests reset idle metadata</td>
+            <td>0.06ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
-            <td>Intention analysis &gt; should revise contradictory prior-topic clarification with deterministic rules</td>
-            <td>0.49ms</td>
+            <td>VisionAttentionManager &gt; higher priority request overrides lower priority request</td>
+            <td>0.05ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
-            <td>Intention analysis &gt; should use model output to rewrite short follow-ups with context</td>
-            <td>0.42ms</td>
+            <td>VisionAttentionManager &gt; same priority selects the stronger profile</td>
+            <td>0.07ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
-            <td>Intention analysis &gt; should use model output to avoid memory retrieval for device control</td>
-            <td>0.21ms</td>
+            <td>VisionAttentionManager &gt; clears requests by source</td>
+            <td>0.12ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
-            <td>Intention analysis &gt; should let model treat affirmative answer to recipe proposal as current-session follow-up</td>
-            <td>0.44ms</td>
+            <td>Intention analysis &gt; parses core direct answer without memory retrieval</td>
+            <td>1.47ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
-            <td>Intention analysis &gt; should let model rewrite proposal answers without long-term memory retrieval</td>
-            <td>0.49ms</td>
-        </tr>
-    
-        <tr class="pass">
-            <td>PASS</td>
-            <td>Intention analysis &gt; should not trigger recipe proposal handling without recent assistant proposal</td>
-            <td>0.38ms</td>
-        </tr>
-    
-        <tr class="pass">
-            <td>PASS</td>
-            <td>Intention analysis &gt; should fall back to semantic retrieval on invalid json</td>
+            <td>Intention analysis &gt; parses core memory recall into recent recall retrieval</td>
             <td>0.15ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
-            <td>Intention analysis &gt; should preserve model visual understanding decision</td>
-            <td>0.45ms</td>
+            <td>Intention analysis &gt; parses core clarification route without memory retrieval</td>
+            <td>0.56ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
-            <td>Intention analysis &gt; should ask model to repair invalid output format before falling back</td>
-            <td>0.91ms</td>
+            <td>Intention analysis &gt; uses core routing topic for semantic memory context</td>
+            <td>0.16ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
-            <td>Intention analysis &gt; should let model disable memory and end session for closing answers</td>
-            <td>0.34ms</td>
+            <td>Intention analysis &gt; deterministically corrects memory recall that disables memory</td>
+            <td>0.28ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
-            <td>Intention analysis &gt; should let model ignore non-actionable input without memory retrieval</td>
-            <td>0.29ms</td>
+            <td>Intention analysis &gt; uses core output to rewrite short follow-ups with context</td>
+            <td>0.24ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
-            <td>Intention analysis &gt; should fall back to recent context rewrite when model fails on short follow-up</td>
-            <td>0.66ms</td>
+            <td>Intention analysis &gt; uses core output to avoid memory retrieval for device control</td>
+            <td>0.09ms</td>
         </tr>
-    
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Intention analysis &gt; handles proposal answers as current-session follow-ups without long-term memory</td>
+            <td>0.18ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Intention analysis &gt; can ignore non-actionable input without memory retrieval</td>
+            <td>0.09ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Intention analysis &gt; falls back to semantic retrieval on invalid json</td>
+            <td>0.13ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Intention analysis &gt; preserves core visual routing decision</td>
+            <td>0.09ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Intention analysis &gt; repairs invalid core output before falling back</td>
+            <td>0.52ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Intention analysis &gt; can end session without memory retrieval</td>
+            <td>0.13ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Intention analysis &gt; falls back to recent context rewrite when model fails on short follow-up</td>
+            <td>0.46ms</td>
+        </tr>
+
         <tr class="pass">
             <td>PASS</td>
             <td>DetectionValve &gt; should allow execution based on frequency</td>
-            <td>601.25ms</td>
+            <td>601.22ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>FaceDatabase &gt; should save, update, get, list, and remove face records</td>
-            <td>10.59ms</td>
+            <td>6.43ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>FaceDatabase &gt; save should upsert records by name</td>
-            <td>5.99ms</td>
+            <td>3.86ms</td>
         </tr>
-    
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Monitor shutdown cleanup &gt; stopMonitor waits for in-flight startup and stops the created runtime</td>
+            <td>0.35ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>WebRTCManager cleanup &gt; stop keeps UDP socket available while shutdown closes it</td>
+            <td>2.64ms</td>
+        </tr>
+
         <tr class="pass">
             <td>PASS</td>
             <td>SyncManager &gt; should add video frames and retrieve snapshot</td>
-            <td>1.71ms</td>
+            <td>0.23ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>SyncManager &gt; should add audio frames and retrieve snapshot</td>
-            <td>0.41ms</td>
+            <td>0.11ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>SyncManager &gt; should clean old frames</td>
-            <td>1101.21ms</td>
+            <td>1103.41ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>SyncManager &gt; should calculate correct durationMs</td>
-            <td>0.19ms</td>
+            <td>0.65ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>SyncManager &gt; should prune multiple expired frames while preserving valid frames</td>
-            <td>0.17ms</td>
+            <td>0.38ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>HomeBrain &gt; should add lifestyle-focused memory prune instructions by default</td>
-            <td>0.20ms</td>
+            <td>0.23ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>HomeBrain &gt; should answer assistant proposal using resolved rewrite without long-term memory</td>
-            <td>1.60ms</td>
+            <td>5.41ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>HomeBrain &gt; should stream response deltas and return full text</td>
-            <td>0.48ms</td>
+            <td>0.86ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>HomeBrain &gt; should not inject pending memory candidates as approved memories</td>
-            <td>0.81ms</td>
+            <td>2.13ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>HomeBrain &gt; should label recent recall memories as long-term context</td>
-            <td>0.57ms</td>
+            <td>0.86ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>HomeBrain &gt; should fetch layered memory and vision context in one response path</td>
-            <td>29.97ms</td>
+            <td>39.06ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>HomeBrain &gt; should use intention visual decision instead of keyword matching</td>
-            <td>28.97ms</td>
+            <td>31.16ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>HomeBrain &gt; should prepare valid jpeg before sending image to vision model</td>
-            <td>40.34ms</td>
+            <td>40.02ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>VideoSavingQueue &gt; should process tasks sequentially</td>
-            <td>77.76ms</td>
+            <td>78.89ms</td>
         </tr>
-    
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>PipelineLogService &gt; creates a pipeline and records ordered events</td>
+            <td>1.67ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>PipelineLogService &gt; records model calls and connects them to one pipeline</td>
+            <td>0.63ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>PipelineLogService &gt; updates one model call row across its lifecycle</td>
+            <td>0.42ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>PipelineLogService &gt; bounds model call metadata without corrupting json</td>
+            <td>0.97ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>PipelineLogService &gt; keeps model call prompt and output text complete</td>
+            <td>0.62ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>PipelineLogService &gt; does not write legacy runtime metadata fields</td>
+            <td>0.34ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>PipelineLogService &gt; keeps unlinked wake diagnostics out of conversation pipelines</td>
+            <td>0.33ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>PipelineLogService &gt; gets one model call by id</td>
+            <td>0.49ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>PipelineLogService &gt; removes one model call without removing its pipeline event</td>
+            <td>0.57ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>PipelineLogService &gt; removes one incident without removing its pipeline event</td>
+            <td>0.22ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>PipelineLogService &gt; does not create a pipeline from unlinked model calls or incidents</td>
+            <td>0.72ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>PipelineLogService &gt; normalizes system runtime logs into one system pipeline</td>
+            <td>0.40ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>PipelineLogService &gt; records incidents for review</td>
+            <td>0.61ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>PipelineLogService &gt; persists pipelines across service instances</td>
+            <td>7.64ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>PipelineLogService &gt; removes a pipeline and its related rows</td>
+            <td>0.20ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Voice Asset Foundation &gt; should create path convention and support asset CRUD</td>
+            <td>4.48ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Voice Asset Foundation &gt; should upsert minimal speaker profiles in JSON index</td>
+            <td>2.64ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Voice Quality Scoring &gt; should score a valid wav prompt</td>
+            <td>49.15ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>MDX separation plugin config &gt; should prefer CoreML provider on Apple Silicon auto mode</td>
+            <td>0.58ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>MDX separation plugin config &gt; should resolve model profiles</td>
+            <td>0.06ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Dashboard managed service shutdown &gt; stops all managed Python services through one shutdown entrypoint</td>
+            <td>0.03ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>CosyVoice cleanup &gt; should move saved prompt audio into speakers and remove temporary job files</td>
+            <td>7.92ms</td>
+        </tr>
+
         <tr class="pass">
             <td>PASS</td>
             <td>Socket Utils &gt; should calculate PCM level and measure performance</td>
-            <td>2.04ms</td>
+            <td>1.86ms</td>
         </tr>
-    
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Socket Utils &gt; should ignore legacy subtitle enable commands without publishing status</td>
+            <td>0.29ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Socket Utils &gt; should omit realtime subtitle state from connection status messages</td>
+            <td>0.08ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Socket Utils &gt; should publish voice text by default</td>
+            <td>0.05ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Socket Utils &gt; should publish vision detection profile metadata</td>
+            <td>0.05ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Socket Utils &gt; should close tracked clients when stopping realtime socket server</td>
+            <td>0.04ms</td>
+        </tr>
+
         <tr class="pass">
             <td>PASS</td>
             <td>environment config files &gt; should define shared runtime keys in base env</td>
-            <td>0.08ms</td>
+            <td>0.13ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
-            <td>environment config files &gt; should keep CosyVoice runtime MLX-only</td>
-            <td>0.12ms</td>
+            <td>environment config files &gt; should keep CosyVoice runtime on the managed python services surface</td>
+            <td>0.20ms</td>
         </tr>
-    
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>environment config files &gt; should resolve CosyVoice model to the fixed managed cache directory</td>
+            <td>0.10ms</td>
+        </tr>
+
         <tr class="pass">
             <td>PASS</td>
             <td>environment config files &gt; should keep environment files focused on overrides</td>
-            <td>0.14ms</td>
+            <td>0.06ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>environment config files &gt; should restrict CosyVoice prompt audio to managed wav files</td>
-            <td>0.07ms</td>
+            <td>0.33ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>environment config files &gt; should parse only audio-only formats from yt-dlp metadata</td>
-            <td>0.06ms</td>
+            <td>0.12ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>environment config files &gt; should filter FunASR material candidates for CosyVoice prompts</td>
-            <td>0.15ms</td>
+            <td>0.13ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>environment config files &gt; should reject candidates too close to another speaker</td>
-            <td>0.53ms</td>
+            <td>0.38ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>environment config files &gt; should merge short adjacent segments only within the same speaker</td>
-            <td>0.15ms</td>
+            <td>0.11ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>environment config files &gt; should expose a preview URL for parsed yt-dlp audio formats</td>
-            <td>0.05ms</td>
+            <td>0.03ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>environment config files &gt; should reject unsupported yt-dlp URL schemes before spawning</td>
-            <td>0.71ms</td>
+            <td>0.11ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>environment config files &gt; should keep yt-dlp default install target under server tools bin</td>
-            <td>0.11ms</td>
+            <td>0.03ms</td>
         </tr>
-    
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>LogsView navigation helpers &gt; uses pending returned pipeline before falling back to the first refreshed item</td>
+            <td>-</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>LogsView navigation helpers &gt; keeps the selected pipeline when no pending return target exists</td>
+            <td>0.06ms</td>
+        </tr>
+
         <tr class="pass">
             <td>PASS</td>
             <td>FaceEngine Performance &gt; should extract descriptor and measure performance</td>
-            <td>153.56ms</td>
+            <td>45.47ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>FaceEngine Performance &gt; should recognize faces and measure performance</td>
-            <td>45.78ms</td>
+            <td>391.16ms</td>
         </tr>
-    
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>FaceEngine Performance &gt; should run identity profile without perception outputs</td>
+            <td>11.87ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>FaceEngine Performance &gt; should expose profile metadata for full detection</td>
+            <td>61.39ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>FaceEngine Performance &gt; should not cleanup identity profile</td>
+            <td>0.23ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>FaceEngine Performance &gt; should not cleanup running or loading high profiles</td>
+            <td>0.12ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>FaceEngine Performance &gt; should cleanup idle perception and full profiles</td>
+            <td>0.10ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>FaceEngine Performance &gt; should not cleanup while attention has active request</td>
+            <td>0.11ms</td>
+        </tr>
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should create and get a conversation session by conversation_id</td>
-            <td>13.34ms</td>
+            <td>10.86ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should append multiple user-agent turns to one session</td>
-            <td>7.69ms</td>
+            <td>6.03ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should hide empty conversation sessions from search and count</td>
-            <td>6.22ms</td>
+            <td>5.36ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should remove empty conversation sessions on initialization</td>
-            <td>5.99ms</td>
+            <td>4.72ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should return recent conversation messages for follow-up context</td>
-            <td>4.63ms</td>
+            <td>4.04ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should fuzzy search session messages</td>
-            <td>5.58ms</td>
+            <td>3.91ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should search sessions by time period</td>
-            <td>5.44ms</td>
+            <td>3.72ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should paginate newest-first sessions</td>
-            <td>5.15ms</td>
+            <td>3.61ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should count sessions with and without filters</td>
-            <td>4.71ms</td>
+            <td>3.50ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should remove a single conversation session</td>
-            <td>4.69ms</td>
+            <td>3.63ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should save pruned memories in a separate table and search them for context</td>
-            <td>7.83ms</td>
+            <td>4.93ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should update and remove pruned memories</td>
-            <td>5.32ms</td>
+            <td>3.77ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should update instead of duplicating pruned memories for the same source session</td>
-            <td>4.96ms</td>
+            <td>3.92ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should create new pruned memories as warm even with a low base score</td>
-            <td>5.09ms</td>
+            <td>3.82ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should rank context memories by content and situation and update hit count</td>
-            <td>5.31ms</td>
+            <td>4.30ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should rank context memories with heat score decay over time</td>
-            <td>5.14ms</td>
+            <td>3.99ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should not inject hot memories without semantic relevance</td>
-            <td>39.49ms</td>
+            <td>4.06ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should not inject memories from situation match alone</td>
-            <td>6.00ms</td>
+            <td>3.91ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should use situation and heat only to rank semantically relevant memories</td>
-            <td>7.25ms</td>
+            <td>3.62ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should return recent long-term memories for recent recall mode</td>
-            <td>7.60ms</td>
+            <td>3.65ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should supplement semantic results with recent memories in hybrid mode</td>
-            <td>5.56ms</td>
+            <td>3.75ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should create, approve, and reject memory candidates</td>
-            <td>6.86ms</td>
+            <td>4.81ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should filter cold memories from semantic retrieval but include them in recent recall</td>
-            <td>4.86ms</td>
+            <td>3.68ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>MemoryDatabase &gt; should cool low-value stale memories during lifecycle maintenance</td>
-            <td>4.29ms</td>
+            <td>3.87ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
-            <td>MemoryDatabase &gt; should archive the old exchange table before creating the session table</td>
-            <td>4.99ms</td>
+            <td>MemoryDatabase &gt; should reject old exchange table at runtime instead of auto migrating it</td>
+            <td>2.00ms</td>
         </tr>
-    
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>runtime data migration script &gt; migrates legacy face json into an empty sqlite table</td>
+            <td>4.59ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>runtime data migration script &gt; fails when legacy face json is missing</td>
+            <td>0.23ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>runtime data migration script &gt; migrates legacy memory exchange rows into the new conversations table</td>
+            <td>5.23ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>wake text helpers &gt; extracts only the command after the wake word</td>
+            <td>0.93ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>wake text helpers &gt; detects wake word through normalized text</td>
+            <td>0.21ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>wake text helpers &gt; returns no command when wake word is absent</td>
+            <td>0.03ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>BenchmarkService &gt; normalizes benchmark metadata from pipeline metadata</td>
+            <td>-</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>BenchmarkService &gt; calculates avg and percentile metrics</td>
+            <td>0.45ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>BenchmarkService &gt; aggregates benchmark pipelines while excluding warmup latency</td>
+            <td>1.77ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>BenchmarkService &gt; lists benchmark runs separately from ordinary pipelines</td>
+            <td>0.95ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>LifecycleManager &gt; runs shutdown tasks once in registration order and exits after cleanup</td>
+            <td>-</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>LifecycleManager &gt; continues later shutdown tasks after one task fails</td>
+            <td>1.03ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>AudioSegmenter &gt; forces a segment to end when active audio exceeds hard max duration</td>
+            <td>0.74ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>AudioSegmenter &gt; ignores short noise spikes before speech is confirmed</td>
+            <td>0.05ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>AudioSegmenter &gt; ends confirmed speech after consecutive silence frames</td>
+            <td>0.03ms</td>
+        </tr>
+
         <tr class="pass">
             <td>PASS</td>
             <td>Voice Utils &gt; should normalize transcript and remove garbage patterns</td>
-            <td>0.89ms</td>
+            <td>-</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>Voice Utils &gt; should remove content in parentheses</td>
-            <td>0.12ms</td>
+            <td>0.62ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>Voice Utils &gt; should filter out short lines</td>
-            <td>0.03ms</td>
+            <td>0.07ms</td>
         </tr>
-    
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Voice Utils &gt; should remove multiple spaces</td>
+            <td>0.01ms</td>
+        </tr>
+
         <tr class="pass">
             <td>PASS</td>
             <td>Voice Utils &gt; should detect echo-like transcripts</td>
-            <td>14.48ms</td>
+            <td>0.72ms</td>
         </tr>
-    
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Voice Utils &gt; should calculate lower similarity for unrelated text</td>
+            <td>0.04ms</td>
+        </tr>
+
         <tr class="pass">
             <td>PASS</td>
             <td>Voice Utils &gt; should filter invalid barge-in candidates</td>
-            <td>0.22ms</td>
+            <td>0.08ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>Voice Utils &gt; should detect configured barge-in keywords</td>
-            <td>0.04ms</td>
+            <td>0.05ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>Voice Utils &gt; should split speech chunks on Chinese sentence boundaries</td>
-            <td>0.50ms</td>
+            <td>1.19ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>Voice Utils &gt; should wait for short soft punctuation before splitting</td>
-            <td>0.84ms</td>
+            <td>0.13ms</td>
         </tr>
-    
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Voice Utils &gt; should use elastic punctuation windows instead of fixed length cuts</td>
+            <td>0.17ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Voice Utils &gt; should not split short soft punctuation before the elastic window</td>
+            <td>0.12ms</td>
+        </tr>
+
         <tr class="pass">
             <td>PASS</td>
             <td>Voice Utils &gt; should fallback split long text without punctuation</td>
-            <td>0.29ms</td>
+            <td>0.59ms</td>
         </tr>
-    
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Voice Utils &gt; should keep sentence punctuation attached to the preceding cosyvoice chunk</td>
+            <td>0.52ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Voice Utils &gt; should force split long punctuation-free cjk text near max units</td>
+            <td>3.13ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Voice Utils &gt; should merge dense short punctuation into one cosyvoice chunk</td>
+            <td>1.08ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Voice Utils &gt; should flush short final text regardless of punctuation thresholds</td>
+            <td>-</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Voice Utils &gt; should not split english words versions or urls in mixed text</td>
+            <td>0.73ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Voice Utils &gt; should split cjk earlier than english for the same visible length</td>
+            <td>1.05ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Voice Utils &gt; should preserve a short final tail</td>
+            <td>0.10ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Voice Utils &gt; should fallback to say for CosyVoice service errors only</td>
+            <td>0.06ms</td>
+        </tr>
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Report Generation &gt; should parse Bun test output and performance metrics</td>
+            <td>0.20ms</td>
+        </tr>
+
         <tr class="pass">
             <td>PASS</td>
             <td>Report Generation &gt; should rank hotspots by duration and compare baselines</td>
-            <td>0.61ms</td>
+            <td>0.11ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>Report Generation &gt; should generate a report with hotspot and test sections</td>
-            <td>18.50ms</td>
+            <td>7.99ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>Report Generation &gt; should generate a README report block</td>
-            <td>0.94ms</td>
+            <td>0.22ms</td>
         </tr>
-    
+
         <tr class="pass">
             <td>PASS</td>
             <td>Report Generation &gt; should sync the managed README report block</td>
-            <td>1.02ms</td>
+            <td>0.79ms</td>
         </tr>
-    
+
+        <tr class="pass">
+            <td>PASS</td>
+            <td>Report Generation &gt; should preserve README feature docs when syncing the report block</td>
+            <td>0.74ms</td>
+        </tr>
+
                 </tbody>
             </table>
         </section>
 
         <div class="timestamp">
-            Generated at: 6/1/2026, 12:32:23 AM
+            Generated at: 6/9/2026, 3:00:40 AM
         </div>
     </div>
 </body>
 </html>
-    

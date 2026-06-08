@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="${PYTHON_SERVICES_ROOT:-data/python_services}"
+RUN_DIR="$ROOT/run"
+LOG_DIR="$RUN_DIR/logs"
+ACTION="${1:-status}"
+TARGET="${2:-all}"
+
+mkdir -p "$RUN_DIR" "$LOG_DIR"
+
+service_port() {
+  case "$1" in
+    funasr) echo "${FUNASR_PORT:-10101}" ;;
+    cosyvoice) echo "${COSYVOICE_PORT:-10102}" ;;
+    mdx) echo "${MDX_PORT:-10103}" ;;
+    *) return 1 ;;
+  esac
+}
+
+service_run() {
+  case "$1" in
+    funasr) echo "$SCRIPT_ROOT/bin/funasr_run" ;;
+    cosyvoice) echo "$SCRIPT_ROOT/bin/cosyvoice_run" ;;
+    mdx) echo "$SCRIPT_ROOT/bin/mdx_run" ;;
+    *) return 1 ;;
+  esac
+}
+
+services_for() {
+  case "$1" in
+    all) printf '%s\n' funasr cosyvoice mdx ;;
+    funasr|cosyvoice|mdx) printf '%s\n' "$1" ;;
+    *) echo "Unknown service: $1" >&2; exit 2 ;;
+  esac
+}
+
+pid_file() {
+  echo "$RUN_DIR/$1.pid"
+}
+
+pid_alive() {
+  local pid="$1"
+  [ -n "$pid" ] && ps -p "$pid" >/dev/null 2>&1
+}
+
+port_pid() {
+  local port="$1"
+  lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null | head -n 1 || true
+}
+
+health_json() {
+  local port="$1"
+  curl -fsS --max-time 1 "http://127.0.0.1:$port/health" 2>/dev/null || true
+}
+
+read_pid() {
+  local file
+  file="$(pid_file "$1")"
+  [ -f "$file" ] && tr -d '[:space:]' < "$file" || true
+}
+
+status_one() {
+  local service="$1"
+  local port pid port_owner health state stale=false managed=false
+  port="$(service_port "$service")"
+  pid="$(read_pid "$service")"
+  port_owner="$(port_pid "$port")"
+  health="$(health_json "$port")"
+
+  if [ -n "$pid" ] && ! pid_alive "$pid"; then
+    stale=true
+    rm -f "$(pid_file "$service")"
+    pid=""
+  fi
+  if [ -n "$pid" ] && [ "$pid" = "$port_owner" ]; then
+    managed=true
+  fi
+
+  if [ -n "$health" ] && [ "$managed" = true ]; then
+    state="running"
+  elif [ -n "$port_owner" ]; then
+    state="port-busy"
+  elif [ -n "$pid" ]; then
+    state="starting"
+  else
+    state="stopped"
+  fi
+
+  printf '{"service":"%s","status":"%s","pid":%s,"port":%s,"portPid":%s,"stalePid":%s,"health":%s}\n' \
+    "$service" \
+    "$state" \
+    "${pid:-null}" \
+    "$port" \
+    "${port_owner:-null}" \
+    "$stale" \
+    "${health:-null}"
+}
+
+start_one() {
+  local service="$1"
+  local port pid existing run_script log_file
+  port="$(service_port "$service")"
+  existing="$(port_pid "$port")"
+  if [ -n "$existing" ]; then
+    pid="$(read_pid "$service")"
+    if [ "$pid" = "$existing" ] && pid_alive "$pid"; then
+      status_one "$service"
+      return
+    fi
+    echo "Port $port for $service is already occupied by unmanaged pid $existing. Stop that process before starting the managed service." >&2
+    exit 1
+  fi
+
+  run_script="$(service_run "$service")"
+  log_file="$LOG_DIR/$service.log"
+  if [ ! -x "$run_script" ]; then
+    echo "Runner is not executable: $run_script" >&2
+    exit 1
+  fi
+
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$run_script" </dev/null >> "$log_file" 2>&1 &
+  else
+    nohup "$run_script" </dev/null >> "$log_file" 2>&1 &
+  fi
+  pid="$!"
+  echo "$pid" > "$(pid_file "$service")"
+
+  for _ in $(seq 1 60); do
+    if ! pid_alive "$pid"; then
+      status_one "$service"
+      return
+    fi
+    if [ -n "$(health_json "$port")" ]; then
+      existing="$(port_pid "$port")"
+      echo "${existing:-$pid}" > "$(pid_file "$service")"
+      status_one "$service"
+      return
+    fi
+    sleep 1
+  done
+  status_one "$service"
+}
+
+stop_one() {
+  local service="$1"
+  local port pid port_owner
+  port="$(service_port "$service")"
+  pid="$(read_pid "$service")"
+  port_owner="$(port_pid "$port")"
+  if [ -n "$port_owner" ] && { [ -z "$pid" ] || [ "$pid" != "$port_owner" ]; }; then
+    echo "Port $port for $service is occupied by unmanaged pid $port_owner; leaving it running." >&2
+    rm -f "$(pid_file "$service")"
+    status_one "$service"
+    return
+  fi
+
+  curl -fsS --max-time 2 -X POST "http://127.0.0.1:$port/stop" >/dev/null 2>&1 || true
+  if [ -n "$pid" ] && pid_alive "$pid"; then
+    kill "$pid" >/dev/null 2>&1 || true
+  fi
+
+  for _ in $(seq 1 10); do
+    port_owner="$(port_pid "$port")"
+    if [ -z "$port_owner" ] && { [ -z "$pid" ] || ! pid_alive "$pid"; }; then
+      rm -f "$(pid_file "$service")"
+      status_one "$service"
+      return
+    fi
+    sleep 1
+  done
+
+  port_owner="$(port_pid "$port")"
+  if [ -n "$pid" ] && pid_alive "$pid"; then
+    kill -9 "$pid" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$port_owner" ] && pid_alive "$port_owner"; then
+    kill -9 "$port_owner" >/dev/null 2>&1 || true
+  fi
+  rm -f "$(pid_file "$service")"
+  status_one "$service"
+}
+
+case "$ACTION" in
+  start)
+    for service in $(services_for "$TARGET"); do start_one "$service"; done
+    ;;
+  stop)
+    for service in $(services_for "$TARGET"); do stop_one "$service"; done
+    ;;
+  restart)
+    for service in $(services_for "$TARGET"); do stop_one "$service"; start_one "$service"; done
+    ;;
+  status)
+    for service in $(services_for "$TARGET"); do status_one "$service"; done
+    ;;
+  *)
+    echo "Usage: $0 start|stop|restart|status [all|funasr|cosyvoice|mdx]" >&2
+    exit 2
+    ;;
+esac

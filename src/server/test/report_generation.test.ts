@@ -9,9 +9,10 @@ const SAMPLE_OUTPUT = `
 [Performance] SyncManager.addVideo took 0.31ms
 (pass) FaceEngine Performance > should recognize faces and measure performance [48.99ms]
 [Performance] FaceEngine.recognizeFaces took 48.60ms
+(pass) VisionAttentionManager > accumulates idle time while baseline has no active requests
 (pass) Socket Utils > should calculate PCM level and measure performance [3.50ms]
 [Performance] Socket.calculatePcmLevel took 1.56ms
-Ran 3 tests across 3 files. [0.75s]
+Ran 4 tests across 3 files. [0.75s]
 12 expect() calls
 `;
 
@@ -19,8 +20,8 @@ describe("Report Generation", () => {
     test("should parse Bun test output and performance metrics", () => {
         const data = parseOutput(SAMPLE_OUTPUT);
 
-        expect(data.summary.total).toBe(3);
-        expect(data.summary.pass).toBe(3);
+        expect(data.summary.total).toBe(4);
+        expect(data.summary.pass).toBe(4);
         expect(data.summary.fail).toBe(0);
         expect(data.summary.time).toBe("0.75s");
         expect(data.summary.files).toBe(3);
@@ -58,7 +59,7 @@ describe("Report Generation", () => {
 
         expect(report).toContain("<!-- TEST_REPORT_START -->");
         expect(report).toContain("| **Socket** | `calculatePcmLevel` | **1.56 ms** | Audio volume analysis |");
-        expect(report).toContain("Result: **3 pass / 0 fail / 12 assertions** across 3 files in **0.75s**.");
+        expect(report).toContain("Result: **4 pass / 0 fail / 12 assertions** across 3 files in **0.75s**.");
         expect(report).toContain("<!-- TEST_REPORT_END -->");
     });
 
@@ -84,6 +85,37 @@ describe("Report Generation", () => {
             expect(readme).not.toContain("old report");
             expect(readme).toContain("| **FaceEngine** | `recognizeFaces` | **48.60 ms** | Detection plus similarity-based identity check |");
             expect(readme).toContain("## Hardware & Environment");
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    test("should preserve README feature docs when syncing the report block", () => {
+        const dir = mkdtempSync(join(tmpdir(), "ha-readme-feature-"));
+        const readmePath = join(dir, "README.md");
+
+        try {
+            writeFileSync(readmePath, [
+                "# Home Assistant - Sentinel",
+                "",
+                "<!-- TEST_REPORT_START -->",
+                "old report",
+                "<!-- TEST_REPORT_END -->",
+                "",
+                "## Hardware & Environment",
+                "- stable content",
+                "",
+                "### 🎙️ Voice & Tools (`@server/tools`)",
+                "- **Voice**: Text-to-Speech (TTS) uses the MLX CosyVoice service by default, keeps macOS `say` as fallback, and uses FunASR for transcription.",
+                "- **CosyVoice Material Workflow**: `VoiceControlView` extracts prompt audio and transcript candidates from local uploads or imported audio URLs, saves reusable speaker profiles, and applies the selected profile to the running TTS configuration.",
+            ].join("\n"));
+
+            syncReadme(parseOutput(SAMPLE_OUTPUT), readmePath);
+
+            const readme = readFileSync(readmePath, "utf8");
+            expect(readme).toContain("CosyVoice Material Workflow");
+            expect(readme).toContain("Voice & Tools");
+            expect(readme).not.toContain("old report");
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }

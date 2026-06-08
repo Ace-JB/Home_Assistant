@@ -2,13 +2,11 @@ import { GLOBAL_CONFIG } from '@/global_config';
 
 type TracePayload = unknown;
 
-export function traceModelDecision(scope: string, event: string, payload: TracePayload): void {
-    if (!GLOBAL_CONFIG.OLLAMA.TRACE_ENABLED) {
-        return;
-    }
-
+export function recordModelDecision(scope: string, event: string, payload: TracePayload): void {
     const formatted = formatTracePayload(payload);
-    console.log(`[ModelTrace:${scope}] ${event}: ${formatted}`);
+    if (GLOBAL_CONFIG.OLLAMA.TRACE_ENABLED) {
+        console.log(`[ModelTrace:${scope}] ${event}: ${formatted}`);
+    }
 }
 
 function formatTracePayload(payload: TracePayload): string {

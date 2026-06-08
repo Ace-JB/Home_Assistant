@@ -14,6 +14,18 @@ export type CosyVoiceExtractResult = {
     metadataPath?: string;
     tracePath?: string;
     candidates?: CosyVoiceMaterialCandidate[];
+    separation?: {
+        inputPath: string;
+        outputPath: string;
+        provider: 'mdx-net' | 'none';
+        model?: string;
+        onnxProviders?: string[];
+        method: 'mdx-net-onnx' | 'current-flow';
+        serviceStarted: boolean;
+        cacheHit: boolean;
+        durationMs: number;
+        fallbackUsed: boolean;
+    };
     videoUrl?: string;
     videoPath?: string;
     timings?: TaskTiming[];
@@ -29,6 +41,17 @@ export type CosyVoiceMaterialCandidate = {
     quality: 'high' | 'medium';
     reasons: string[];
     score: number;
+    qualityScore?: {
+        score: number;
+        duration: number;
+        speechRatio: number;
+        silenceRatio: number;
+        rmsStability: number;
+        pitchStability: number;
+        energyStability: number;
+        estimatedSnr: number;
+        emotionStability: number;
+    };
     audioPath: string;
     audioUrl: string;
     textPath: string;
@@ -69,6 +92,15 @@ export type CosyVoiceSpeakerProfile = {
     name: string;
     promptAudioPath: string;
     promptText: string;
+    promptList?: Array<{
+        id: string;
+        audioPath: string;
+        text: string;
+        score?: number;
+        createdAt: string;
+    }>;
+    benchmarkResults?: string[];
+    cachedResponses?: string[];
     createdAt: string;
     updatedAt: string;
 };

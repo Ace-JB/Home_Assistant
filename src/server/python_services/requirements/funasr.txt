@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+pydantic
+funasr
+modelscope
+torch
+torchaudio

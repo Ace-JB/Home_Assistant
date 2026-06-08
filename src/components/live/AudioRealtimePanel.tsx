@@ -1,11 +1,12 @@
 import type { FC } from 'react';
-import type { TranscriptEntry } from '../../types/realtime';
+import type { TranscriptEntry, VoiceSessionMode } from '../../types/realtime';
 import { useI18n } from '../../i18n';
 import { formatDurationMs, formatPercent } from './format';
 
 export type AudioRealtimePanelProps = {
   connected?: boolean;
   audioLevel: number;
+  voiceSessionMode?: VoiceSessionMode;
   transcript: string;
   transcriptHistory?: TranscriptEntry[];
   title?: string;
@@ -17,6 +18,7 @@ export type AudioRealtimePanelProps = {
 export const AudioRealtimePanel: FC<AudioRealtimePanelProps> = ({
   connected,
   audioLevel,
+  voiceSessionMode = 'standby',
   transcript,
   transcriptHistory = [],
   title,
@@ -26,6 +28,19 @@ export const AudioRealtimePanel: FC<AudioRealtimePanelProps> = ({
 }) => {
   const { t } = useI18n();
   const level = formatPercent(audioLevel);
+  const sessionLabelKey = {
+    standby: 'live.voiceSession.standby',
+    awake: 'live.voiceSession.awake',
+    listening: 'live.voiceSession.listening',
+    processing: 'live.voiceSession.processing',
+    speaking: 'live.voiceSession.speaking',
+  } as const satisfies Record<VoiceSessionMode, Parameters<typeof t>[0]>;
+  const sessionLabel = t(sessionLabelKey[voiceSessionMode]);
+  const sessionTone = voiceSessionMode === 'listening' || voiceSessionMode === 'awake'
+    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+    : voiceSessionMode === 'processing' || voiceSessionMode === 'speaking'
+      ? 'border-sky-500/30 bg-sky-500/10 text-sky-300'
+      : 'border-slate-700 bg-slate-900 text-slate-400';
 
   return (
     <section className={`rounded-lg border border-slate-800 bg-slate-900/70 p-4 text-slate-100 ${className}`}>
@@ -46,6 +61,15 @@ export const AudioRealtimePanel: FC<AudioRealtimePanelProps> = ({
 
       <div className={showHistory ? 'grid gap-4 md:grid-cols-[minmax(0,1fr)_300px]' : 'space-y-4'}>
         <div className="space-y-4">
+          <div className="rounded-md border border-slate-800 bg-slate-950 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-xs uppercase tracking-wide text-slate-500">{t('live.voiceSession')}</div>
+              <div className={`rounded-full border px-2 py-0.5 text-[11px] ${sessionTone}`}>
+                {sessionLabel}
+              </div>
+            </div>
+          </div>
+
           <div className="rounded-md border border-slate-800 bg-slate-950 p-4">
             <div className="flex items-center justify-between">
               <div className="text-xs uppercase tracking-wide text-slate-500">{t('live.voiceActivity')}</div>

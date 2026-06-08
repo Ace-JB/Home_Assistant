@@ -1,35 +1,22 @@
 import React, { useEffect, useRef } from 'react';
 import { setupWebRTC } from '@/webrtc_client';
-import { HumanScheduler } from '@/human_scheduler';
-import { HumanRenderer } from '@/human_renderer';
 
 /**
- * Sentinel Monitor Component
- * Combines WebRTC stream, AI Worker, and MCM Renderer.
+ * Sentinel Monitor Component.
+ * WebRTC provides the camera preview; backend vision.detection is rendered by
+ * HumanPerceptionPanel so the browser does not run a duplicate Human.js model.
  */
 export const SentinelMonitor: React.FC = () => {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
-    if (!videoRef.current || !canvasRef.current) return;
+    if (!videoRef.current) return;
 
     const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const renderer = new HumanRenderer(canvas);
-
     const cleanupRTC = setupWebRTC(video);
-    const scheduler = new HumanScheduler(video, (result) => {
-      if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-      }
-      renderer.draw(result);
-    });
 
     return () => {
       cleanupRTC();
-      scheduler.stop();
     };
   }, []);
 
@@ -44,12 +31,6 @@ export const SentinelMonitor: React.FC = () => {
         playsInline
         muted
         className="absolute inset-0 w-full h-full object-cover"
-      />
-
-      {/* AI 渲染层 (Canvas Overlay) */}
-      <canvas
-        ref={canvasRef}
-        className="absolute inset-0 w-full h-full pointer-events-none"
       />
 
       {/* 底部渐变遮罩 */}

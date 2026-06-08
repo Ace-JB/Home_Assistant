@@ -14,11 +14,10 @@ export function useRealtimeFeedback(): RealtimeState {
     transcript: '',
     transcriptHistory: [],
     activeSubtitle: '',
-    subtitleEnabled: true,
+    voiceSessionMode: 'standby',
     videoDelayMs: 5000,
     lastFrameAt: null,
     visionDetection: null,
-    setRealtimeSubtitle: () => {},
     setLanguage: () => {},
     setVideoDelay: () => {},
   });
@@ -53,8 +52,8 @@ export function useRealtimeFeedback(): RealtimeState {
             ...prev,
             connected: true,
             clients: message.clients,
-            subtitleEnabled: message.realtimeSubtitleEnabled,
             language: message.language,
+            voiceSessionMode: message.voiceSessionMode,
           };
         }
 
@@ -91,10 +90,21 @@ export function useRealtimeFeedback(): RealtimeState {
           };
         }
 
+        if (message.type === 'voice.session') {
+          return {
+            ...prev,
+            voiceSessionMode: message.mode,
+          };
+        }
+
         if (message.type === 'vision.detection') {
           return {
             ...prev,
             visionDetection: {
+              profile: message.profile,
+              requestedProfile: message.requestedProfile,
+              degraded: message.degraded,
+              ...(message.degradeReason ? { degradeReason: message.degradeReason } : {}),
               faces: message.faces,
               bodies: message.bodies,
               hands: message.hands,
@@ -148,12 +158,6 @@ export function useRealtimeFeedback(): RealtimeState {
 
   return {
     ...state,
-    setRealtimeSubtitle: (enabled: boolean) => {
-      setState((prev) => ({ ...prev, subtitleEnabled: enabled }));
-      if (socketRef.current?.readyState === WebSocket.OPEN) {
-        socketRef.current?.send(JSON.stringify({ type: 'subtitle.enable', enabled }));
-      }
-    },
     setLanguage: (language: 'zh' | 'en') => {
       setState((prev) => ({ ...prev, language }));
       if (socketRef.current?.readyState === WebSocket.OPEN) {

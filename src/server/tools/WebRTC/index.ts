@@ -3,6 +3,12 @@ import { type ServerWebSocket } from "bun";
 import { GLOBAL_CONFIG } from "@/global_config";
 import { createSocket } from "dgram";
 
+type UdpSocketLike = ReturnType<typeof createSocket>;
+
+type WebRTCManagerOptions = {
+    udpServer?: UdpSocketLike;
+};
+
 /**
  * WebRTC Signaling & Streaming Module for Apple Silicon (Bun + Werift)
  */
@@ -10,10 +16,12 @@ export class WebRTCManager {
     private pc: RTCPeerConnection | null = null;
     private videoTrack = new MediaStreamTrack({ kind: "video" });
     private ffmpegProcess: any = null;
-    private udpServer = createSocket("udp4");
+    private udpServer: UdpSocketLike;
     private rtpPort = Math.floor(Math.random() * 10000) + 10000;
+    private udpClosed = false;
 
-    constructor() {
+    constructor(options: WebRTCManagerOptions = {}) {
+        this.udpServer = options.udpServer ?? createSocket("udp4");
         this.setupUdpReceiver();
     }
 
@@ -165,6 +173,14 @@ export class WebRTCManager {
             this.pc = null;
         }
         console.log("🛑 WebRTC Stream Stopped");
+    }
+
+    public shutdown() {
+        this.stop();
+        if (this.udpClosed) return;
+        this.udpClosed = true;
+        this.udpServer.removeAllListeners();
+        this.udpServer.close();
     }
 }
 

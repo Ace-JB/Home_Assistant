@@ -18,6 +18,7 @@ export const LiveView: FC<{ realtime: RealtimeState }> = ({ realtime }) => {
         <PipelineInfoPanel />
         <AudioRealtimePanel
           audioLevel={realtime.audioLevel}
+          voiceSessionMode={realtime.voiceSessionMode}
           transcript={realtime.transcript}
           className="rounded-2xl border-indigo-500/20 bg-indigo-600/10 p-6"
         />

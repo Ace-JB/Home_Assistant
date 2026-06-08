@@ -1,13 +1,14 @@
 import { serve } from "bun";
 import index from "@/index.html";
 import { GLOBAL_CONFIG } from "@/global_config";
-import { realtimeSocket } from "@tools/Socket";
+import { realtimeSocket, stopRealtimeSocketServer } from "@tools/Socket";
 import type { SocketClientData } from "@tools/Socket";
 import { WebRTCManager } from "@tools/WebRTC";
 import path from "path";
-import { startMonitor } from "./monitor";
+import { startMonitor, stopMonitor } from "./monitor";
 import { LifecycleManager } from "./lifecycle";
 import { memory, type MemoryCandidateStatus, type MemoryLocation, type MemoryStatus } from "@modules/memory";
+import { db } from "@server/db";
 import {
   checkCosyVoiceService,
   createYtDlpAudioPreviewStream,
@@ -28,9 +29,13 @@ import {
   getDashboardServiceLogs,
   getDashboardStatus,
   startDashboardService,
+  stopAllDashboardManagedServices,
   stopDashboardService,
 } from "@server/services/DashboardService";
-import { modelRecallLogs } from "@server/services/ModelRecallLogService";
+import { benchmarkService, type BenchmarkRunInput, type BenchmarkScenarioId } from "@server/services/BenchmarkService";
+import { pipelineLogs } from "@server/services/PipelineLogService";
+
+const serverStartedAt = Date.now();
 
 // 初始化生命周期管理
 LifecycleManager.init();
@@ -140,60 +145,165 @@ const server = serve<SocketClientData>({
       },
     },
 
-    "/api/model-recall-logs": {
+    "/api/pipeline-logs": {
       GET(req: Request) {
         const url = new URL(req.url);
+        const kind = url.searchParams.get("kind");
+        const status = url.searchParams.get("status");
         const limit = Number(url.searchParams.get("limit") ?? 100);
-        const offset = Number(url.searchParams.get("offset") ?? 0);
         return Response.json({
-          logs: modelRecallLogs.list(limit, offset),
-          total: modelRecallLogs.count(),
+          pipelines: pipelineLogs.listPipelines({ kind, status, limit }),
           limit,
-          offset,
+          kind,
+          status,
         });
+      },
+      DELETE() {
+        pipelineLogs.clear();
+        return Response.json({ ok: true });
       },
     },
 
-    "/api/model-recall-logs/:logId": {
+    "/api/pipeline-logs/:pipelineId": {
       GET(req: Request) {
-        const logId = getModelRecallLogIdFromUrl(req);
-        if (!logId) {
-          return Response.json({ error: "logId is required" }, { status: 400 });
+        const pipelineId = getPipelineIdFromUrl(req);
+        if (!pipelineId) {
+          return Response.json({ error: "pipelineId is required" }, { status: 400 });
         }
-        const log = modelRecallLogs.get(logId);
-        if (!log) {
-          return Response.json({ error: "log not found" }, { status: 404 });
+        const pipeline = pipelineLogs.getPipelineDetail(pipelineId);
+        if (!pipeline) {
+          return Response.json({ error: "pipeline not found" }, { status: 404 });
         }
-        return Response.json({ log });
+        const { events, ...pipelineSummary } = pipeline;
+        return Response.json({ pipeline: pipelineSummary, events });
       },
 
       DELETE(req: Request) {
-        const logId = getModelRecallLogIdFromUrl(req);
-        if (!logId) {
-          return Response.json({ error: "logId is required" }, { status: 400 });
+        const pipelineId = getPipelineIdFromUrl(req);
+        if (!pipelineId) {
+          return Response.json({ error: "pipelineId is required" }, { status: 400 });
         }
-        return Response.json({ removed: modelRecallLogs.remove(logId) });
+        return Response.json({ removed: pipelineLogs.removePipeline(pipelineId) });
       },
     },
 
-    "/api/model-recall-logs/:logId/summarize": {
+    "/api/pipeline-model-calls": {
+      GET(req: Request) {
+        const url = new URL(req.url);
+        const pipelineId = url.searchParams.get("pipelineId") ?? undefined;
+        const limit = Number(url.searchParams.get("limit") ?? 100);
+        return Response.json({ modelCalls: pipelineLogs.listModelCalls({ pipelineId, limit }) });
+      },
+    },
+
+    "/api/pipeline-model-calls/:modelCallId": {
+      GET(req: Request) {
+        const modelCallId = getModelCallIdFromUrl(req);
+        if (!modelCallId) {
+          return Response.json({ error: "modelCallId is required" }, { status: 400 });
+        }
+        const modelCall = pipelineLogs.getModelCall(modelCallId);
+        if (!modelCall) {
+          return Response.json({ error: "model call not found" }, { status: 404 });
+        }
+        const incidents = pipelineLogs.listIncidents({ pipelineId: modelCall.pipelineId })
+          .filter(incident => {
+            const metadata = incident.metadata && typeof incident.metadata === "object" && !Array.isArray(incident.metadata)
+              ? incident.metadata as Record<string, unknown>
+              : {};
+            return metadata.modelCallId === modelCall.id || incident.eventId === modelCall.eventId;
+          });
+        return Response.json({
+          modelCall,
+          pipeline: pipelineLogs.getPipeline(modelCall.pipelineId),
+          incidents,
+        });
+      },
+
+      DELETE(req: Request) {
+        const modelCallId = getModelCallIdFromUrl(req);
+        if (!modelCallId) {
+          return Response.json({ error: "modelCallId is required" }, { status: 400 });
+        }
+        return Response.json({ removed: pipelineLogs.removeModelCall(modelCallId) });
+      },
+    },
+
+    "/api/pipeline-incidents": {
+      GET(req: Request) {
+        const url = new URL(req.url);
+        const pipelineId = url.searchParams.get("pipelineId") ?? undefined;
+        const limit = Number(url.searchParams.get("limit") ?? 100);
+        return Response.json({ incidents: pipelineLogs.listIncidents({ pipelineId, limit }) });
+      },
+    },
+
+    "/api/pipeline-incidents/:incidentId": {
+      GET(req: Request) {
+        const incidentId = getIncidentIdFromUrl(req);
+        if (!incidentId) {
+          return Response.json({ error: "incidentId is required" }, { status: 400 });
+        }
+        const incident = pipelineLogs.getIncident(incidentId);
+        if (!incident) {
+          return Response.json({ error: "incident not found" }, { status: 404 });
+        }
+        return Response.json({
+          incident,
+          pipeline: pipelineLogs.getPipeline(incident.pipelineId),
+        });
+      },
+
+      DELETE(req: Request) {
+        const incidentId = getIncidentIdFromUrl(req);
+        if (!incidentId) {
+          return Response.json({ error: "incidentId is required" }, { status: 400 });
+        }
+        return Response.json({ removed: pipelineLogs.removeIncident(incidentId) });
+      },
+    },
+
+    "/api/benchmarks/runs": {
+      GET() {
+        return Response.json({ runs: benchmarkService.listRuns() });
+      },
+
       async POST(req: Request) {
-        const logId = getModelRecallLogIdFromUrl(req, "summarize");
-        if (!logId) {
-          return Response.json({ error: "logId is required" }, { status: 400 });
-        }
-        const body = await req.json().catch(() => null) as { language?: unknown } | null;
-        const language = body?.language === "en" ? "en" : "zh";
         try {
-          const log = await modelRecallLogs.summarize(logId, language);
-          if (!log) {
-            return Response.json({ error: "log not found" }, { status: 404 });
-          }
-          return Response.json({ log });
+          const body = await req.json().catch(() => ({})) as BenchmarkRunInput;
+          const result = await benchmarkService.run({
+            ...body,
+            scenarioIds: parseBenchmarkScenarioIds(body.scenarioIds),
+          });
+          return Response.json({ run: result });
         } catch (error) {
-          console.error("[ModelRecallLogs] summarize failed:", error);
-          return Response.json({ error: error instanceof Error ? error.message : "summarize failed" }, { status: 400 });
+          console.error("[Benchmark] run failed:", error);
+          return Response.json({ error: error instanceof Error ? error.message : "benchmark failed" }, { status: 400 });
         }
+      },
+    },
+
+    "/api/benchmarks/runs/:runId": {
+      GET(req: Request) {
+        const runId = getBenchmarkRunIdFromUrl(req);
+        if (!runId) {
+          return Response.json({ error: "runId is required" }, { status: 400 });
+        }
+        return Response.json({ run: benchmarkService.getRun(runId) });
+      },
+    },
+
+    "/api/benchmarks/compare": {
+      GET(req: Request) {
+        const url = new URL(req.url);
+        const runIds = url.searchParams.get("runIds")
+          ?.split(",")
+          .map(item => item.trim())
+          .filter(Boolean) ?? [];
+        if (runIds.length === 0) {
+          return Response.json({ error: "runIds is required" }, { status: 400 });
+        }
+        return Response.json(benchmarkService.compare(runIds));
       },
     },
 
@@ -618,19 +728,6 @@ const server = serve<SocketClientData>({
       },
     },
 
-    "/human.worker.js": async () => {
-      // 动态编译 Worker 为 JS 以供浏览器执行
-      const build = await Bun.build({
-        entrypoints: ["./src/human.worker.ts"],
-        target: "browser",
-        minify: true,
-      });
-      if (!build.success) return new Response("Build failed", { status: 500 });
-      return new Response(build.outputs[0], {
-        headers: { "Content-Type": "application/javascript" },
-      });
-    },
-
     // Serve index.html for all unmatched routes - MUST BE LAST
     "/*": index,
   } as any,
@@ -676,7 +773,35 @@ const server = serve<SocketClientData>({
   },
 });
 
+LifecycleManager.registerShutdownTask('monitor runtime', stopMonitor);
+LifecycleManager.registerShutdownTask('WebRTC runtime', () => {
+  webrtcManager?.shutdown();
+});
+LifecycleManager.registerShutdownTask('realtime socket server', stopRealtimeSocketServer);
+LifecycleManager.registerShutdownTask('HTTP server', () => {
+  server.stop(true);
+});
+LifecycleManager.registerShutdownTask('Python model services', stopAllDashboardManagedServices);
+LifecycleManager.registerShutdownTask('SQLite databases', () => {
+  db.close();
+  memory.close();
+  pipelineLogs.close();
+});
+
 console.log(`🚀 Server running at ${server.url}`);
+pipelineLogs.append({
+  category: 'system',
+  level: 'info',
+  title: 'system.ready',
+  message: `Server running at ${server.url}`,
+  timings: [{ key: 'server_startup', label: 'Server startup', durationMs: Date.now() - serverStartedAt }],
+  metadata: {
+    port: GLOBAL_CONFIG.SERVER.PORT,
+    demoMode,
+    url: String(server.url),
+  },
+  pipelineId: 'system',
+});
 if (demoPath) {
   console.log(`🧪 Demo mode: ${demoMode}. Open ${server.url}${demoPath}`);
 }
@@ -709,13 +834,41 @@ function getDashboardServiceIdFromUrl(req: Request, action: "start" | "stop" | "
   return match?.[1] ? decodeURIComponent(match[1]) : null;
 }
 
-function getModelRecallLogIdFromUrl(req: Request, action?: "summarize"): string | null {
+function getPipelineIdFromUrl(req: Request): string | null {
   const url = new URL(req.url);
-  const pattern = action
-    ? new RegExp(`^/api/model-recall-logs/([^/]+)/${action}$`)
-    : /^\/api\/model-recall-logs\/([^/]+)$/;
-  const match = url.pathname.match(pattern);
+  const match = url.pathname.match(/^\/api\/pipeline-logs\/([^/]+)$/);
   return match?.[1] ? decodeURIComponent(match[1]) : null;
+}
+
+function getModelCallIdFromUrl(req: Request): string | null {
+  const url = new URL(req.url);
+  const match = url.pathname.match(/^\/api\/pipeline-model-calls\/([^/]+)$/);
+  return match?.[1] ? decodeURIComponent(match[1]) : null;
+}
+
+function getIncidentIdFromUrl(req: Request): string | null {
+  const url = new URL(req.url);
+  const match = url.pathname.match(/^\/api\/pipeline-incidents\/([^/]+)$/);
+  return match?.[1] ? decodeURIComponent(match[1]) : null;
+}
+
+function getBenchmarkRunIdFromUrl(req: Request): string | null {
+  const url = new URL(req.url);
+  const match = url.pathname.match(/^\/api\/benchmarks\/runs\/([^/]+)$/);
+  return match?.[1] ? decodeURIComponent(match[1]) : null;
+}
+
+function parseBenchmarkScenarioIds(value: BenchmarkRunInput["scenarioIds"]): BenchmarkScenarioId[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const allowed = new Set<BenchmarkScenarioId>([
+    "plain_chat_short",
+    "direct_qa",
+    "follow_up_context",
+    "memory_recall",
+    "vision_summary",
+    "conversation_end",
+  ]);
+  return value.filter((item): item is BenchmarkScenarioId => allowed.has(item as BenchmarkScenarioId));
 }
 
 function getCosyVoiceAudioFileNameFromUrl(req: Request): string | null {

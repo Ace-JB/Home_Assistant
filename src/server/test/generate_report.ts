@@ -54,6 +54,11 @@ const PERFORMANCE_NOTES: Record<string, string> = {
     "FaceEngine.loadModels": "One-time startup / warmup",
     "FaceEngine.extractDescriptor": "Per-face feature extraction",
     "FaceEngine.recognizeFaces": "Detection plus similarity-based identity check",
+    "DashboardService.getDashboardStatus": "Runtime health aggregation",
+    "DashboardService.startService": "Managed helper process startup",
+    "DashboardService.stopService": "Managed helper process shutdown",
+    "PipelineLogService.recordIncident": "Pipeline incident persistence",
+    "PipelineLogService.recordModelCall": "Pipeline model call logging",
     "SyncManager.addVideo": "Frame push overhead",
     "SyncManager.addAudio": "Audio buffer push overhead",
     "SyncManager.cleanOld": "Batched expiry cleanup",
@@ -95,8 +100,8 @@ export function parseOutput(output: string): ParsedReportData {
     const summary: TestSummary = { pass: 0, fail: 0, total: 0, time: "", files: 0, assertions: 0 };
 
     const perfRegex = /\[Performance\] (.*) took (.*)ms/;
-    const testRegex = /(?:✓|\(pass\)) (.*) \[(.*)ms\]/;
-    const failRegex = /(?:✗|\(fail\)) (.*)/;
+    const passRegex = /^(?:✓|\(pass\))\s+(.+?)(?:\s+\[([\d.]+)ms\])?$/;
+    const failRegex = /^(?:✗|\(fail\))\s+(.+)/;
 
     for (const line of lines) {
         const perfMatch = line.match(perfRegex);
@@ -109,9 +114,10 @@ export function parseOutput(output: string): ParsedReportData {
             });
         }
 
-        const testMatch = line.match(testRegex);
-        if (testMatch) {
-            tests.push({ name: testMatch[1]!, duration: parseFloat(testMatch[2]!), status: "pass" });
+        const passMatch = line.match(passRegex);
+        if (passMatch) {
+            const duration = passMatch[2] === undefined ? undefined : parseFloat(passMatch[2]);
+            tests.push({ name: passMatch[1]!, ...(duration === undefined ? {} : { duration }), status: "pass" });
             summary.pass++;
             summary.total++;
         }

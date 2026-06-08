@@ -33,7 +33,7 @@ export const MY_TOOLS = {
             description: "Get the face information",
             parameters: jsonSchema({ type: 'object', properties: {}, required: [] }),
             execute: async () => {
-                return faceEngine.recognizeFaces(fs.readFileSync(LATEST_FRAME_PATH));
+                return (await faceEngine.detectAll(fs.readFileSync(LATEST_FRAME_PATH))).faces;
             }
         }
     )

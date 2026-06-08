@@ -1,8 +1,9 @@
 import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'fs';
 import { dirname, join } from 'path';
+import { getDataDbDir } from '@/server/services/runtime-paths';
 
-const DB_DIR = join(process.cwd(), 'src', 'server', 'db');
+const DB_DIR = getDataDbDir();
 const SQLITE_MEMORY_DB_PATH = join(DB_DIR, 'memory.sqlite');
 const MEMORY_HEAT_DECAY_GAMMA = 1.2;
 const MEMORY_HEAT_SCORE_CAP = 8;
@@ -641,8 +642,6 @@ export class MemoryDatabase {
   }
 
   private init(): void {
-    this.migrateExchangeTableIfNeeded();
-
     this.sqlite.run(`
       CREATE TABLE IF NOT EXISTS conversations (
         conversation_id TEXT PRIMARY KEY,
@@ -661,19 +660,6 @@ export class MemoryDatabase {
   }
 
   private ensurePrunedMemoriesSchema(): void {
-    const oldTable = this.sqlite
-      .query<{ count: number }, []>(`
-        SELECT COUNT(*) AS count
-        FROM sqlite_master
-        WHERE type = 'table'
-          AND name = 'pruned_memories'
-          AND sql NOT LIKE '%base_score%'
-      `)
-      .get();
-    if ((oldTable?.count ?? 0) > 0) {
-      this.sqlite.run(`ALTER TABLE pruned_memories RENAME TO pruned_memories_legacy_${Date.now()}`);
-    }
-
     this.sqlite.run(`
       CREATE TABLE IF NOT EXISTS pruned_memories (
         memory_id TEXT PRIMARY KEY,
@@ -742,21 +728,6 @@ export class MemoryDatabase {
     } catch (error) {
       this.hasMemoryFts = false;
       console.log(`[Memory] FTS unavailable, falling back to LIKE search: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  private migrateExchangeTableIfNeeded(): void {
-    const row = this.sqlite
-      .query<{ count: number }, []>(`
-        SELECT COUNT(*) AS count
-        FROM sqlite_master
-        WHERE type = 'table'
-          AND name = 'conversations'
-          AND sql LIKE '%user_content%'
-      `)
-      .get();
-    if ((row?.count ?? 0) > 0) {
-      this.sqlite.run(`ALTER TABLE conversations RENAME TO conversations_exchange_${Date.now()}`);
     }
   }
 

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${PYTHON_SERVICES_ROOT:-data/python_services}"
+ENV_DIR="$ROOT/envs/mdx_env"
+PORT="${MDX_PORT:-10103}"
+
+export PYTHON_SERVICES_ROOT="$ROOT"
+export VOICE_SEPARATION_MODEL="${VOICE_SEPARATION_MODEL:-UVR-MDX-NET-Inst_HQ_3.onnx}"
+export VOICE_SEPARATION_MODEL_DIR="${VOICE_SEPARATION_MODEL_DIR:-$ROOT/models_cache/mdx}"
+export VOICE_SEPARATION_DEVICE="${VOICE_SEPARATION_DEVICE:-${PYTHON_SERVICES_DEVICE:-mps}}"
+export VOICE_SEPARATION_ONNX_PROVIDERS="${VOICE_SEPARATION_ONNX_PROVIDERS:-CoreMLExecutionProvider,CPUExecutionProvider}"
+
+exec "$ENV_DIR/bin/python" -m uvicorn src.server.python_services.src.mdx_service:app --host 127.0.0.1 --port "$PORT"

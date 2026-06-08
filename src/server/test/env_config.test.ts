@@ -1,11 +1,15 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'fs';
+import { resolve } from 'path';
 import {
     isManagedCosyVoiceAudioPath,
     parseFunASRMaterialCandidates,
     parseYtDlpAudioFormats,
     probeYtDlpAudioFormats,
 } from '@server/services/CosyVoiceMaterialService';
+import { getCosyVoiceModelDir } from '@server/services/runtime-paths';
+
+const COSYVOICE_MODEL_DIR = 'data/python_services/models_cache/cosyvoice/Fun-CosyVoice3-0.5B-2512-4bit';
 
 describe('environment config files', () => {
     test('should define shared runtime keys in base env', () => {
@@ -15,34 +19,58 @@ describe('environment config files', () => {
         expect(content).toContain('VITE_API_BASE_URL=');
         expect(content).toContain('VITE_SOCKET_URL=');
         expect(content).toContain('SENTINEL_TTS_PROVIDER=');
-        expect(content).toContain('COSYVOICE_BASE_URL=');
-        expect(content).toContain('COSYVOICE_INSTALL_DIR=src/server/models/voice/CosyVoice3-MLX');
-        expect(content).toContain('COSYVOICE_MODEL_DIR=mlx-community/Fun-CosyVoice3-0.5B-2512-4bit');
-        expect(content).toContain('COSYVOICE_MLX_PACKAGE=mlx-audio-plus==0.1.8');
+        expect(content).toContain('SENTINEL_WAKE_ACK_FAST_REPLY_ENABLED=1');
+        expect(content).toContain('PYTHON_SERVICES_ROOT=data/python_services');
+        expect(content).toContain('PYTHON_SERVICES_SCRIPT_ROOT=src/server/python_services');
+        expect(content).toContain('SENTINEL_DB_DIR=data/db');
+        expect(content).toContain('SENTINEL_MODEL_BASE_PATH=data/models/server-models');
+        expect(content).toContain('PYTHON_SERVICES_DEVICE=mps');
+        expect(content).toContain('PYTHON_SERVICES_MODE=http');
+        expect(content).toContain('FUNASR_PORT=10101');
+        expect(content).toContain('COSYVOICE_PORT=10102');
+        expect(content).toContain('MDX_PORT=10103');
+        expect(content).toContain('VOICE_DATA_ROOT=data/voice');
+        expect(content).toContain('COSYVOICE_BASE_URL=http://localhost:10102');
+        expect(content).toContain(`COSYVOICE_MODEL_DIR=${COSYVOICE_MODEL_DIR}`);
         expect(content).not.toContain('COSYVOICE_BACKEND=');
         expect(content).not.toContain('COSYVOICE_REPO_URL=');
+        expect(content).not.toContain('COSYVOICE_INSTALL_DIR=');
+        expect(content).not.toContain('COSYVOICE_CONDA_ENV=');
+        expect(content).not.toContain('COSYVOICE_MLX_PACKAGE=');
         expect(content).toContain('COSYVOICE_PROMPT_AUDIO_PATH=');
         expect(content).toContain('COSYVOICE_PROMPT_TEXT=');
         expect(content).toContain('COSYVOICE_FALLBACK_TO_SAY=0');
         expect(content).toContain('FFMPEG_PATH=');
     });
 
-    test('should keep CosyVoice runtime MLX-only', () => {
+    test('should keep CosyVoice runtime on the managed python services surface', () => {
         const files = [
             '.env',
             '.env.example',
             'src/global_config.ts',
-            'src/server/scripts/cosyvoice_common.ts',
-            'src/server/scripts/install_cosyvoice.ts',
-            'src/server/scripts/start_cosyvoice.ts',
+            'package.json',
+            'src/server/python_services/bin/setup',
+            'src/server/python_services/bin/cosyvoice_run',
         ];
         const content = files.map(file => readFileSync(file, 'utf8')).join('\n');
 
-        expect(content).toContain('src/server/models/voice/CosyVoice3-MLX');
+        expect(content).toContain('src/server/python_services');
+        expect(content).toContain(COSYVOICE_MODEL_DIR);
+        expect(content).not.toContain('COSYVOICE_INSTALL_DIR');
+        expect(content).not.toContain('COSYVOICE_CONDA_ENV');
+        expect(content).not.toContain('COSYVOICE_MLX_PACKAGE');
+        expect(content).not.toContain('findHuggingFaceSnapshot');
+        expect(content).not.toContain('hf_snapshot_for');
+        expect(content).not.toContain('HUGGINGFACE_HUB_CACHE');
         expect(content).not.toContain('CosyVoice-300M');
         expect(content).not.toContain("backend: 'mlx' | 'pytorch'");
-        expect(content).not.toContain("COSYVOICE_BACKEND");
-        expect(content).not.toContain("COSYVOICE_REPO_URL");
+        expect(content).not.toContain('cosyvoice:install');
+        expect(content).not.toContain('cosyvoice:start');
+        expect(content).not.toContain('cosyvoice:status');
+    });
+
+    test('should resolve CosyVoice model to the fixed managed cache directory', () => {
+        expect(getCosyVoiceModelDir()).toBe(resolve(COSYVOICE_MODEL_DIR));
     });
 
     test('should keep environment files focused on overrides', () => {
@@ -60,8 +88,10 @@ describe('environment config files', () => {
     });
 
     test('should restrict CosyVoice prompt audio to managed wav files', () => {
-        expect(isManagedCosyVoiceAudioPath('data/cosyvoice/prompt-test.wav')).toBe(true);
-        expect(isManagedCosyVoiceAudioPath('data/cosyvoice/uploads/source-test.mp4')).toBe(false);
+        expect(isManagedCosyVoiceAudioPath('data/voice/cosyvoice/prompt-test.wav')).toBe(true);
+        expect(isManagedCosyVoiceAudioPath('data/voice/assets/prompts/prompt-test.wav')).toBe(true);
+        expect(isManagedCosyVoiceAudioPath('data/cosyvoice/prompt-test.wav')).toBe(false);
+        expect(isManagedCosyVoiceAudioPath('data/voice/cosyvoice/uploads/source-test.mp4')).toBe(false);
         expect(isManagedCosyVoiceAudioPath('../outside.wav')).toBe(false);
         expect(isManagedCosyVoiceAudioPath('/tmp/outside.wav')).toBe(false);
     });
@@ -174,6 +204,6 @@ describe('environment config files', () => {
     test('should keep yt-dlp default install target under server tools bin', () => {
         const env = readFileSync('.env', 'utf8');
 
-        expect(env).toContain('YT_DLP_BIN=src/server/tools/bin/yt-dlp');
+        expect(env).toContain('YT_DLP_BIN=data/tools/bin/yt-dlp');
     });
 });

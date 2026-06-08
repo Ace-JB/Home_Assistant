@@ -5,8 +5,9 @@ import { GLOBAL_CONFIG } from '@/global_config';
 import type { AssistantLanguage } from '@tools/Socket';
 import type { ConversationMessage } from '@modules/memory';
 import { buildIntentionUserPrompt, getIntentionSystemPrompt } from '@server/prompts';
-import { traceModelDecision } from '@server/observability/modelTrace';
-import { modelRecallLogs } from '@server/services/ModelRecallLogService';
+import { recordModelDecision } from '@server/observability/modelTrace';
+import { generateTextWithRuntimeLog } from '@server/observability/modelRuntime';
+import { pipelineLogs } from '@server/services/PipelineLogService';
 
 export const UserIntentSchema = z.enum([
     'qa',
@@ -144,6 +145,9 @@ export interface AnalyzeCommandInput {
     language?: AssistantLanguage;
     recentConversationMessages?: ConversationMessage[];
     traceId?: string;
+    pipelineId?: string;
+    conversationId?: string;
+    benchmark?: unknown;
 }
 
 type GenerateTextLike = typeof generateText;
@@ -158,11 +162,8 @@ type ValidationResult =
     | { ok: true; data: Partial<IntentionAnalysis> }
     | { ok: false; errors: string[] };
 type CoreValidationResult =
-    | { ok: true; data: CoreRoutingDecisionWithCompat }
+    | { ok: true; data: CoreRoutingDecision }
     | { ok: false; errors: string[] };
-type CoreRoutingDecisionWithCompat = CoreRoutingDecision & {
-    compatAnalysis?: IntentionAnalysis;
-};
 
 const ollama = createOllama({
     baseURL: GLOBAL_CONFIG.OLLAMA.IP,
@@ -251,16 +252,6 @@ const ResponsePlanValidationSchema = z.object({
     clarificationQuestion: z.string(),
 }).passthrough();
 
-const LegacyAnalysisValidationSchema = z.object({
-    intent: UserIntentSchema,
-    dialogueAct: DialogueActSchema,
-    shouldRespond: z.boolean(),
-    shouldEndSession: z.boolean(),
-    visualUnderstanding: VisualUnderstandingValidationSchema.optional(),
-    memoryRetrieval: MemoryRetrievalValidationSchema,
-    resolvedContext: ResolvedContextValidationSchema,
-}).passthrough();
-
 const LayeredAnalysisValidationSchema = z.object({
     routing: RoutingValidationSchema,
     contextResolution: ContextResolutionValidationSchema,
@@ -309,12 +300,23 @@ export async function analyzeCommand(
             recentConversationCount: input.recentConversationMessages?.length ?? 0,
             messages,
         });
-        const result = await generate({
+        const options = {
             model: intentionModel as any,
             maxTokens: GLOBAL_CONFIG.MODELS.INTENSION.MAX_TOKENS,
             temperature: 0,
             messages,
-        });
+        };
+        const result = generate === generateText
+            ? await generateTextWithRuntimeLog(generate, options, {
+                scope: 'intention.routing',
+                modelId: GLOBAL_CONFIG.OLLAMA.INTENTION_MODEL ?? GLOBAL_CONFIG.OLLAMA.TEXT_MODEL,
+                traceId,
+                pipelineId: input.pipelineId,
+                conversationId: input.conversationId,
+                userCommand: command,
+                benchmark: input.benchmark,
+            })
+            : await generate(options);
         logIntentionTrace({
             traceId,
             stage: 'core_routing_raw_output',
@@ -347,14 +349,17 @@ export async function analyzeCommand(
         const fallback = analyzeByFallback({ ...input, traceId }, 'model_error');
         const detail = error instanceof Error ? error.message : String(error);
         console.log(`[Intention] fallback=model_error detail=${detail}`);
-        modelRecallLogs.save({
-            stage: 'intention',
+        pipelineLogs.recordIncident({
+            pipelineId: input.pipelineId,
+            conversationId: input.conversationId,
+            stage: 'intent',
             reason: 'model_error',
             severity: 'error',
-            userCommand: command,
-            promptSnapshot: buildAnalysisMessages(input),
-            state: {
+            inputSnapshot: buildAnalysisMessages(input),
+            outputSnapshot: detail,
+            metadata: {
                 traceId,
+                userCommand: command,
                 error: detail,
                 fallback,
                 recentConversationMessages: input.recentConversationMessages ?? [],
@@ -560,7 +565,7 @@ Return one compact JSON object matching this exact TypeScript shape:
   "resolvedContext": {
     "isFollowUp": false,
     "topic": "",
-    "rewriteQuery": "self-contained rewritten command or empty string"
+    "rewriteQuery": "self-contained rewritten command"
   },
   "requiresLongTermMemory": false,
   "requiresToolsOrMCP": false
@@ -573,6 +578,9 @@ Rules:
 - High-risk, vague, or pronoun-based device controls should ask clarification instead of execute_device.
 - If the command asks what we discussed before/recently, intent must be memory_recall and requiresLongTermMemory true.
 - If the command is a pure acknowledgement or noise without a new request, use ignore and do not request memory/tools.
+- For any route except ignore or end_session, resolvedContext.rewriteQuery must be non-empty.
+- For follow-ups, rewriteQuery must include the recent topic, not just the short user phrase.
+- Examples: if recent topic is 红烧牛肉 and command is "请告诉我详细的步骤。", use "请详细说明红烧牛肉的制作步骤"; if command is "准备的材料有什么要求吗？", use "红烧牛肉食材和材料准备有什么要求"; if command is "我们之前聊过什么话题？", use the command itself.
 
 Example shape:
 ${JSON.stringify(schemaExample)}`,
@@ -585,7 +593,7 @@ async function parseOrRepairCoreDecision(input: {
     input: AnalyzeCommandInput & { traceId: string };
     messages: CoreMessage[];
     generate: GenerateTextLike;
-}): Promise<CoreRoutingDecisionWithCompat> {
+}): Promise<CoreRoutingDecision> {
     const validation = validateCoreRoutingDecision(input.raw, input.input.traceId);
     if (validation.ok) {
         return validation.data;
@@ -606,19 +614,31 @@ async function parseOrRepairCoreDecision(input: {
             command: input.input.userCommand,
             errors: validation.errors,
         }, 'warn');
-        const repair = await input.generate({
+        const repairMessages: CoreMessage[] = [
+            ...input.messages,
+            { role: 'assistant', content: input.raw },
+            {
+                role: 'user',
+                content: buildCoreFormatRepairPrompt(validation.errors, input.input.traceId),
+            },
+        ];
+        const repairOptions = {
             model: intentionModel as any,
             maxTokens: GLOBAL_CONFIG.MODELS.INTENSION.MAX_TOKENS,
             temperature: 0,
-            messages: [
-                ...input.messages,
-                { role: 'assistant', content: input.raw },
-                {
-                    role: 'user',
-                    content: buildCoreFormatRepairPrompt(validation.errors, input.input.traceId),
-                },
-            ],
-        });
+            messages: repairMessages,
+        };
+        const repair = input.generate === generateText
+            ? await generateTextWithRuntimeLog(input.generate, repairOptions, {
+                scope: 'intention.repair',
+                modelId: GLOBAL_CONFIG.OLLAMA.INTENTION_MODEL ?? GLOBAL_CONFIG.OLLAMA.TEXT_MODEL,
+                traceId: input.input.traceId,
+                pipelineId: input.input.pipelineId,
+                conversationId: input.input.conversationId,
+                userCommand: input.input.userCommand,
+                benchmark: input.input.benchmark,
+            })
+            : await input.generate(repairOptions);
         const repairedValidation = validateCoreRoutingDecision(repair.text, input.input.traceId);
         if (repairedValidation.ok) {
             return repairedValidation.data;
@@ -657,18 +677,6 @@ function validateCoreRoutingDecision(raw: string, traceId: string): CoreValidati
 
     const parsed = CoreRoutingDecisionSchema.safeParse(data);
     if (!parsed.success) {
-        const legacyValidation = validateIntentionAnalysis(raw);
-        if (legacyValidation.ok) {
-            const legacy = normalizeAnalysis(legacyValidation.data, '');
-            return {
-                ok: true,
-                data: {
-                    ...coreDecisionFromCompatAnalysis(legacy, traceId),
-                    compatAnalysis: withTraceAndCoreFields(legacy, traceId),
-                },
-            };
-        }
-
         return {
             ok: false,
             errors: parsed.error.issues.map(issue => `${issue.path.join('.') || 'root'}: ${issue.message}`),
@@ -676,32 +684,6 @@ function validateCoreRoutingDecision(raw: string, traceId: string): CoreValidati
     }
 
     return { ok: true, data: { ...parsed.data, traceId } };
-}
-
-function coreDecisionFromCompatAnalysis(analysis: IntentionAnalysis, traceId: string): CoreRoutingDecision {
-    const routingAction = analysis.routingAction ?? analysis.routing?.action ?? inferRoutingAction(analysis);
-    return {
-        traceId,
-        intent: analysis.intent,
-        dialogueAct: analysis.dialogueAct,
-        routingAction,
-        resolvedContext: {
-            isFollowUp: analysis.resolvedContext.isFollowUp,
-            topic: analysis.resolvedContext.topic,
-            rewriteQuery: analysis.resolvedContext.rewriteQuery
-                || analysis.contextResolution?.responseRewrite
-                || analysis.memoryRetrieval.query
-                || analysis.resolvedContext.rewrite,
-        },
-        requiresLongTermMemory: analysis.requiresLongTermMemory
-            ?? analysis.dataPlan?.memory.needed
-            ?? (analysis.memoryRetrieval.enabled && analysis.memoryRetrieval.mode !== 'none'),
-        requiresToolsOrMCP: analysis.requiresToolsOrMCP
-            ?? analysis.dataPlan?.deviceState.needed
-            ?? analysis.dataPlan?.vision.needed
-            ?? analysis.visualUnderstanding.required
-            ?? false,
-    };
 }
 
 function buildCoreFormatRepairPrompt(errors: string[], traceId: string): string {
@@ -715,7 +697,7 @@ traceId, intent, dialogueAct, routingAction, resolvedContext.isFollowUp, resolve
 Do not include markdown or explanations.`;
 }
 
-function applyDeterministicRoutingRules(decision: CoreRoutingDecisionWithCompat, command: string, traceId: string): CoreRoutingDecisionWithCompat {
+function applyDeterministicRoutingRules(decision: CoreRoutingDecision, command: string, traceId: string): CoreRoutingDecision {
     let next = decision;
     const applyRule = (
         ruleName: string,
@@ -727,7 +709,6 @@ function applyDeterministicRoutingRules(decision: CoreRoutingDecisionWithCompat,
         next = {
             ...next,
             ...patch,
-            compatAnalysis: undefined,
             resolvedContext: {
                 ...next.resolvedContext,
                 ...(patch.resolvedContext ?? {}),
@@ -839,36 +820,44 @@ async function parseOrRepairIntentionAnalysis(
 
     console.log(`[Intention] model_output_invalid errors=${validation.errors.join('; ')}`);
     try {
-        const repair = await generate({
+        const repairMessages: CoreMessage[] = [
+            ...messages,
+            { role: 'assistant', content: raw },
+            {
+                role: 'user',
+                content: buildFormatRepairPrompt(validation.errors),
+            },
+        ];
+        const repairOptions = {
             model: textModel as any,
             maxTokens: GLOBAL_CONFIG.MODELS.INTENSION.MAX_TOKENS,
             temperature: 0,
-            messages: [
-                ...messages,
-                { role: 'assistant', content: raw },
-                {
-                    role: 'user',
-                    content: buildFormatRepairPrompt(validation.errors),
-                },
-            ],
-        });
-        traceModelDecision('Intention', 'repair_raw_output', repair.text);
+            messages: repairMessages,
+        };
+        const repair = generate === generateText
+            ? await generateTextWithRuntimeLog(generate, repairOptions, {
+                scope: 'intention.repair',
+                modelId: GLOBAL_CONFIG.OLLAMA.TEXT_MODEL,
+                userCommand: fallbackQuery,
+            })
+            : await generate(repairOptions);
+        recordModelDecision('Intention', 'repair_raw_output', repair.text);
         const repairedValidation = validateIntentionAnalysis(repair.text);
         if (repairedValidation.ok) {
             return normalizeAnalysis(repairedValidation.data, fallbackQuery);
         }
         console.log(`[Intention] model_repair_invalid errors=${repairedValidation.errors.join('; ')}`);
         const fallback = createFallbackAnalysis(fallbackQuery, repairedValidation.errors.join('; '));
-        modelRecallLogs.save({
-            stage: 'intention',
+        pipelineLogs.recordIncident({
+            stage: 'intent',
             reason: 'model_repair_invalid',
             severity: 'warn',
-            userCommand: fallbackQuery,
-            promptSnapshot: messages,
-            state: {
+            inputSnapshot: messages,
+            outputSnapshot: repair.text,
+            metadata: {
+                userCommand: fallbackQuery,
                 rawOutput: raw,
                 initialErrors: validation.errors,
-                repairOutput: repair.text,
                 repairErrors: repairedValidation.errors,
                 fallback,
             },
@@ -878,16 +867,16 @@ async function parseOrRepairIntentionAnalysis(
         const detail = error instanceof Error ? error.message : String(error);
         console.log(`[Intention] model_repair_error detail=${detail}`);
         const fallback = createFallbackAnalysis(fallbackQuery, validation.errors.join('; '));
-        modelRecallLogs.save({
-            stage: 'intention',
+        pipelineLogs.recordIncident({
+            stage: 'intent',
             reason: 'model_repair_error',
             severity: 'error',
-            userCommand: fallbackQuery,
-            promptSnapshot: messages,
-            state: {
+            inputSnapshot: messages,
+            outputSnapshot: detail,
+            metadata: {
+                userCommand: fallbackQuery,
                 rawOutput: raw,
                 initialErrors: validation.errors,
-                repairError: detail,
                 fallback,
             },
         });
@@ -916,9 +905,7 @@ function validateIntentionAnalysis(raw: string): ValidationResult {
         return { ok: false, errors: ['root must be a JSON object'] };
     }
 
-    const hasLayeredShape = isRecord(data.routing) || isRecord(data.contextResolution) || isRecord(data.dataPlan);
-    const schema = hasLayeredShape ? LayeredAnalysisValidationSchema : LegacyAnalysisValidationSchema;
-    const parsed = schema.safeParse(data);
+    const parsed = LayeredAnalysisValidationSchema.safeParse(data);
     if (!parsed.success) {
         return {
             ok: false,
@@ -1079,16 +1066,12 @@ function createFallbackAnalysis(query: string, reason: string): IntentionAnalysi
     });
 }
 
-function toCompatAnalysis(decision: CoreRoutingDecisionWithCompat, options: {
+function toCompatAnalysis(decision: CoreRoutingDecision, options: {
     routingReason: string;
     memoryReason: string;
     visualReason: string;
     confidence: number;
 }): IntentionAnalysis {
-    if ('compatAnalysis' in decision && decision.compatAnalysis) {
-        return decision.compatAnalysis;
-    }
-
     const shouldRespond = !['ignore'].includes(decision.routingAction);
     const shouldEndSession = decision.routingAction === 'end_session' || decision.intent === 'conversation_end';
     const memoryAllowed = shouldRespond
@@ -1380,14 +1363,16 @@ function isMemoryRecallCommand(command: string): boolean {
 }
 
 function logIntentionTrace(state: Record<string, unknown>, severity: 'info' | 'warn' | 'error' = 'info'): void {
-    traceModelDecision('Intention', String(state.stage ?? 'trace'), state);
-    modelRecallLogs.save({
-        stage: 'intention',
+    recordModelDecision('Intention', String(state.stage ?? 'trace'), state);
+    if (severity === 'info') return;
+    pipelineLogs.recordIncident({
+        pipelineId: typeof state.pipelineId === 'string' ? state.pipelineId : undefined,
+        conversationId: typeof state.conversationId === 'string' ? state.conversationId : undefined,
+        stage: 'intent',
         reason: String(state.stage ?? 'trace'),
         severity,
-        userCommand: typeof state.command === 'string' ? state.command : '',
-        promptSnapshot: state.messages,
-        state,
+        inputSnapshot: state.messages,
+        metadata: state,
     });
 }
 

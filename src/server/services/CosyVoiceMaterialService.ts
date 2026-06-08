@@ -1,6 +1,6 @@
 import { spawn } from 'child_process';
-import { existsSync } from 'fs';
-import { chmod, mkdir, readFile, readdir, stat, writeFile } from 'fs/promises';
+import { existsSync, promises as fs } from 'fs';
+import { chmod, copyFile, mkdir, readFile, rm, stat, writeFile } from 'fs/promises';
 import { basename, dirname, extname, join, relative, resolve } from 'path';
 import { GLOBAL_CONFIG } from '@/global_config';
 import { funasrService } from '@/server/services/FunASRService';
@@ -18,11 +18,23 @@ import type {
     YtDlpStatus,
 } from '@/server/services/cosyvoice/types';
 import { normalizeTranscript } from '@tools/Voice';
+import { prewarmWakeAckAudio } from '@tools/Voice';
+import {
+    createVoiceAssetId,
+    registerVoiceAssetFile,
+    safeVoiceAssetName,
+    upsertVoiceSpeakerProfile,
+} from '@/server/services/voice-assets';
+import {
+    scorePromptQuality,
+    separateVoice,
+} from '@/server/services/voice-assets/quality';
+import {
+    getCosyVoiceDataRoot,
+    getVoiceAssetsDataRoot,
+} from '@/server/services/voice-data-paths';
+import { pipelineLogs } from '@/server/services/PipelineLogService';
 
-const COSYVOICE_DATA_DIR = resolve('data/cosyvoice');
-const UPLOAD_DIR = join(COSYVOICE_DATA_DIR, 'uploads');
-const MATERIAL_JOBS_DIR = join(COSYVOICE_DATA_DIR, 'material-jobs');
-const SPEAKERS_PATH = join(COSYVOICE_DATA_DIR, 'speakers.json');
 const YT_DLP_VERSION = '2025.05.22';
 const ALLOWED_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi']);
 const ALLOWED_MEDIA_EXTENSIONS = new Set([...ALLOWED_VIDEO_EXTENSIONS, '.wav', '.mp3', '.m4a', '.aac', '.flac', '.ogg', '.opus']);
@@ -44,6 +56,25 @@ const MANAGED_ENV_KEYS = [
     'COSYVOICE_TIMEOUT_MS',
     'COSYVOICE_FALLBACK_TO_SAY',
 ];
+
+function getCosyVoicePaths() {
+    const dataDir = getCosyVoiceDataRoot();
+    const materialJobsDir = join(dataDir, 'material-jobs');
+    return {
+        dataDir,
+        uploadDir: join(dataDir, 'source-media'),
+        materialJobsDir,
+        rawAudioDir: join(materialJobsDir, 'raw-audio'),
+        vocalAudioDir: join(materialJobsDir, 'zero-shot-extracted'),
+        slicedAudioDir: join(materialJobsDir, 'sliced-audio'),
+        candidateTextDir: join(materialJobsDir, 'candidate-texts'),
+        traceDir: join(materialJobsDir, 'traces'),
+        selectedAudioDir: join(dataDir, 'selected-clips'),
+        speakerAudioDir: join(dataDir, 'speakers'),
+        speakersPath: join(dataDir, 'speakers.json'),
+        wakeAckDir: join(dataDir, 'wake-ack'),
+    };
+}
 
 export type {
     CosyVoiceExtractOptions,
@@ -73,13 +104,14 @@ export function getCosyVoiceMaterialConfig() {
 
 export async function extractCosyVoiceMaterial(video: File, options: CosyVoiceExtractOptions = {}): Promise<CosyVoiceExtractResult> {
     const timer = createTaskTimer();
+    const { dataDir, uploadDir } = getCosyVoicePaths();
     validateMediaFile(video);
-    await mkdir(UPLOAD_DIR, { recursive: true });
-    await mkdir(COSYVOICE_DATA_DIR, { recursive: true });
+    await mkdir(uploadDir, { recursive: true });
+    await mkdir(dataDir, { recursive: true });
 
     const id = `${Date.now()}-${crypto.randomUUID()}`;
     const videoExtension = getSafeMediaExtension(video.name, video.type);
-    const uploadPath = join(UPLOAD_DIR, `source-${id}${videoExtension}`);
+    const uploadPath = join(uploadDir, `source-${id}${videoExtension}`);
 
     const uploadStartedAt = Date.now();
     await writeFile(uploadPath, Buffer.from(await video.arrayBuffer()));
@@ -115,8 +147,8 @@ export async function getYtDlpStatus(): Promise<YtDlpStatus> {
 
 export async function installYtDlp(): Promise<YtDlpStatus> {
     const targetPath = resolve(GLOBAL_CONFIG.YT_DLP.BIN);
-    if (!isInsideDirectory(targetPath, resolve('src/server/tools/bin'))) {
-        throw new Error('YT_DLP_BIN must point under src/server/tools/bin for automatic installation.');
+    if (!isInsideDirectory(targetPath, resolve('data/tools/bin'))) {
+        throw new Error('YT_DLP_BIN must point under data/tools/bin for automatic installation.');
     }
 
     await mkdir(dirname(targetPath), { recursive: true });
@@ -135,27 +167,29 @@ export async function checkCosyVoiceService(
     baseUrl = GLOBAL_CONFIG.VOICE.COSYVOICE_BASE_URL,
     endpoint = GLOBAL_CONFIG.VOICE.COSYVOICE_ENDPOINT,
 ): Promise<CosyVoiceServiceStatus> {
-    const url = new URL(endpoint.trim() || '/inference_zero_shot', withTrailingSlash(baseUrl.trim() || 'http://localhost:50000'));
+    const serviceBaseUrl = withTrailingSlash(baseUrl.trim() || GLOBAL_CONFIG.VOICE.COSYVOICE_BASE_URL);
+    const healthUrl = new URL('/health', serviceBaseUrl);
+    const inferenceUrl = new URL(endpoint.trim() || '/inference_zero_shot', serviceBaseUrl);
     const startedAt = Date.now();
     try {
-        const response = await fetch(url, {
-            method: 'OPTIONS',
+        const response = await fetch(healthUrl, {
+            method: 'GET',
             signal: AbortSignal.timeout(2000),
         });
-        const ok = response.status < 500;
-        // console.info(`[CosyVoiceMaterial] service_check ok=${ok} status=${response.status} ms=${Date.now() - startedAt} url=${url.toString()}`);
+        const payload = await response.json().catch(() => null) as { ready?: boolean; ok?: boolean } | null;
+        const ok = response.ok && Boolean(payload?.ready ?? payload?.ok);
         return {
             ok,
-            url: url.toString(),
+            url: inferenceUrl.toString(),
             status: response.status,
-            error: ok ? null : `CosyVoice service returned HTTP ${response.status}.`,
+            error: ok ? null : `CosyVoice service is not ready at ${healthUrl.toString()}.`,
         };
     } catch (error) {
         const message = error instanceof Error ? error.message : 'CosyVoice service is unreachable.';
-        console.warn(`[CosyVoiceMaterial] service_check failed ms=${Date.now() - startedAt} url=${url.toString()}: ${message}`);
+        // console.warn(`[CosyVoiceMaterial] service_check failed ms=${Date.now() - startedAt} url=${healthUrl.toString()}: ${message}`);
         return {
             ok: false,
-            url: url.toString(),
+            url: inferenceUrl.toString(),
             status: null,
             error: message,
         };
@@ -164,12 +198,13 @@ export async function checkCosyVoiceService(
 
 export async function importCosyVoiceMaterialFromUrl(url: string, formatId: string, options: CosyVoiceExtractOptions = {}): Promise<CosyVoiceExtractResult> {
     const timer = createTaskTimer();
+    const { uploadDir } = getCosyVoicePaths();
     const normalizedUrl = normalizeHttpUrl(url);
     const safeFormatId = normalizeYtDlpFormatId(formatId);
 
-    await mkdir(UPLOAD_DIR, { recursive: true });
+    await mkdir(uploadDir, { recursive: true });
     const id = `${Date.now()}-${crypto.randomUUID()}`;
-    const outputTemplate = join(UPLOAD_DIR, `source-${id}.%(ext)s`);
+    const outputTemplate = join(uploadDir, `source-${id}.%(ext)s`);
     const downloadStartedAt = Date.now();
     await runProcess(GLOBAL_CONFIG.YT_DLP.BIN, [
         '-f', safeFormatId,
@@ -232,26 +267,34 @@ export function createYtDlpAudioPreviewStream(url: string, formatId: string): Re
 }
 
 export async function extractMaterialFromVideoPath(videoPath: string, options: CosyVoiceExtractOptions = {}, timer = createTaskTimer()): Promise<CosyVoiceExtractResult> {
+    const { uploadDir, materialJobsDir, rawAudioDir, traceDir } = getCosyVoicePaths();
     const resolvedVideoPath = resolve(videoPath);
-    if (!isInsideDirectory(resolvedVideoPath, UPLOAD_DIR)) {
-        throw new Error('videoPath must be under data/cosyvoice/uploads.');
+    if (!isInsideDirectory(resolvedVideoPath, uploadDir)) {
+        throw new Error('videoPath must be under the managed CosyVoice source-media directory.');
     }
 
     const id = `${Date.now()}-${crypto.randomUUID()}`;
     const jobId = `job-${id}`;
-    const jobDir = join(MATERIAL_JOBS_DIR, jobId);
-    const rawAudioPath = join(jobDir, 'raw.wav');
+    const jobDir = join(materialJobsDir, jobId);
+    const rawAudioPath = join(rawAudioDir, jobId, 'raw.wav');
 
     await mkdir(jobDir, { recursive: true });
+    await mkdir(dirname(rawAudioPath), { recursive: true });
     const extractStartedAt = Date.now();
     await extractWavWithFfmpeg(resolvedVideoPath, rawAudioPath);
     timer.mark('extract_wav', '抽取 WAV', extractStartedAt, basename(resolvedVideoPath));
 
     let analysisPath = rawAudioPath;
+    let separationResult: Awaited<ReturnType<typeof separateVoice>> | null = null;
     if (options.enhanceVocals) {
         const uvrStartedAt = Date.now();
-        analysisPath = await createVocalWav(rawAudioPath, jobDir);
-        timer.mark('uvr5', '人声增强', uvrStartedAt);
+        separationResult = await separateVoice({
+            inputPath: rawAudioPath,
+            reason: 'prompt-import',
+            requireService: true,
+        });
+        analysisPath = separationResult.outputPath;
+        timer.mark('mdx_separation', 'MDX 人声分离', uvrStartedAt, `${separationResult.method}${separationResult.fallbackUsed ? ' fallback' : ''}`);
     }
 
     const analyzeStartedAt = Date.now();
@@ -268,11 +311,40 @@ export async function extractMaterialFromVideoPath(videoPath: string, options: C
         timer,
     });
     timer.mark('candidate_export', '候选导出汇总', exportStartedAt, `${candidates.length} candidates`);
+    const cleanupStartedAt = Date.now();
+    await cleanupExtractionArtifacts({
+        uploadPath: resolvedVideoPath,
+        rawAudioPath,
+        analysisPath,
+    });
+    timer.mark('cleanup', '清理临时文件', cleanupStartedAt, basename(resolvedVideoPath));
     const finalCandidates = candidates;
     const bestCandidate = finalCandidates[0] ?? null;
     const sourceFileName = basename(resolvedVideoPath);
     const sourceExtension = extname(sourceFileName).toLowerCase();
     const sourceIsVideo = VIDEO_EXTENSIONS.has(sourceExtension);
+
+    const timings = timer.finish();
+    pipelineLogs.append({
+        category: 'voice-material',
+        level: 'info',
+        title: 'Voice material extracted',
+        message: `${finalCandidates.length} candidate(s) from ${sourceFileName}`,
+        timings,
+        metadata: {
+            jobId,
+            sourceFileName,
+            sourceIsVideo,
+            candidateCount: finalCandidates.length,
+            bestCandidateId: bestCandidate?.id ?? null,
+            enhanceVocals: Boolean(options.enhanceVocals),
+            separation: separationResult ? {
+                method: separationResult.method,
+                fallbackUsed: separationResult.fallbackUsed,
+                durationMs: separationResult.durationMs,
+            } : null,
+        },
+    });
 
     return {
         audioUrl: bestCandidate?.audioUrl ?? '',
@@ -281,11 +353,12 @@ export async function extractMaterialFromVideoPath(videoPath: string, options: C
         fileName: bestCandidate ? basename(bestCandidate.audioPath) : '',
         jobId,
         metadataPath: join(jobDir, 'metadata.list'),
-        tracePath: join(jobDir, 'trace.jsonl'),
+        tracePath: join(traceDir, jobId, 'trace.jsonl'),
         candidates: finalCandidates,
+        separation: separationResult ?? undefined,
         videoUrl: sourceIsVideo ? `/api/voice/cosyvoice/video/${encodeURIComponent(sourceFileName)}` : undefined,
         videoPath: resolvedVideoPath,
-        timings: timer.finish(),
+        timings,
     };
 }
 
@@ -326,10 +399,25 @@ export async function selectCosyVoiceSpeakerProfile(speakerId: string): Promise<
     });
     timer.mark('apply_config', '应用配置', applyStartedAt, speaker.name);
 
+    const timings = timer.finish();
+    pipelineLogs.append({
+        category: 'voice-material',
+        level: 'info',
+        title: 'Voice speaker profile applied',
+        message: speaker.name,
+        timings,
+        metadata: {
+            speakerId: speaker.id,
+            speakerName: speaker.name,
+            promptAudioPath: speaker.promptAudioPath,
+            promptTextChars: speaker.promptText.length,
+        },
+    });
+
     return {
         config: getCosyVoiceMaterialConfig(),
         speakers: await readSpeakerProfiles(),
-        timings: timer.finish(),
+        timings,
     };
 }
 
@@ -382,7 +470,8 @@ export async function saveCosyVoiceMaterial(input: CosyVoiceSaveInput): Promise<
     const timer = createTaskTimer();
     const normalized = normalizeSaveInput(input);
     const saveStartedAt = Date.now();
-    const audioPath = await assertManagedAudioPath(normalized.promptAudioPath);
+    const sourceAudioPath = await assertManagedAudioPath(normalized.promptAudioPath);
+    const audioPath = await persistSpeakerPromptAudio(sourceAudioPath, normalized.speakerName, normalized.speakerId);
     const speaker = await upsertSpeakerProfile({
         speakerId: normalized.speakerId,
         speakerName: normalized.speakerName,
@@ -418,13 +507,43 @@ export async function saveCosyVoiceMaterial(input: CosyVoiceSaveInput): Promise<
     });
     timer.mark('apply_config', '应用配置', applyStartedAt, speaker.name);
 
+    const wakeAckStartedAt = Date.now();
+    await prewarmWakeAckAudio().catch((error) => {
+        console.warn(`[CosyVoiceMaterial] wake ack prewarm failed id=${speaker.id}:`, error);
+    });
+    timer.mark('wake_ack_prewarm', '唤醒应答预热', wakeAckStartedAt, speaker.id);
+    const assetStartedAt = Date.now();
+    await registerSpeakerVoiceAsset(speaker);
+    timer.mark('voice_asset_index', 'VoiceAsset 索引', assetStartedAt, speaker.id);
+
+    const cleanupStartedAt = Date.now();
+    await cleanupMaterialExtraction(sourceAudioPath);
+    timer.mark('cleanup', '清理临时文件', cleanupStartedAt, basename(sourceAudioPath));
+
+    const timings = timer.finish();
+    pipelineLogs.append({
+        category: 'voice-material',
+        level: cacheWarning ? 'warn' : 'info',
+        title: 'Voice speaker profile saved',
+        message: speaker.name,
+        timings,
+        metadata: {
+            speakerId: speaker.id,
+            speakerName: speaker.name,
+            cached,
+            cacheWarning: cacheWarning ?? null,
+            promptAudioPath: speaker.promptAudioPath,
+            promptTextChars: speaker.promptText.length,
+        },
+    });
+
     return {
         config: getCosyVoiceMaterialConfig(),
         speakers: await readSpeakerProfiles(),
         speaker,
         cached,
         cacheWarning,
-        timings: timer.finish(),
+        timings,
     };
 }
 
@@ -470,28 +589,47 @@ async function applyActiveCosyVoiceMaterial(
 }
 
 export async function resolveCosyVoiceAudioFile(fileName: string): Promise<string | null> {
+    const { dataDir } = getCosyVoicePaths();
     const safeName = decodeURIComponent(fileName).replace(/\\/gu, '/');
     if (safeName.includes('..') || !safeName.endsWith('.wav')) return null;
 
-    const audioPath = resolve(COSYVOICE_DATA_DIR, safeName);
-    if (!isInsideDirectory(audioPath, COSYVOICE_DATA_DIR)) return null;
+    const roots = safeName.startsWith('voice-assets/') || safeName.startsWith('assets/')
+        ? [getVoiceAssetsDataRoot()]
+        : [dataDir];
+    const relativePath = safeName.startsWith('voice-assets/')
+        ? safeName.slice('voice-assets/'.length)
+        : safeName.startsWith('assets/')
+            ? safeName.slice('assets/'.length)
+            : safeName;
 
-    const exists = await stat(audioPath).then(item => item.isFile()).catch(() => false);
-    return exists ? audioPath : null;
+    for (const rootDir of roots) {
+        const audioPath = resolve(rootDir, relativePath);
+        if (!isInsideDirectory(audioPath, rootDir)) continue;
+        const exists = await stat(audioPath).then(item => item.isFile()).catch(() => false);
+        if (exists) return audioPath;
+    }
+
+    return null;
 }
 
 export async function resolveCosyVoiceVideoFile(fileName: string): Promise<string | null> {
+    const { uploadDir } = getCosyVoicePaths();
     const safeName = basename(decodeURIComponent(fileName));
-    const videoPath = resolve(UPLOAD_DIR, safeName);
-    if (!isInsideDirectory(videoPath, UPLOAD_DIR)) return null;
+    const videoPath = resolve(uploadDir, safeName);
+    if (!isInsideDirectory(videoPath, uploadDir)) return null;
 
     const exists = await stat(videoPath).then(item => item.isFile()).catch(() => false);
     return exists ? videoPath : null;
 }
 
 export function isManagedCosyVoiceAudioPath(path: string): boolean {
+    const { dataDir } = getCosyVoicePaths();
     const resolved = resolve(path);
-    return isInsideDirectory(resolved, COSYVOICE_DATA_DIR) && resolved.endsWith('.wav');
+    return (
+        isInsideDirectory(resolved, dataDir)
+        || isInsideDirectory(resolved, getVoiceAssetsDataRoot())
+    )
+        && resolved.endsWith('.wav');
 }
 
 export function parseFunASRMaterialCandidates(segments: FunASRMaterialSegment[]): Array<FunASRMaterialSegment & { durationMs: number; reasons: string[]; score: number }> {
@@ -547,7 +685,7 @@ export function parseYtDlpAudioFormats(metadata: { formats?: unknown[] }, source
 async function assertManagedAudioPath(path: string): Promise<string> {
     const resolved = resolve(path);
     if (!isManagedCosyVoiceAudioPath(resolved)) {
-        throw new Error('promptAudioPath must be a wav file generated under data/cosyvoice.');
+        throw new Error('promptAudioPath must be a wav file generated under managed voice data.');
     }
 
     const fileExists = await stat(resolved).then(item => item.isFile()).catch(() => false);
@@ -556,6 +694,89 @@ async function assertManagedAudioPath(path: string): Promise<string> {
     }
 
     return resolved;
+}
+
+async function persistSpeakerPromptAudio(sourceAudioPath: string, speakerName: string, speakerId?: string): Promise<string> {
+    const { selectedAudioDir, speakerAudioDir } = getCosyVoicePaths();
+    if (isInsideDirectory(sourceAudioPath, speakerAudioDir)) {
+        return sourceAudioPath;
+    }
+
+    await mkdir(selectedAudioDir, { recursive: true });
+    await mkdir(speakerAudioDir, { recursive: true });
+    const baseName = safeFilePart(speakerId || speakerName || 'speaker');
+    const selectedPath = resolve(selectedAudioDir, `${baseName}-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}.wav`);
+    if (!isInsideDirectory(selectedPath, selectedAudioDir)) {
+        throw new Error('Invalid selected audio target path.');
+    }
+    await copyFile(sourceAudioPath, selectedPath);
+
+    const targetPath = resolve(speakerAudioDir, `${baseName}-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}.wav`);
+    if (!isInsideDirectory(targetPath, speakerAudioDir)) {
+        throw new Error('Invalid speaker audio target path.');
+    }
+
+    await copyFile(selectedPath, targetPath);
+    return targetPath;
+}
+
+async function cleanupExtractionArtifacts(input: {
+    uploadPath: string;
+    rawAudioPath: string;
+    analysisPath: string;
+}): Promise<void> {
+    const { uploadDir } = getCosyVoicePaths();
+    await removeSafeFile(input.uploadPath, uploadDir);
+}
+
+async function removeSafeFile(path: string, root: string): Promise<void> {
+    const resolved = resolve(path);
+    if (!isInsideDirectory(resolved, root)) {
+        return;
+    }
+    await rm(resolved, { force: true }).catch(() => undefined);
+}
+
+async function cleanupMaterialExtraction(sourceAudioPath: string): Promise<void> {
+    const { dataDir } = getCosyVoicePaths();
+    const source = resolve(sourceAudioPath);
+    if (!isInsideDirectory(source, dataDir)) {
+        return;
+    }
+
+    const jobId = findJobId(source);
+    if (!jobId) {
+        return;
+    }
+
+    await removeMaterialJobArtifacts(jobId);
+}
+
+function findJobId(path: string): string | null {
+    for (const part of resolve(path).split(/[\\/]+/u)) {
+        if (part.startsWith('job-')) {
+            return part;
+        }
+    }
+    return null;
+}
+
+async function removeMaterialJobArtifacts(jobId: string): Promise<void> {
+    const {
+        materialJobsDir,
+        rawAudioDir,
+        vocalAudioDir,
+        slicedAudioDir,
+        candidateTextDir,
+        traceDir,
+    } = getCosyVoicePaths();
+    const roots = [materialJobsDir, rawAudioDir, vocalAudioDir, slicedAudioDir, candidateTextDir, traceDir];
+    await Promise.all(roots.map(root => {
+        const target = resolve(root, jobId);
+        return isInsideDirectory(target, root)
+            ? rm(target, { recursive: true, force: true }).catch(() => undefined)
+            : Promise.resolve();
+    }));
 }
 
 function validateMediaFile(video: File): void {
@@ -584,7 +805,10 @@ async function createVocalWav(rawAudioPath: string, jobDir: string): Promise<str
     if (!command) {
         throw new Error('UVR5_CMD is not configured. Disable vocal enhancement or configure a UVR5 CLI command.');
     }
-    const vocalPath = join(jobDir, 'vocal.wav');
+    const { vocalAudioDir } = getCosyVoicePaths();
+    const jobId = basename(jobDir);
+    const vocalPath = join(vocalAudioDir, jobId, 'vocal.wav');
+    await mkdir(dirname(vocalPath), { recursive: true });
     const parts = command.split(' ').filter(Boolean);
     const executable = parts[0]!;
     const args = parts.slice(1)
@@ -608,8 +832,9 @@ async function exportMaterialCandidates(input: {
     segments: FunASRMaterialSegment[];
     timer?: TaskTimer;
 }): Promise<CosyVoiceMaterialCandidate[]> {
-    const clipsDir = join(input.jobDir, 'clips');
-    const textsDir = join(input.jobDir, 'texts');
+    const { slicedAudioDir, candidateTextDir } = getCosyVoicePaths();
+    const clipsDir = join(slicedAudioDir, input.jobId);
+    const textsDir = join(candidateTextDir, input.jobId);
     await mkdir(clipsDir, { recursive: true });
     await mkdir(textsDir, { recursive: true });
 
@@ -632,22 +857,43 @@ async function exportMaterialCandidates(input: {
         const textPath = join(textsDir, textName);
         await cutWavWithFfmpeg(input.sourceAudioPath, audioPath, segment.start_ms, segment.end_ms);
         const verifiedText = normalizeTranscript(await funasrService.transcribe(audioPath)) || segment.text;
+        const qualityScore = await scorePromptQuality(audioPath).catch(() => undefined);
         await writeFile(textPath, `${verifiedText}\n`, 'utf8');
         input.timer?.mark('candidate_cut', '候选切片复核', cutStartedAt, clipName);
-        candidates.push({
+        const candidate: CosyVoiceMaterialCandidate = {
             id: `${input.jobId}-${index + 1}`,
             speaker: segment.spk,
             startMs: segment.start_ms,
             endMs: segment.end_ms,
             durationMs: segment.durationMs,
             text: verifiedText,
-            quality: segment.score >= 0.78 ? 'high' : 'medium',
+            quality: (qualityScore?.score ?? segment.score * 100) >= 78 ? 'high' : 'medium',
             reasons: segment.reasons,
             score: segment.score,
+            qualityScore,
             audioPath,
             audioUrl: toCosyVoiceAudioUrl(audioPath),
             textPath,
             source: input.source,
+        };
+        candidates.push(candidate);
+        await registerVoiceAssetFile({
+            kind: 'candidate',
+            sourcePath: audioPath,
+            copy: false,
+            assetId: createVoiceAssetId('candidate'),
+            metadata: {
+                jobId: input.jobId,
+                speaker: segment.spk,
+                source: input.source,
+                sourceAudioPath: input.sourceAudioPath,
+                text: verifiedText,
+                startMs: segment.start_ms,
+                endMs: segment.end_ms,
+                durationMs: segment.durationMs,
+                rankScore: segment.score,
+                qualityScore,
+            },
         });
     }
 
@@ -789,11 +1035,20 @@ async function writeMetadata(jobDir: string, candidates: CosyVoiceMaterialCandid
 }
 
 async function writeTrace(jobDir: string, rows: unknown[]): Promise<void> {
-    await writeFile(join(jobDir, 'trace.jsonl'), `${rows.map(row => JSON.stringify(row)).join('\n')}\n`, 'utf8');
+    const { traceDir } = getCosyVoicePaths();
+    const targetPath = join(traceDir, basename(jobDir), 'trace.jsonl');
+    await mkdir(dirname(targetPath), { recursive: true });
+    await writeFile(targetPath, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`, 'utf8');
 }
 
 function toCosyVoiceAudioUrl(audioPath: string): string {
-    const relativePath = relative(COSYVOICE_DATA_DIR, audioPath);
+    const { dataDir } = getCosyVoicePaths();
+    const resolvedAudioPath = resolve(audioPath);
+    let relativePath = relative(dataDir, resolvedAudioPath);
+    const assetRoot = getVoiceAssetsDataRoot();
+    if (isInsideDirectory(resolvedAudioPath, assetRoot)) {
+        relativePath = `voice-assets/${relative(assetRoot, resolvedAudioPath)}`;
+    }
     return `/api/voice/cosyvoice/audio/${encodeURIComponent(relativePath)}`;
 }
 
@@ -841,7 +1096,7 @@ function cutWavWithFfmpeg(inputPath: string, outputPath: string, startMs: number
 
 function normalizeSaveInput(input: CosyVoiceSaveInput): CosyVoiceSaveInput {
     const provider = input.provider === 'say' ? 'say' : 'cosyvoice';
-    const baseUrl = input.baseUrl.trim() || 'http://localhost:50000';
+    const baseUrl = input.baseUrl.trim() || GLOBAL_CONFIG.VOICE.COSYVOICE_BASE_URL;
     const endpoint = input.endpoint.trim() || '/inference_zero_shot';
     const promptText = input.promptText.trim();
     const speakerName = input.speakerName.trim() || '默认音色';
@@ -868,11 +1123,12 @@ function normalizeSaveInput(input: CosyVoiceSaveInput): CosyVoiceSaveInput {
 }
 
 async function readSpeakerProfiles(): Promise<CosyVoiceSpeakerProfile[]> {
-    if (!existsSync(SPEAKERS_PATH)) {
+    const { speakersPath } = getCosyVoicePaths();
+    if (!existsSync(speakersPath)) {
         return [];
     }
 
-    const content = await readFile(SPEAKERS_PATH, 'utf8');
+    const content = await readFile(speakersPath, 'utf8');
     const parsed = JSON.parse(content) as unknown;
     if (!Array.isArray(parsed)) {
         return [];
@@ -882,8 +1138,9 @@ async function readSpeakerProfiles(): Promise<CosyVoiceSpeakerProfile[]> {
 }
 
 async function writeSpeakerProfiles(speakers: CosyVoiceSpeakerProfile[]): Promise<void> {
-    await mkdir(COSYVOICE_DATA_DIR, { recursive: true });
-    await writeFile(SPEAKERS_PATH, `${JSON.stringify(speakers, null, 2)}\n`, 'utf8');
+    const { dataDir, speakersPath } = getCosyVoicePaths();
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(speakersPath, `${JSON.stringify(speakers, null, 2)}\n`, 'utf8');
 }
 
 async function upsertSpeakerProfile(input: {
@@ -897,12 +1154,15 @@ async function upsertSpeakerProfile(input: {
     const existingIndex = input.speakerId
         ? speakers.findIndex(item => item.id === input.speakerId)
         : -1;
-    const existing = existingIndex >= 0 ? speakers[existingIndex] : null;
+    const existing = existingIndex >= 0 ? speakers[existingIndex] ?? null : null;
     const speaker: CosyVoiceSpeakerProfile = {
         id: existing?.id ?? createSpeakerId(input.speakerName),
         name: input.speakerName,
         promptAudioPath: input.promptAudioPath,
         promptText: input.promptText,
+        promptList: mergePromptList(existing, input.promptAudioPath, input.promptText),
+        benchmarkResults: existing?.benchmarkResults ?? [],
+        cachedResponses: existing?.cachedResponses ?? [],
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
     };
@@ -916,12 +1176,63 @@ async function upsertSpeakerProfile(input: {
     return speaker;
 }
 
+function mergePromptList(
+    existing: CosyVoiceSpeakerProfile | null,
+    promptAudioPath: string,
+    promptText: string,
+): NonNullable<CosyVoiceSpeakerProfile['promptList']> {
+    const now = new Date().toISOString();
+    const current = existing?.promptList ?? [];
+    const withoutDuplicate = current.filter(item => item.audioPath !== promptAudioPath);
+    return [
+        {
+            id: safeVoiceAssetName(`${basename(promptAudioPath)}-${Date.now().toString(36)}`),
+            audioPath: promptAudioPath,
+            text: promptText,
+            createdAt: now,
+        },
+        ...withoutDuplicate,
+    ];
+}
+
+async function registerSpeakerVoiceAsset(speaker: CosyVoiceSpeakerProfile): Promise<void> {
+    const promptAsset = await registerVoiceAssetFile({
+        kind: 'speaker_prompt',
+        sourcePath: speaker.promptAudioPath,
+        copy: false,
+        assetId: `speaker-prompt-${speaker.id}`,
+        metadata: {
+            speakerId: speaker.id,
+            speakerName: speaker.name,
+            promptText: speaker.promptText,
+        },
+    });
+    await upsertVoiceSpeakerProfile({
+        speakerId: speaker.id,
+        speakerName: speaker.name,
+        promptList: [
+            promptAsset.id,
+            ...(speaker.promptList ?? [])
+                .map(prompt => prompt.id)
+                .filter(id => id !== promptAsset.id),
+        ],
+        benchmarkResults: speaker.benchmarkResults ?? [],
+        cachedResponses: speaker.cachedResponses ?? [],
+        createdAt: speaker.createdAt,
+        updatedAt: speaker.updatedAt,
+        metadata: {
+            activePromptAudioPath: speaker.promptAudioPath,
+            activePromptText: speaker.promptText,
+        },
+    });
+}
+
 async function cacheSpeakerInCosyVoiceService(baseUrl: string, speakerId: string, promptText: string, promptAudioPath: string): Promise<void> {
     if (countPromptTextChars(promptText) < MIN_PROMPT_TEXT_CHARS) {
         throw new Error(`promptText must contain at least ${MIN_PROMPT_TEXT_CHARS} spoken characters for MLX zero-shot voice cloning.`);
     }
 
-    const url = new URL('/speaker/cache', normalizeLocalBaseUrl(baseUrl.trim() || 'http://localhost:50000'));
+    const url = new URL('/speaker/cache', normalizeLocalBaseUrl(baseUrl.trim() || GLOBAL_CONFIG.VOICE.COSYVOICE_BASE_URL));
     const form = new FormData();
     form.set('zero_shot_spk_id', speakerId);
     form.set('prompt_text', promptText);
@@ -1092,11 +1403,12 @@ function parseYtDlpFormat(value: unknown, sourceUrl: string): YtDlpAudioFormat |
 }
 
 async function findDownloadedSourcePath(id: string): Promise<string> {
-    const entries = await readdir(UPLOAD_DIR);
+    const { uploadDir } = getCosyVoicePaths();
+    const entries = await fs.readdir(uploadDir);
     const candidates = entries
         .filter(entry => entry.startsWith(`source-${id}.`))
-        .map(entry => resolve(UPLOAD_DIR, entry))
-        .filter(path => isInsideDirectory(path, UPLOAD_DIR));
+        .map(entry => resolve(uploadDir, entry))
+        .filter(path => isInsideDirectory(path, uploadDir));
     if (candidates.length === 0) {
         throw new Error('yt-dlp did not produce a downloadable audio file.');
     }
