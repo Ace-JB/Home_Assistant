@@ -1,6 +1,7 @@
 import { Database } from 'bun:sqlite';
-import { existsSync, mkdirSync, readFileSync } from 'fs';
+import { mkdirSync } from 'fs';
 import { dirname, join } from 'path';
+import { getDataDbDir } from '@/server/services/runtime-paths';
 
 export interface UserRecord {
   name: string;
@@ -16,9 +17,8 @@ type FaceRecordRow = {
   updated_at: string;
 };
 
-const DB_DIR = join(process.cwd(), 'src', 'server', 'db');
+const DB_DIR = getDataDbDir();
 const SQLITE_DB_PATH = join(DB_DIR, 'face_db.sqlite');
-const LEGACY_JSON_DB_PATH = join(DB_DIR, 'face_db.json');
 
 export class FaceDatabase {
   private readonly sqlite: Database;
@@ -29,9 +29,6 @@ export class FaceDatabase {
     this.sqlite.run('PRAGMA journal_mode = WAL');
     this.sqlite.run('PRAGMA foreign_keys = ON');
     this.init();
-    if (dbPath === SQLITE_DB_PATH) {
-      this.migrateLegacyJson();
-    }
     console.log(`📖 已加载 ${this.count()} 个已知成员`);
   }
 
@@ -124,21 +121,6 @@ export class FaceDatabase {
 
     console.log(existing ? `💾 已更新 ${name} 的存量特征` : `💾 已将新成员 ${name} 录入`);
     return this.get(name)!;
-  }
-
-  private migrateLegacyJson(): void {
-    if (this.count() > 0 || !existsSync(LEGACY_JSON_DB_PATH)) return;
-
-    const legacyRecords = JSON.parse(readFileSync(LEGACY_JSON_DB_PATH, 'utf-8')) as Array<{
-      name: string;
-      descriptor: number[];
-    }>;
-
-    for (const record of legacyRecords) {
-      if (record.name && Array.isArray(record.descriptor)) {
-        this.upsert(record.name, record.descriptor);
-      }
-    }
   }
 
   private serializeDescriptor(descriptor: Float32Array | number[]): string {
