@@ -1,20 +1,20 @@
 # Home Assistant - Sentinel
 
 <!-- TEST_REPORT_START -->
-# Performance Snapshot (June 1, 2026) ✅
+# Performance Snapshot (June 9, 2026) ✅
 
-The system has been verified with **91 automated tests**. Below are the latest local performance metrics from the server test suite:
+The system has been verified with **160 automated tests**. Below are the latest local performance metrics from the server test suite:
 
 | Component | Operation | Duration | Note |
 | :--- | :--- | :--- | :--- |
-| **Async_Voice_Video** | `safeSave` | **120.61 ms** | Optimized MP4 synthesis |
-| **FaceEngine** | `extractDescriptor` | **153.41 ms** | Per-face feature extraction |
-| **FaceEngine** | `loadModels` | **283.29 ms** | One-time startup / warmup |
-| **FaceEngine** | `recognizeFaces` | **45.27 ms** | Detection plus similarity-based identity check |
-| **Queue** | `push` | **77.29 ms** | Sequential task queue overhead |
+| **Async_Voice_Video** | `safeSave` | **117.34 ms** | Optimized MP4 synthesis |
+| **FaceEngine** | `detectAll.faces` | **390.72 ms** | face-inference |
+| **FaceEngine** | `extractDescriptor` | **45.35 ms** | Per-face feature extraction |
+| **FaceEngine** | `loadModels` | **82.63 ms** | One-time startup / warmup |
+| **Queue** | `push` | **78.43 ms** | Sequential task queue overhead |
 | **Socket** | `calculatePcmLevel` | **<1 ms** | Audio volume analysis |
 | **SyncManager** | `addAudio` | **<1 ms** | Audio buffer push overhead |
-| **SyncManager** | `addVideo` | **1.11 ms** | Frame push overhead |
+| **SyncManager** | `addVideo` | **<1 ms** | Frame push overhead |
 
 Latest verification command:
 
@@ -22,7 +22,7 @@ Latest verification command:
 bun run test
 ```
 
-Result: **88 pass / 0 fail / 295 assertions** across 13 files in **3.16s**.
+Result: **160 pass / 0 fail / 528 assertions** across 26 files in **3.22s**.
 
 Generated reports:
 - `test-report.html`
@@ -46,9 +46,9 @@ Sentinel is a local, privacy-first home monitoring assistant built with Bun, Rea
 bun install
 ```
 
-### 2. Download AI Models
+### 2. Prepare Python Services And Models
 ```bash
-bun run download_models
+bun run python-services:setup
 ```
 
 ### 3. Start Development Server
@@ -83,11 +83,11 @@ bun run dev:audio
 ```
 
 Open:
-- 视频模块启动后，浏览器默认进入 `/demo/video`
-- 语音模块启动后，浏览器默认进入 `/demo/audio`
-- `/demo` - demo 入口页
-- `/demo/video` - 只看 WebRTC 回显 + Human 识别结果
-- `/demo/audio` - 只看语音转文字 + 音量变化 + 历史文本
+- The video module opens `/demo/video` by default.
+- The audio module opens `/demo/audio` by default.
+- `/demo` - demo entry page
+- `/demo/video` - WebRTC preview plus Human detection results
+- `/demo/audio` - speech-to-text, audio level, and transcript history
 
 ### 6. Environment Configuration
 Copy `.env.example` to `.env` when local overrides are needed:
@@ -98,7 +98,44 @@ VITE_SOCKET_URL=ws://localhost:3001/ws/realtime
 VITE_MODEL_BASE_PATH=/models
 SENTINEL_MODEL_TRACE=0
 SENTINEL_MODEL_TRACE_MAX_CHARS=4000
+SENTINEL_TTS_PROVIDER=cosyvoice
+COSYVOICE_BASE_URL=http://localhost:10102
+COSYVOICE_ENDPOINT=/inference_zero_shot
+PYTHON_SERVICES_ROOT=data/python_services
+PYTHON_SERVICES_SCRIPT_ROOT=src/server/python_services
+SENTINEL_DB_DIR=data/db
+SENTINEL_MODEL_BASE_PATH=data/models/server-models
+COSYVOICE_MODEL_DIR=data/python_services/models_cache/cosyvoice/Fun-CosyVoice3-0.5B-2512-4bit
+COSYVOICE_FALLBACK_TO_SAY=0
 ```
+
+You can also keep profile-specific overrides in `.env.development`, `.env.production`, or `.env.test`.
+
+#### CosyVoice TTS
+CosyVoice is the default TTS provider for local voice replies. It runs as a local MLX-backed FastAPI service and keeps macOS `say` available as an optional fallback.
+
+Install the local CosyVoice runtime:
+
+```bash
+bun run python-services:setup cosyvoice
+```
+
+Start or check the service:
+
+```bash
+bun run python-services:start
+bun run python-services:status
+```
+
+Useful environment variables:
+- `SENTINEL_TTS_PROVIDER` - set to `cosyvoice` for MLX CosyVoice or `say` for macOS native speech.
+- `COSYVOICE_BASE_URL` and `COSYVOICE_ENDPOINT` - local service URL and inference endpoint.
+- `PYTHON_SERVICES_ROOT` - runtime root for Python virtual environments, model caches, process ids, and logs.
+- `COSYVOICE_MODEL_DIR` - fixed local MLX model directory, normally `data/python_services/models_cache/cosyvoice/Fun-CosyVoice3-0.5B-2512-4bit`.
+- `COSYVOICE_PROMPT_AUDIO_PATH` and `COSYVOICE_PROMPT_TEXT` - active zero-shot speaker material selected from the voice control UI.
+- `COSYVOICE_FALLBACK_TO_SAY` - set to `1` to fall back to macOS `say` when CosyVoice fails.
+
+The voice control UI can extract speaker material from uploaded media or imported audio URLs. Generated uploads, speaker profiles, trace files, and extracted WAV files are stored under `data/voice`, which is ignored by git because it may contain private voice samples and transcripts.
 
 #### Model Decision Trace Logs
 Set `SENTINEL_MODEL_TRACE=1` only during local debugging to print model prompts, decisions, summaries, and raw outputs:
@@ -162,10 +199,17 @@ The project is structured into modular layers for maximum performance and mainta
 
 ### 🎙️ Voice & Tools (`@server/tools`)
 - **Voice**: Text-to-Speech (TTS) uses the MLX CosyVoice service by default, keeps macOS `say` as fallback, and uses FunASR for transcription.
+- **CosyVoice Material Workflow**: `VoiceControlView` extracts prompt audio and transcript candidates from local uploads or imported audio URLs, saves reusable speaker profiles, and applies the selected profile to the running TTS configuration.
+- **Python Service Scripts**: `bun run python-services:setup`, `bun run python-services:start`, and `bun run python-services:status` manage local FastAPI helpers under `src/server/python_services`.
 - **WebRTC**: Real-time video/audio streaming via WebRTC (UDP).
 - **Frequency Control**: `WiseRelex` (DetectionValve) manages AI inference frequency to optimize CPU usage.
 - **Identity Verification**: Camera recognition context is passed to `HomeBrain` with `identityVerification`, `similarity`, and threshold details before command execution.
 - **Always-on Listening Path**: Voice signal collection and realtime transcription are enabled by default after startup; there is no frontend subtitle toggle gate.
+
+### 📊 Dashboard & Logs (`src/components`, `src/server/services`)
+- **Service Dashboard**: `DashboardView` and `DashboardService` surface runtime health, local service status, and start/stop controls for managed helpers.
+- **Pipeline Logs**: `LogsView` and `PipelineLogService` connect pipeline events, model calls, incidents, and runtime service logs in one review surface.
+- **Environment Loader**: `src/config/loadEnv.ts` loads `.env` plus environment-specific overrides before the app reads runtime configuration.
 
 ---
 
@@ -176,6 +220,8 @@ src/
   components/
     live/                     # Reusable realtime/demo page panels
     MemoryView.tsx            # Conversation and approved-memory management UI
+    LogsView.tsx              # Pipeline, model call, incident, and service log review UI
+    VoiceControlView.tsx      # CosyVoice speaker material extraction and TTS profile UI
   config/                     # Runtime and browser-facing config helpers
   demos/                      # Lightweight pathname-based demo router
   modules/
@@ -185,6 +231,10 @@ src/
     ui/                       # Shared module UI wrappers
   server/
     prompts/                  # Centralized Chinese/English prompt text
+    observability/            # Model trace logging helpers
+    services/                 # Dashboard, FunASR, CosyVoice material, pipeline log, and benchmark services
+    python_services/          # Managed local FastAPI helpers for FunASR, CosyVoice, and MDX
+    scripts/                  # Local maintenance and media helper scripts
     modules/
       brain/                  # Response generation, vision gating, memory injection
       intention/              # Dynamic intent analysis and memory retrieval decisions
@@ -200,6 +250,9 @@ src/
 - [x] Real-time Face Tracking
 - [x] Multi-turn Voice Conversation (15s Wake Window)
 - [x] Startup-time Voice Signal Collection
+- [x] CosyVoice MLX TTS with reusable speaker material profiles
+- [x] Dashboard controls for managed local services
+- [x] Pipeline log, model call, incident, and benchmark review UI
 - [x] Dynamic Intention Analysis with Memory Retrieval Decisions
 - [x] Long-term Memory Retrieval (`semantic`, `recent_recall`, `hybrid`, `none`)
 - [x] Memory Recall + Current-session Follow-up Intent Handling
@@ -215,6 +268,10 @@ src/
 - **FFmpeg Pixel Format Warning**: Expected on macOS `avfoundation`. The system automatically falls back to `uyvy422` with no performance loss.
 - **Microphone Echo**: If the AI hears itself, ensure the `systemSpeaking` lock is enabled in `monitor.ts` (default: ON).
 - **Voice Conversation Not Starting**: Voice transcription is enabled by default after startup. Check FunASR logs and microphone permission first; there is no subtitle switch to enable.
+- **CosyVoice Not Speaking**: Run `bun run python-services:status`, confirm `COSYVOICE_BASE_URL` points to the local service, verify `COSYVOICE_MODEL_DIR` contains `config.json`, and verify the selected prompt audio path is under `data/voice`.
+- **CosyVoice Material Import Fails**: Install or refresh yt-dlp with the voice control UI or `bun run src/server/scripts/install_yt_dlp.ts`, then retry with a direct media URL.
+- **Dashboard Service Won't Start**: Check the service log in `DashboardView`, verify the target binary is installed, and confirm the relevant path is allowed by the local config.
+- **Pipeline Logs Look Empty**: The logs are created when pipeline, model, service, or incident events are recorded; run a normal voice or memory flow first.
 - **Model Initialization**: Ensure `qwen2.5:7b` and `qwen2.5vl:7b` are available in Ollama; normal voice dialogue uses the text model, while vision is on demand.
 - **Face Recognition Mismatch**: If logs show `candidateLabel` but low `similarity`, re-register the member with `bun src/server/scripts/register_face.ts --name master --camera`.
 
@@ -231,6 +288,6 @@ Local maintenance notes:
   - server routes in `src/server/core`
   - long-lived services in `src/server/services`
   - cross-cutting UI flows in `src/components`
-  - Python helper scripts and shell-driven workflows under `src/server/scripts`
+  - managed Python service workflows under `src/server/python_services`
 - If the index becomes stale or locked, use `npx -y @colbymchenry/codegraph unlock .` before reindexing.
 - If you want agent access, run `npx -y @colbymchenry/codegraph install` for the assistant you use locally.

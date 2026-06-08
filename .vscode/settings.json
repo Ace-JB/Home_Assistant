@@ -1,2 +1,38 @@
 {
+  "files.exclude": {
+    "**/.codegraph": true,
+    "**/__pycache__": true,
+    "data/db": true,
+    "data/models": true,
+    "data/python_services/envs": true,
+    "data/python_services/models_cache": true,
+    "data/python_services/run": true,
+    "data/tools": true,
+    "src/server/db/*.sqlite": true,
+    "src/server/db/*.sqlite-shm": true,
+    "src/server/db/*.sqlite-wal": true,
+    "src/server/models": true,
+    "src/server/python_services/envs": true,
+    "src/server/python_services/models_cache": true,
+    "src/server/python_services/run": true,
+    "src/server/tools/bin": true
+  },
+  "search.exclude": {
+    "**/.codegraph": true,
+    "**/__pycache__": true,
+    "data/db": true,
+    "data/models": true,
+    "data/python_services/envs": true,
+    "data/python_services/models_cache": true,
+    "data/python_services/run": true,
+    "data/tools": true,
+    "src/server/db/*.sqlite": true,
+    "src/server/db/*.sqlite-shm": true,
+    "src/server/db/*.sqlite-wal": true,
+    "src/server/models": true,
+    "src/server/python_services/envs": true,
+    "src/server/python_services/models_cache": true,
+    "src/server/python_services/run": true,
+    "src/server/tools/bin": true
+  }
 }
