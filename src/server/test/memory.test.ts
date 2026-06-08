@@ -652,7 +652,7 @@ describe('MemoryDatabase', () => {
     db.close();
   });
 
-  test('should archive the old exchange table before creating the session table', () => {
+  test('should reject old exchange table at runtime instead of auto migrating it', () => {
     const path = createTempPath();
     const sqlite = new Database(path);
     sqlite.run(`
@@ -666,11 +666,17 @@ describe('MemoryDatabase', () => {
     `);
     sqlite.close();
 
-    const db = new MemoryDatabase(path);
-    const session = db.createConversationSession({ conversation_id: 'session-after-migration' });
+    expect(() => new MemoryDatabase(path)).toThrow();
 
-    expect(session.messages).toEqual([]);
-    expect(db.getConversationSession('session-after-migration')?.conversationId).toBe('session-after-migration');
-    db.close();
+    const verify = new Database(path);
+    const archived = verify
+      .query<{ count: number }, []>(`
+        SELECT COUNT(*) AS count
+        FROM sqlite_master
+        WHERE type = 'table' AND name LIKE 'conversations_exchange_%'
+      `)
+      .get();
+    expect(archived?.count ?? 0).toBe(0);
+    verify.close();
   });
 });
