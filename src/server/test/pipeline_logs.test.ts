@@ -339,6 +339,195 @@ describe('PipelineLogService', () => {
         expect(service.getPipelineDetail('funasr')).toBeNull();
     });
 
+    test('merges CosyVoice TTS chunk queue, generation, and playback events into one lifecycle event', () => {
+        const service = new PipelineLogService();
+        service.startPipeline({
+            id: 'pipe-tts-merge',
+            kind: 'conversation',
+            title: 'Conversation pipeline',
+            conversationId: 'conversation-tts-merge',
+        });
+
+        service.appendOrMergeTtsChunkEvent({
+            category: 'voice-tts',
+            level: 'info',
+            title: 'TTS request queue turn',
+            message: '明天的天气预报显示多云，',
+            timings: [
+                { key: 'queue_wait', label: '请求排队等待', durationMs: 1 },
+                { key: 'queue_run', label: '请求队列执行', durationMs: 6480 },
+            ],
+            metadata: {
+                chunkId: 1,
+                conversationId: 'conversation-tts-merge',
+                logGroupId: 'pipe-tts-merge',
+                chars: 12,
+                text: '明天的天气预报显示多云，',
+            },
+            pipelineId: 'pipe-tts-merge',
+        });
+        service.appendOrMergeTtsChunkEvent({
+            category: 'voice-tts',
+            level: 'info',
+            title: 'TTS chunk generated',
+            message: '明天的天气预报显示多云，',
+            timings: [{ key: 'cosyvoice_request', label: 'CosyVoice 生成', durationMs: 6478 }],
+            metadata: {
+                chunkId: 1,
+                conversationId: 'conversation-tts-merge',
+                logGroupId: 'pipe-tts-merge',
+                inferenceMs: 6478,
+                readyMs: 2,
+                wavBytes: 125324,
+                text: '明天的天气预报显示多云，',
+            },
+            pipelineId: 'pipe-tts-merge',
+        });
+        service.appendOrMergeTtsChunkEvent({
+            category: 'voice-tts',
+            level: 'info',
+            title: 'TTS chunk played',
+            message: '明天的天气预报显示多云，',
+            timings: [{ key: 'afplay_playback', label: 'afplay 播放', durationMs: 3507 }],
+            metadata: {
+                chunkId: 1,
+                conversationId: 'conversation-tts-merge',
+                logGroupId: 'pipe-tts-merge',
+                audioDurationMs: 2610,
+                text: '明天的天气预报显示多云，',
+            },
+            pipelineId: 'pipe-tts-merge',
+        });
+
+        const detail = service.getPipelineDetail('pipe-tts-merge');
+        expect(detail?.events).toHaveLength(1);
+        expect(detail?.events[0]?.title).toBe('TTS chunk lifecycle');
+        expect(detail?.events[0]?.message).toBe('明天的天气预报显示多云，');
+        expect(detail?.events[0]?.timings?.map(timing => timing.key)).toEqual([
+            'queue_wait',
+            'queue_run',
+            'cosyvoice_request',
+            'afplay_playback',
+        ]);
+        expect(detail?.events[0]?.timings?.map(timing => timing.detail)).toEqual([
+            'TTS request queue turn',
+            'TTS request queue turn',
+            'TTS chunk generated',
+            'TTS chunk played',
+        ]);
+        expect((detail?.events[0]?.metadata as { inferenceMs?: number; playMs?: number } | undefined)?.inferenceMs).toBe(6478);
+        expect((detail?.events[0]?.metadata as { inferenceMs?: number; playMs?: number } | undefined)?.playMs).toBe(3507);
+    });
+
+    test('keeps different TTS chunks and wake acknowledgement events separate', () => {
+        const service = new PipelineLogService();
+        service.startPipeline({
+            id: 'pipe-tts-separate',
+            kind: 'conversation',
+            title: 'Conversation pipeline',
+            conversationId: 'conversation-tts-separate',
+        });
+
+        for (const chunkId of [1, 2]) {
+            service.appendOrMergeTtsChunkEvent({
+                category: 'voice-tts',
+                title: 'TTS request queue turn',
+                message: `chunk ${chunkId}`,
+                timings: [{ key: 'queue_wait', label: '请求排队等待', durationMs: chunkId }],
+                metadata: {
+                    chunkId,
+                    conversationId: 'conversation-tts-separate',
+                    logGroupId: 'pipe-tts-separate',
+                    text: `chunk ${chunkId}`,
+                },
+                pipelineId: 'pipe-tts-separate',
+            });
+        }
+        service.appendOrMergeTtsChunkEvent({
+            category: 'voice-tts',
+            title: 'wake_ack.completed',
+            message: 'Wake acknowledgement finished.',
+            timings: [{ key: 'wake_ack_total', label: '唤醒应答总耗时', durationMs: 1200 }],
+            metadata: {
+                conversationId: 'conversation-tts-separate',
+                text: '我在呢',
+            },
+            pipelineId: 'pipe-tts-separate',
+        });
+
+        const detail = service.getPipelineDetail('pipe-tts-separate');
+        expect(detail?.events.map(event => event.message)).toEqual(['chunk 1', 'chunk 2', 'Wake acknowledgement finished.']);
+        expect(detail?.events.map(event => event.title)).toEqual(['TTS chunk lifecycle', 'TTS chunk lifecycle', 'wake_ack.completed']);
+    });
+
+    test('aggregates legacy raw CosyVoice TTS chunk events when reading pipeline detail', () => {
+        const service = new PipelineLogService();
+        service.startPipeline({
+            id: 'pipe-tts-legacy',
+            kind: 'conversation',
+            title: 'Conversation pipeline',
+            conversationId: 'conversation-tts-legacy',
+        });
+
+        service.append({
+            category: 'voice-tts',
+            level: 'info',
+            title: 'TTS request queue turn',
+            message: '明天的天气预报显示多云，',
+            timings: [
+                { key: 'queue_wait', label: '请求排队等待', durationMs: 1 },
+                { key: 'queue_run', label: '请求队列执行', durationMs: 6480 },
+            ],
+            metadata: {
+                chunkId: 1,
+                conversationId: 'conversation-tts-legacy',
+                logGroupId: 'pipe-tts-legacy',
+                text: '明天的天气预报显示多云，',
+            },
+            pipelineId: 'pipe-tts-legacy',
+        });
+        service.append({
+            category: 'voice-tts',
+            level: 'info',
+            title: 'TTS chunk generated',
+            message: '明天的天气预报显示多云，',
+            timings: [{ key: 'cosyvoice_request', label: 'CosyVoice 生成', durationMs: 6478 }],
+            metadata: {
+                chunkId: 1,
+                conversationId: 'conversation-tts-legacy',
+                logGroupId: 'pipe-tts-legacy',
+                inferenceMs: 6478,
+                text: '明天的天气预报显示多云，',
+            },
+            pipelineId: 'pipe-tts-legacy',
+        });
+        service.append({
+            category: 'voice-tts',
+            level: 'info',
+            title: 'TTS chunk played',
+            message: '明天的天气预报显示多云，',
+            timings: [{ key: 'afplay_playback', label: 'afplay 播放', durationMs: 3507 }],
+            metadata: {
+                chunkId: 1,
+                conversationId: 'conversation-tts-legacy',
+                logGroupId: 'pipe-tts-legacy',
+                text: '明天的天气预报显示多云，',
+            },
+            pipelineId: 'pipe-tts-legacy',
+        });
+
+        expect(service.listEvents({ pipelineId: 'pipe-tts-legacy', limit: 10 })).toHaveLength(3);
+        const detail = service.getPipelineDetail('pipe-tts-legacy');
+        expect(detail?.events).toHaveLength(1);
+        expect(detail?.events[0]?.title).toBe('TTS chunk lifecycle');
+        expect(detail?.events[0]?.timings?.map(timing => timing.key)).toEqual([
+            'queue_wait',
+            'queue_run',
+            'cosyvoice_request',
+            'afplay_playback',
+        ]);
+    });
+
     test('records incidents for review', () => {
         const service = new PipelineLogService();
         service.startPipeline({

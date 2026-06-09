@@ -251,6 +251,13 @@ type RuntimeLogInput = {
     conversationId?: string;
 };
 
+type TtsChunkMergeKey = {
+    key: string;
+    pipelineId: string;
+    chunkId: string;
+    text: string;
+};
+
 const DEFAULT_MAX_EVENTS = 50_000;
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
@@ -260,6 +267,12 @@ const SQLITE_PIPELINE_LOG_DB_PATH = process.env.NODE_ENV === 'test'
     : join(DB_DIR, 'pipeline-logs.sqlite');
 
 const LEVEL_RANK: Record<PipelineEventLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 };
+const TTS_CHUNK_LIFECYCLE_TITLE = 'TTS chunk lifecycle';
+const TTS_CHUNK_EVENT_TITLES = new Set([
+    'TTS request queue turn',
+    'TTS chunk generated',
+    'TTS chunk played',
+]);
 
 export class PipelineLogService {
     private readonly sqlite: Database;
@@ -275,6 +288,41 @@ export class PipelineLogService {
 
     append(input: RuntimeLogInput): PipelineEvent | null {
         return this.appendRuntimeEvent(input);
+    }
+
+    appendOrMergeTtsChunkEvent(input: RuntimeLogInput): PipelineEvent | null {
+        const mergeKey = getTtsChunkMergeKey(input);
+        if (!mergeKey) return this.appendRuntimeEvent(input);
+        const eventInput = this.toTtsChunkLifecycleEventInput(input, mergeKey);
+        const existing = this.findTtsChunkLifecycleEvent(mergeKey);
+        if (!existing) return this.appendEvent(eventInput);
+        const merged = mergeTtsChunkLifecycleEvents(existing, eventInput);
+        this.sqlite
+            .query(`
+                UPDATE pipeline_events
+                SET ts = $ts,
+                    level = $level,
+                    event_type = $eventType,
+                    title = $title,
+                    message = $message,
+                    detail = $detail,
+                    timings_json = $timingsJson,
+                    metadata_json = $metadataJson
+                WHERE event_id = $eventId
+            `)
+            .run({
+                $eventId: existing.id,
+                $ts: merged.ts,
+                $level: merged.level,
+                $eventType: merged.eventType,
+                $title: merged.title,
+                $message: merged.message ?? null,
+                $detail: merged.detail ?? null,
+                $timingsJson: stringifyJson(merged.timings ?? null),
+                $metadataJson: stringifyJson(merged.metadata ?? null),
+            });
+        this.refreshPipelineSeverity(existing.pipelineId);
+        return this.getEvent(existing.id) ?? merged;
     }
 
     startPipeline(input: PipelineRunInput): PipelineRun {
@@ -736,10 +784,19 @@ export class PipelineLogService {
     getPipelineDetail(pipelineId: string): PipelineDetail | null {
         const run = this.getPipeline(pipelineId);
         if (!run) return null;
+        const events = aggregateTtsChunkLifecycleEvents(this.listEvents({ pipelineId, limit: MAX_LIMIT }).reverse());
         return {
             ...run,
-            events: this.listEvents({ pipelineId, limit: MAX_LIMIT }).reverse(),
+            eventCount: events.length,
+            events,
         };
+    }
+
+    getEvent(eventId: string): PipelineEvent | null {
+        const row = this.sqlite
+            .query<PipelineEventRow, [string]>('SELECT * FROM pipeline_events WHERE event_id = ?')
+            .get(eventId);
+        return row ? rowToEvent(row) : null;
     }
 
     getModelCall(modelCallId: string): ModelCallRecord | null {
@@ -981,6 +1038,42 @@ export class PipelineLogService {
             modelCallCount,
         };
     }
+
+    private toTtsChunkLifecycleEventInput(input: RuntimeLogInput, mergeKey: TtsChunkMergeKey): PipelineEventInput {
+        const metadata = getRecord(input.metadata);
+        const timings = input.timings?.map(timing => ({
+            ...timing,
+            detail: timing.detail ?? input.title,
+        }));
+        const playbackTiming = input.timings?.find(timing => timing.key === 'afplay_playback');
+        return {
+            id: input.id,
+            ts: input.ts,
+            pipelineId: mergeKey.pipelineId,
+            conversationId: input.conversationId ?? stringValue(metadata.conversationId) ?? stringValue(metadata.conversation_id),
+            stage: 'tts',
+            eventType: eventTypeFromLevel(input.level ?? 'info'),
+            level: input.level ?? 'info',
+            title: TTS_CHUNK_LIFECYCLE_TITLE,
+            message: input.message ?? mergeKey.text,
+            detail: input.detail,
+            timings,
+            metadata: cleanObject({
+                ...metadata,
+                titleParts: [input.title],
+                pipelineKind: 'conversation',
+                ...(playbackTiming ? { playMs: playbackTiming.durationMs } : {}),
+                traceId: input.traceId ?? stringValue(metadata.traceId),
+            }),
+        };
+    }
+
+    private findTtsChunkLifecycleEvent(mergeKey: TtsChunkMergeKey): PipelineEvent | null {
+        const rows = this.sqlite
+            .query<PipelineEventRow, [string]>('SELECT * FROM pipeline_events WHERE pipeline_id = ? AND stage = \'tts\' ORDER BY ts DESC, rowid DESC LIMIT 100')
+            .all(mergeKey.pipelineId);
+        return rows.map(rowToEvent).find(event => getTtsChunkMergeKeyFromEvent(event)?.key === mergeKey.key) ?? null;
+    }
 }
 
 export const pipelineLogs = new PipelineLogService();
@@ -1095,6 +1188,135 @@ function rowToIncident(row: IncidentRow): PipelineIncident {
         ...(row.metadata_json ? { metadata: parseJson(row.metadata_json) } : {}),
         ...(row.summary !== null ? { summary: row.summary } : {}),
     };
+}
+
+function aggregateTtsChunkLifecycleEvents(events: PipelineEvent[]): PipelineEvent[] {
+    const output: PipelineEvent[] = [];
+    const indexByKey = new Map<string, number>();
+    for (const event of events) {
+        const mergeKey = getTtsChunkMergeKeyFromEvent(event);
+        if (!mergeKey) {
+            output.push(event);
+            continue;
+        }
+        const lifecycleEvent = toTtsChunkLifecycleEvent(event, mergeKey);
+        const existingIndex = indexByKey.get(mergeKey.key);
+        if (existingIndex === undefined) {
+            indexByKey.set(mergeKey.key, output.length);
+            output.push(lifecycleEvent);
+            continue;
+        }
+        output[existingIndex] = mergeTtsChunkLifecycleEvents(output[existingIndex]!, lifecycleEvent);
+    }
+    return output;
+}
+
+function toTtsChunkLifecycleEvent(event: PipelineEvent, mergeKey: TtsChunkMergeKey): PipelineEvent {
+    if (event.title === TTS_CHUNK_LIFECYCLE_TITLE) return event;
+    const metadata = getRecord(event.metadata);
+    return {
+        ...event,
+        title: TTS_CHUNK_LIFECYCLE_TITLE,
+        message: event.message ?? mergeKey.text,
+        timings: event.timings?.map(timing => ({
+            ...timing,
+            detail: timing.detail ?? event.title,
+        })),
+        metadata: boundedMetadata(cleanObject({
+            ...metadata,
+            titleParts: [event.title],
+            ...(event.timings?.find(timing => timing.key === 'afplay_playback') ? { playMs: event.timings.find(timing => timing.key === 'afplay_playback')?.durationMs } : {}),
+        })),
+    };
+}
+
+function mergeTtsChunkLifecycleEvents(existing: PipelineEvent, next: PipelineEventInput | PipelineEvent): PipelineEvent {
+    const existingMetadata = getRecord(existing.metadata);
+    const nextMetadata = getRecord(next.metadata);
+    const titleParts = mergeStringLists(existingMetadata.titleParts, nextMetadata.titleParts);
+    const mergedMetadata = boundedMetadata(cleanObject({
+        ...existingMetadata,
+        ...nextMetadata,
+        titleParts,
+    }));
+    return {
+        ...existing,
+        ts: Math.max(existing.ts, next.ts ?? existing.ts),
+        eventType: highestEventType(existing.eventType, next.eventType),
+        level: highestLevel(existing.level, next.level ?? 'info'),
+        title: TTS_CHUNK_LIFECYCLE_TITLE,
+        message: existing.message ?? next.message,
+        detail: existing.detail ?? next.detail,
+        timings: mergeTimings(existing.timings, next.timings),
+        metadata: mergedMetadata,
+    };
+}
+
+function getTtsChunkMergeKey(input: RuntimeLogInput): TtsChunkMergeKey | null {
+    if (input.category !== 'voice-tts' || !TTS_CHUNK_EVENT_TITLES.has(input.title)) return null;
+    const metadata = getRecord(input.metadata);
+    const pipelineId = input.pipelineId ?? stringValue(metadata.logGroupId) ?? stringValue(metadata.pipelineId);
+    const chunkId = metadata.chunkId;
+    const text = stringValue(metadata.text) ?? input.message;
+    if (!pipelineId || (typeof chunkId !== 'string' && typeof chunkId !== 'number') || !text) return null;
+    return createTtsChunkMergeKey(pipelineId, String(chunkId), text);
+}
+
+function getTtsChunkMergeKeyFromEvent(event: PipelineEvent): TtsChunkMergeKey | null {
+    if (event.stage !== 'tts' || (event.title !== TTS_CHUNK_LIFECYCLE_TITLE && !TTS_CHUNK_EVENT_TITLES.has(event.title))) return null;
+    const metadata = getRecord(event.metadata);
+    const pipelineId = event.pipelineId;
+    const chunkId = metadata.chunkId;
+    const text = stringValue(metadata.text) ?? event.message;
+    if (!pipelineId || (typeof chunkId !== 'string' && typeof chunkId !== 'number') || !text) return null;
+    return createTtsChunkMergeKey(pipelineId, String(chunkId), text);
+}
+
+function createTtsChunkMergeKey(pipelineId: string, chunkId: string, text: string): TtsChunkMergeKey {
+    return {
+        key: `${pipelineId}\u0000${chunkId}\u0000${text}`,
+        pipelineId,
+        chunkId,
+        text,
+    };
+}
+
+function mergeTimings(existing: TaskTiming[] | undefined, next: TaskTiming[] | undefined): TaskTiming[] | undefined {
+    const merged = new Map<string, TaskTiming>();
+    for (const timing of [...(existing ?? []), ...(next ?? [])]) {
+        const key = `${timing.detail ?? ''}\u0000${timing.key}`;
+        merged.set(key, timing);
+    }
+    const timings = [...merged.values()];
+    return timings.length ? timings.sort((left, right) => timingOrder(left) - timingOrder(right)) : undefined;
+}
+
+function timingOrder(timing: TaskTiming): number {
+    const title = timing.detail ?? '';
+    if (title === 'TTS request queue turn') {
+        return timing.key === 'queue_wait' ? 10 : timing.key === 'queue_run' ? 11 : 19;
+    }
+    if (title === 'TTS chunk generated') return 20;
+    if (title === 'TTS chunk played') return 30;
+    return 100;
+}
+
+function mergeStringLists(existing: unknown, next: unknown): string[] {
+    const values = [
+        ...(Array.isArray(existing) ? existing : []),
+        ...(Array.isArray(next) ? next : []),
+    ].filter((value): value is string => typeof value === 'string' && value.length > 0);
+    return [...new Set(values)];
+}
+
+function highestLevel(left: PipelineEventLevel, right: PipelineEventLevel): PipelineEventLevel {
+    return LEVEL_RANK[right] > LEVEL_RANK[left] ? right : left;
+}
+
+function highestEventType(left: PipelineEventType, right: PipelineEventType): PipelineEventType {
+    if (left === 'stage_failed' || right === 'stage_failed') return 'stage_failed';
+    if (left === 'fallback' || right === 'fallback') return 'fallback';
+    return left;
 }
 
 function stageFromRuntimeCategory(category: string | undefined, title: string): PipelineStage {

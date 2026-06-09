@@ -667,7 +667,7 @@ function speakSingleCosyVoiceChunkInterruptible(text: string, options: SpeechOpt
                 `bytes=${audio.length} wavBytes=${playableAudio.length} sampleRate=${metadata.sampleRate} ` +
                 `channels=${metadata.channels} durationMs=${Math.round(metadata.durationMs)} dataBytes=${metadata.dataBytes}`,
             );
-            pipelineLogs.append({
+            pipelineLogs.appendOrMergeTtsChunkEvent({
                 category: 'voice-tts',
                 level: 'info',
                 title: 'TTS chunk generated',
@@ -714,7 +714,7 @@ function speakSingleCosyVoiceChunkInterruptible(text: string, options: SpeechOpt
             });
             const playMs = Date.now() - playStartedAt;
             console.log(`[TTS:CosyVoice] chunk=${chunkId} play_done playMs=${playMs}`);
-            pipelineLogs.append({
+            pipelineLogs.appendOrMergeTtsChunkEvent({
                 category: 'voice-tts',
                 level: 'info',
                 title: 'TTS chunk played',
@@ -1072,7 +1072,7 @@ function enqueueCosyVoiceAudioRequest(
             const runMs = Date.now() - startedAt;
             console.log(`[TTS:CosyVoice] chunk=${chunkId} request_queue_leave runMs=${runMs}`);
             if (logOptions.logGroupId) {
-                pipelineLogs.append({
+                pipelineLogs.appendOrMergeTtsChunkEvent({
                     category: 'voice-tts',
                     level: signal.aborted ? 'debug' : 'info',
                     title: 'TTS request queue turn',
