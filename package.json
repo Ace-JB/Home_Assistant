@@ -6,10 +6,8 @@
   "scripts": {
     "dev": "NODE_ENV=development bun --hot src/server/core/index.ts",
     "dev:log": "NODE_ENV=development SENTINEL_MODEL_TRACE=1 bun --hot src/server/core/index.ts ",
-    "dev:video": "NODE_ENV=development SENTINEL_DEMO_MODE=video bun --hot src/server/core/index.ts",
-    "dev:audio": "NODE_ENV=development SENTINEL_DEMO_MODE=audio bun --hot src/server/core/index.ts",
     "start": "NODE_ENV=production bun src/server/core/index.ts",
-    "build": "bun run build.ts",
+    "build": "bun build.ts",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun run build",
     "monitor": "NODE_ENV=development bun --watch src/server/core/monitor.ts",

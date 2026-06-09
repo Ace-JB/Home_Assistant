@@ -1,17 +1,17 @@
 # Home Assistant - Sentinel
 
 <!-- TEST_REPORT_START -->
-# Performance Snapshot (June 9, 2026) ✅
+# Performance Snapshot (June 10, 2026) ✅
 
-The system has been verified with **160 automated tests**. Below are the latest local performance metrics from the server test suite:
+The system has been verified with **184 automated tests**. Below are the latest local performance metrics from the server test suite:
 
 | Component | Operation | Duration | Note |
 | :--- | :--- | :--- | :--- |
-| **Async_Voice_Video** | `safeSave` | **117.34 ms** | Optimized MP4 synthesis |
-| **FaceEngine** | `detectAll.faces` | **390.72 ms** | face-inference |
-| **FaceEngine** | `extractDescriptor` | **45.35 ms** | Per-face feature extraction |
-| **FaceEngine** | `loadModels` | **82.63 ms** | One-time startup / warmup |
-| **Queue** | `push` | **78.43 ms** | Sequential task queue overhead |
+| **Async_Voice_Video** | `safeSave` | **129.97 ms** | Optimized MP4 synthesis |
+| **FaceEngine** | `detectAll.faces` | **381.00 ms** | face-inference |
+| **FaceEngine** | `extractDescriptor` | **39.54 ms** | Per-face feature extraction |
+| **FaceEngine** | `loadModels` | **81.74 ms** | One-time startup / warmup |
+| **Queue** | `push` | **77.05 ms** | Sequential task queue overhead |
 | **Socket** | `calculatePcmLevel` | **<1 ms** | Audio volume analysis |
 | **SyncManager** | `addAudio` | **<1 ms** | Audio buffer push overhead |
 | **SyncManager** | `addVideo` | **<1 ms** | Frame push overhead |
@@ -22,7 +22,7 @@ Latest verification command:
 bun run test
 ```
 
-Result: **160 pass / 0 fail / 528 assertions** across 26 files in **3.22s**.
+Result: **184 pass / 0 fail / 643 assertions** across 29 files in **8.94s**.
 
 Generated reports:
 - `test-report.html`
@@ -56,6 +56,20 @@ bun run python-services:setup
 bun dev
 ```
 
+This starts the persistent Web shell only. The Dashboard stays online, but the assistant runtime starts in `stopped` state by default: camera, microphone, realtime socket, WebRTC, FunASR, CosyVoice, and MDX are not started until explicitly requested.
+
+Open the Dashboard at:
+
+```txt
+http://localhost:3000/
+```
+
+Use either entry point to control the backend runtime:
+- Sidebar bottom status button: opens a confirmation dialog before starting or stopping the assistant runtime.
+- Dashboard service card `assistant-runtime`: exposes the same start/stop control for service-oriented troubleshooting.
+
+When the runtime is stopped, Dashboard, logs, memory APIs, and SQLite-backed review surfaces remain available. Live, Memory, Voice, and Logs navigation from the sidebar is gated until the runtime is `running` or `degraded`.
+
 ### 4. Run Verification Suite
 ```bash
 # Run all tests
@@ -69,27 +83,7 @@ bun run typecheck
 bun run build
 ```
 
-### 5. Standalone Module Demos
-Video module only:
-
-```bash
-bun run dev:video
-```
-
-Audio module only:
-
-```bash
-bun run dev:audio
-```
-
-Open:
-- The video module opens `/demo/video` by default.
-- The audio module opens `/demo/audio` by default.
-- `/demo` - demo entry page
-- `/demo/video` - WebRTC preview plus Human detection results
-- `/demo/audio` - speech-to-text, audio level, and transcript history
-
-### 6. Environment Configuration
+### 5. Environment Configuration
 Copy `.env.example` to `.env` when local overrides are needed:
 
 ```bash
@@ -164,20 +158,20 @@ These logs may include user conversation content, approved memories, visual summ
 
 The project is structured into modular layers for maximum performance and maintainability:
 
-### 🧩 Frontend Module Demos (`src/modules`, `src/components/live`, `src/config`)
-- **Error Isolation**: `src/shared/ui/ModuleErrorBoundary.tsx` keeps module crashes from taking down the full UI.
+### 🧩 Frontend Web Shell (`src/components`, `src/components/live`, `src/config`)
+- **Persistent Dashboard Shell**: `bun dev` and `bun start` open the Web shell first; neither command automatically starts camera, microphone, ASR, WebRTC, or Python model services.
+- **Runtime Control Surface**: The Sidebar bottom status button and the Dashboard `assistant-runtime` service card are the explicit start/stop controls for the assistant runtime.
+- **Navigation Gate**: Dashboard remains accessible while the runtime is stopped; Live, Memory, Voice, and Logs navigation is disabled until runtime state becomes `running` or `degraded`.
 - **Config Layer**: `src/config` loads browser/runtime environment values such as API base URL and socket URL.
-- **Reusable Live Panels**: `src/components/live` centralizes demo shells, status cards, audio realtime panels, pipeline info, and shared formatting helpers.
-- **Standalone Verification**: `src/demos/DemoIndex.tsx` acts as a module verification center and `src/demos/DemoRouter.tsx` routes directly to the standalone video/audio demo pages.
-- **Direct Demo Pages**: `src/demos/DemoRouter.tsx` routes to `/demo/video` and `/demo/audio` for split verification of the live view.
+- **Reusable Live Panels**: `src/components/live` centralizes realtime status cards, audio realtime panels, pipeline info, and shared formatting helpers.
 
-### 🎞️ Video Recognition Module (`src/modules/video-recognition`)
-- **Standalone Demo**: `bun run dev:video` starts the video-only runtime and opens `/demo/video`.
-- **Visible Verification Result**: The video demo shows live WebRTC preview and Human detection results from the same realtime pipeline used in the live view.
-
-### 🎙️ Audio ASR Module (`src/modules/audio-asr`)
-- **Audio Companion Demo**: `bun run dev:audio` starts the audio-only runtime and opens `/demo/audio`.
-- **Audio View**: The audio demo shows live speech-to-text output, audio level, and transcript history from the realtime socket.
+### 🧭 Assistant Runtime (`src/server/services/AssistantRuntimeService.ts`)
+- **Runtime States**: `stopped`, `starting`, `running`, `stopping`, `degraded`, and `error` are tracked in memory only; service restart returns to `stopped`.
+- **Minimal Startup**: Runtime start defaults to `minimal`, which starts FunASR, audio monitor / wake ASR, and realtime socket only.
+- **Optional Startup Tools**: The startup dialog can also prewarm CosyVoice TTS, Live / Vision, and MDX voice separation. Choosing Live / Vision promotes that start to `full` so camera, WebRTC, and visual detection start together.
+- **Shutdown Scope**: Runtime stop releases monitor, realtime socket clients/server, WebRTC/UDP resources, and local Python model services while keeping the Web HTTP server, Dashboard APIs, pipeline logs, memory DB, and SQLite handles online.
+- **Failure Semantics**: Python helper failures with a working monitor mark the runtime `degraded`; monitor startup failure marks it `error` and triggers cleanup.
+- **WebRTC Gate**: `/webrtc` returns `409` while runtime is offline, so a browser cannot bypass the master runtime switch.
 
 ### 🧠 Brain & AI (`@modules/brain`)
 - **HomeBrain**: The core logic engine using Ollama with `qwen2.5:7b` for normal voice dialogue and `qwen2.5vl:7b` only for explicit vision requests.
@@ -201,13 +195,13 @@ The project is structured into modular layers for maximum performance and mainta
 - **Voice**: Text-to-Speech (TTS) uses the MLX CosyVoice service by default, keeps macOS `say` as fallback, and uses FunASR for transcription.
 - **CosyVoice Material Workflow**: `VoiceControlView` extracts prompt audio and transcript candidates from local uploads or imported audio URLs, saves reusable speaker profiles, and applies the selected profile to the running TTS configuration.
 - **Python Service Scripts**: `bun run python-services:setup`, `bun run python-services:start`, and `bun run python-services:status` manage local FastAPI helpers under `src/server/python_services`.
-- **WebRTC**: Real-time video/audio streaming via WebRTC (UDP).
+- **WebRTC**: Real-time video/audio streaming via WebRTC (UDP), created lazily only while the assistant runtime is active.
 - **Frequency Control**: `WiseRelex` (DetectionValve) manages AI inference frequency to optimize CPU usage.
 - **Identity Verification**: Camera recognition context is passed to `HomeBrain` with `identityVerification`, `similarity`, and threshold details before command execution.
-- **Always-on Listening Path**: Voice signal collection and realtime transcription are enabled by default after startup; there is no frontend subtitle toggle gate.
+- **Runtime-bound Listening Path**: Voice signal collection and realtime transcription are enabled only after the assistant runtime is started; realtime transcript display has no separate subtitle toggle.
 
 ### 📊 Dashboard & Logs (`src/components`, `src/server/services`)
-- **Service Dashboard**: `DashboardView` and `DashboardService` surface runtime health, local service status, and start/stop controls for managed helpers.
+- **Service Dashboard**: `DashboardView` and `DashboardService` surface four product-level services (`Web Shell`, `Assistant Runtime`, `Voice ASR`, `Live / Vision`) first, with CosyVoice, MDX, FFmpeg, yt-dlp, realtime socket, and WebRTC details folded under advanced dependencies.
 - **Pipeline Logs**: `LogsView` and `PipelineLogService` connect pipeline events, model calls, incidents, and runtime service logs in one review surface.
 - **Environment Loader**: `src/config/loadEnv.ts` loads `.env` plus environment-specific overrides before the app reads runtime configuration.
 
@@ -218,21 +212,21 @@ The project is structured into modular layers for maximum performance and mainta
 ```txt
 src/
   components/
-    live/                     # Reusable realtime/demo page panels
+    live/                     # Reusable realtime page panels
+    Sidebar.tsx               # Runtime status control and navigation gate
+    DashboardView.tsx         # Web shell dashboard and service control surface
     MemoryView.tsx            # Conversation and approved-memory management UI
     LogsView.tsx              # Pipeline, model call, incident, and service log review UI
     VoiceControlView.tsx      # CosyVoice speaker material extraction and TTS profile UI
   config/                     # Runtime and browser-facing config helpers
-  demos/                      # Lightweight pathname-based demo router
-  modules/
-    video-recognition/        # Real-time video demo entry
-    audio-asr/                # Real-time audio ASR demo entry
+  hooks/
+    useAssistantRuntime.ts    # Frontend runtime polling and start/stop actions
   shared/
     ui/                       # Shared module UI wrappers
   server/
     prompts/                  # Centralized Chinese/English prompt text
     observability/            # Model trace logging helpers
-    services/                 # Dashboard, FunASR, CosyVoice material, pipeline log, and benchmark services
+    services/                 # Assistant runtime, Dashboard, FunASR, CosyVoice material, pipeline log, and benchmark services
     python_services/          # Managed local FastAPI helpers for FunASR, CosyVoice, and MDX
     scripts/                  # Local maintenance and media helper scripts
     modules/
@@ -249,7 +243,8 @@ src/
 - [x] WebRTC A/V Synchronization
 - [x] Real-time Face Tracking
 - [x] Multi-turn Voice Conversation (15s Wake Window)
-- [x] Startup-time Voice Signal Collection
+- [x] Web Shell First Startup with Manual Assistant Runtime Control
+- [x] Runtime-bound Voice Signal Collection
 - [x] CosyVoice MLX TTS with reusable speaker material profiles
 - [x] Dashboard controls for managed local services
 - [x] Pipeline log, model call, incident, and benchmark review UI
@@ -258,7 +253,6 @@ src/
 - [x] Memory Recall + Current-session Follow-up Intent Handling
 - [x] Memory Management UI for Sessions and Approved Memories
 - [x] Centralized Prompt Management
-- [x] Standalone Real-time Video and Audio Demo Modes
 - [x] Automated Performance Monitoring
 - [x] Privacy Audit Completed (No hardcoded secrets)
 
@@ -267,9 +261,11 @@ src/
 ## Troubleshooting
 - **FFmpeg Pixel Format Warning**: Expected on macOS `avfoundation`. The system automatically falls back to `uyvy422` with no performance loss.
 - **Microphone Echo**: If the AI hears itself, ensure the `systemSpeaking` lock is enabled in `monitor.ts` (default: ON).
-- **Voice Conversation Not Starting**: Voice transcription is enabled by default after startup. Check FunASR logs and microphone permission first; there is no subtitle switch to enable.
+- **Assistant Runtime Is Offline**: This is the default after starting the Web shell. Use the Sidebar bottom status button or the Dashboard `assistant-runtime` card to start the minimal voice runtime; select Live / Vision or other tools in the startup dialog only when needed.
+- **Voice Conversation Not Starting**: Confirm the assistant runtime is `running` or `degraded`, then check FunASR logs and microphone permission. There is no subtitle switch to enable.
+- **WebRTC Returns 409**: `/webrtc` intentionally rejects connections while assistant runtime is stopped; start the runtime first.
 - **CosyVoice Not Speaking**: Run `bun run python-services:status`, confirm `COSYVOICE_BASE_URL` points to the local service, verify `COSYVOICE_MODEL_DIR` contains `config.json`, and verify the selected prompt audio path is under `data/voice`.
-- **CosyVoice Material Import Fails**: Install or refresh yt-dlp with the voice control UI or `bun run src/server/scripts/install_yt_dlp.ts`, then retry with a direct media URL.
+- **CosyVoice Material Import Fails**: Install or refresh yt-dlp with the voice control UI or `bun run src/server/scripts/install_yt_dlp.ts`, then retry with a direct media URL. yt-dlp reads Chrome cookies by default via `YT_DLP_COOKIES_FROM_BROWSER=chrome`; use values like `chrome:Profile 1` for another Chrome profile, or set it empty to disable browser cookie loading.
 - **Dashboard Service Won't Start**: Check the service log in `DashboardView`, verify the target binary is installed, and confirm the relevant path is allowed by the local config.
 - **Pipeline Logs Look Empty**: The logs are created when pipeline, model, service, or incident events are recorded; run a normal voice or memory flow first.
 - **Model Initialization**: Ensure `qwen2.5:7b` and `qwen2.5vl:7b` are available in Ollama; normal voice dialogue uses the text model, while vision is on demand.

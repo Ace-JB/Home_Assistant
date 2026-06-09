@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RealtimeMessage, BufferedFrame, SubtitleCue, RealtimeState, TranscriptEntry } from '../types/realtime';
 
-export function useRealtimeFeedback(): RealtimeState {
+export function useRealtimeFeedback(enabled = true): RealtimeState {
   const socketRef = useRef<WebSocket | null>(null);
   const frameQueueRef = useRef<BufferedFrame[]>([]);
   const subtitleCuesRef = useRef<SubtitleCue[]>([]);
@@ -23,6 +23,26 @@ export function useRealtimeFeedback(): RealtimeState {
   });
 
   useEffect(() => {
+    if (!enabled) {
+      socketRef.current?.close();
+      socketRef.current = null;
+      frameQueueRef.current = [];
+      subtitleCuesRef.current = [];
+      setState((prev) => ({
+        ...prev,
+        connected: false,
+        clients: 0,
+        frameSrc: null,
+        audioLevel: 0,
+        transcript: '',
+        activeSubtitle: '',
+        voiceSessionMode: 'standby',
+        lastFrameAt: null,
+        visionDetection: null,
+      }));
+      return;
+    }
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const currentPort = Number(window.location.port || (window.location.protocol === 'https:' ? 443 : 80));
     const socketHost = `${window.location.hostname}:${currentPort + 1}`;
@@ -122,7 +142,7 @@ export function useRealtimeFeedback(): RealtimeState {
       socketRef.current = null;
       socket.close();
     };
-  }, []);
+  }, [enabled]);
 
   useEffect(() => {
     const timer = setInterval(() => {

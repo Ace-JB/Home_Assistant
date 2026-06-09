@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import {
+    buildYtDlpArgs,
+    createSafePreviewController,
     isManagedCosyVoiceAudioPath,
     parseFunASRMaterialCandidates,
     parseYtDlpAudioFormats,
@@ -30,7 +32,10 @@ describe('environment config files', () => {
         expect(content).toContain('COSYVOICE_PORT=10102');
         expect(content).toContain('MDX_PORT=10103');
         expect(content).toContain('VOICE_DATA_ROOT=data/voice');
-        expect(content).toContain('COSYVOICE_BASE_URL=http://localhost:10102');
+        expect(content).not.toContain('SENTINEL_DEMO_MODE=');
+        expect(content).not.toContain('COSYVOICE_BASE_URL=http://localhost:10102');
+        expect(content).not.toContain('FUNASR_BASE_URL=http://localhost:10101');
+        expect(content).not.toContain('VOICE_SEPARATION_BASE_URL=http://localhost:10103');
         expect(content).toContain(`COSYVOICE_MODEL_DIR=${COSYVOICE_MODEL_DIR}`);
         expect(content).not.toContain('COSYVOICE_BACKEND=');
         expect(content).not.toContain('COSYVOICE_REPO_URL=');
@@ -41,6 +46,22 @@ describe('environment config files', () => {
         expect(content).toContain('COSYVOICE_PROMPT_TEXT=');
         expect(content).toContain('COSYVOICE_FALLBACK_TO_SAY=0');
         expect(content).toContain('FFMPEG_PATH=');
+    });
+
+    test('should document optional and python-only environment keys in example env', () => {
+        const example = readFileSync('.env.example', 'utf8');
+
+        expect(example).toContain('# FUNASR_BASE_URL=http://localhost:10101');
+        expect(example).toContain('# VOICE_SEPARATION_BASE_URL=http://localhost:10103');
+        expect(example).toContain('# VOICE_SEPARATION_DEVICE=mps');
+        expect(example).toContain('# COSYVOICE_BASE_URL=http://localhost:10102');
+        expect(example).toContain('COSYVOICE_TRIM_SILENCE=1');
+        expect(example).toContain('src/server/python_services/src/cosyvoice_service.py');
+        expect(example).not.toContain('SENTINEL_DEMO_MODE=');
+        expect(example).not.toContain('VOICE_SEPARATION_PROVIDER=');
+        expect(example).not.toContain('VOICE_SEPARATION_LAZY_START=');
+        expect(example).not.toContain('VOICE_SEPARATION_IDLE_TTL_MS=');
+        expect(example).not.toContain('VOICE_SEPARATION_MAX_CONCURRENCY=');
     });
 
     test('should keep CosyVoice runtime on the managed python services surface', () => {
@@ -197,6 +218,50 @@ describe('environment config files', () => {
         expect(formats[0]?.previewUrl).toContain('formatId=140');
     });
 
+    test('should build yt-dlp args with Chrome cookies by default', () => {
+        expect(buildYtDlpArgs(['-J', 'https://example.com/video'])).toEqual([
+            '--cookies-from-browser',
+            'chrome',
+            '-J',
+            'https://example.com/video',
+        ]);
+    });
+
+    test('should allow disabling yt-dlp browser cookies', () => {
+        expect(buildYtDlpArgs(['-J', 'https://example.com/video'], '')).toEqual([
+            '-J',
+            'https://example.com/video',
+        ]);
+    });
+
+    test('should keep custom yt-dlp browser cookie profile as one argument', () => {
+        expect(buildYtDlpArgs(['-J', 'https://example.com/video'], 'chrome:Profile 1')).toEqual([
+            '--cookies-from-browser',
+            'chrome:Profile 1',
+            '-J',
+            'https://example.com/video',
+        ]);
+    });
+
+    test('should reject unsafe yt-dlp browser cookie values', () => {
+        expect(() => buildYtDlpArgs(['-J', 'https://example.com/video'], 'chrome\n--proxy http://bad')).toThrow('YT_DLP_COOKIES_FROM_BROWSER');
+    });
+
+    test('should ignore preview stream events after cancellation closes the controller', () => {
+        const events: string[] = [];
+        const controller = createSafePreviewController({
+            enqueue: () => events.push('enqueue'),
+            close: () => events.push('close'),
+            error: () => events.push('error'),
+        });
+
+        expect(controller.close()).toBe(true);
+        expect(controller.close()).toBe(false);
+        expect(controller.enqueue(Buffer.from('late'))).toBe(false);
+        expect(controller.error(new Error('late'))).toBe(false);
+        expect(events).toEqual(['close']);
+    });
+
     test('should reject unsupported yt-dlp URL schemes before spawning', async () => {
         await expect(probeYtDlpAudioFormats('file:///tmp/video.mp4')).rejects.toThrow('Only http and https URLs are supported.');
     });
@@ -205,5 +270,6 @@ describe('environment config files', () => {
         const env = readFileSync('.env', 'utf8');
 
         expect(env).toContain('YT_DLP_BIN=data/tools/bin/yt-dlp');
+        expect(env).toContain('YT_DLP_COOKIES_FROM_BROWSER=chrome');
     });
 });

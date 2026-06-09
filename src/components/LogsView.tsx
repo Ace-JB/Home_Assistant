@@ -934,9 +934,7 @@ const Timeline: FC<{
                 </div>
               ) : null}
               {event.timings?.length ? (
-                <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-emerald-300">
-                  {event.timings.map(timing => <span key={`${event.id}-${timing.key}`}>{timing.label}: {formatDurationMs(timing.durationMs)}</span>)}
-                </div>
+                <EventTimings eventId={event.id} timings={event.timings} />
               ) : null}
             </div>
           </div>
@@ -945,6 +943,30 @@ const Timeline: FC<{
     </div>
   </div>
 );
+
+const EventTimings: FC<{ eventId: string; timings: TaskTiming[] }> = ({ eventId, timings }) => {
+  const grouped = groupTimingsByDetail(timings);
+  if (!grouped) {
+    return (
+      <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-emerald-300">
+        {timings.map(timing => <span key={`${eventId}-${timing.key}`}>{timing.label}: {formatDurationMs(timing.durationMs)}</span>)}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-2 space-y-1 text-[11px] text-emerald-300">
+      {grouped.map(group => (
+        <div key={`${eventId}-${group.detail}`} className="flex flex-wrap gap-x-3 gap-y-1">
+          <span className="min-w-36 font-semibold text-emerald-200">{group.detail}</span>
+          {group.timings.map(timing => (
+            <span key={`${eventId}-${group.detail}-${timing.key}`}>{timing.label}: {formatDurationMs(timing.durationMs)}</span>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+};
 
 const ModelCallDetailView: FC<{
   detail: ModelCallDetail;
@@ -1164,6 +1186,24 @@ function getTranscriptText(event: PipelineEvent): string | null {
     ?? stringValue(metadata.command)
     ?? stringValue(metadata.rawTranscript)
     ?? null;
+}
+
+function groupTimingsByDetail(timings: TaskTiming[]): Array<{ detail: string; timings: TaskTiming[] }> | null {
+  if (!timings.some(timing => timing.detail)) return null;
+  const groups: Array<{ detail: string; timings: TaskTiming[] }> = [];
+  const indexByDetail = new Map<string, number>();
+  for (const timing of timings) {
+    const detail = timing.detail;
+    if (!detail) return null;
+    const existingIndex = indexByDetail.get(detail);
+    if (existingIndex === undefined) {
+      indexByDetail.set(detail, groups.length);
+      groups.push({ detail, timings: [timing] });
+      continue;
+    }
+    groups[existingIndex]?.timings.push(timing);
+  }
+  return groups;
 }
 
 function getRecord(value: unknown): Record<string, unknown> {

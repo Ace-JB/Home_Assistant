@@ -1,15 +1,23 @@
 import { spawn } from 'child_process';
-import { existsSync, promises as fs } from 'fs';
-import { chmod, copyFile, mkdir, readFile, rm, stat, writeFile } from 'fs/promises';
+import { createHash } from 'crypto';
+import { existsSync, promises as fs, realpathSync } from 'fs';
+import { chmod, copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from 'fs/promises';
 import { basename, dirname, extname, join, relative, resolve } from 'path';
 import { GLOBAL_CONFIG } from '@/global_config';
 import { funasrService } from '@/server/services/FunASRService';
 import type { FunASRMaterialSegment } from '@/server/services/FunASRService';
 import { createTaskTimer, formatBytes, type TaskTimer } from '@/server/services/cosyvoice/timing';
+import {
+    CosyVoiceMaterialJobStore,
+    parseYtDlpDownloadProgress,
+    type CosyVoiceMaterialJobSnapshot,
+    type CosyVoiceMaterialJobStageDefinition,
+} from '@/server/services/cosyvoice/jobs';
 import type {
     CosyVoiceExtractOptions,
     CosyVoiceExtractResult,
     CosyVoiceMaterialCandidate,
+    CosyVoiceProgressReporter,
     CosyVoiceSaveInput,
     CosyVoiceServiceStatus,
     CosyVoiceSpeakerProfile,
@@ -20,7 +28,7 @@ import type {
 import { normalizeTranscript } from '@tools/Voice';
 import { prewarmWakeAckAudio } from '@tools/Voice';
 import {
-    createVoiceAssetId,
+    cleanupVoiceAssets,
     registerVoiceAssetFile,
     safeVoiceAssetName,
     upsertVoiceSpeakerProfile,
@@ -45,6 +53,9 @@ const MAX_CANDIDATE_MS = 10000;
 const MAX_CANDIDATES = 12;
 const MAX_SAME_SPEAKER_GAP_MS = 500;
 const SPEAKER_GUARD_MS = 450;
+const DEFAULT_MATERIAL_JOB_TTL_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_SOURCE_MEDIA_TTL_MS = 24 * 60 * 60 * 1000;
+const MATERIAL_JOB_STATUS_TTL_MS = 60 * 60 * 1000;
 const MANAGED_ENV_KEYS = [
     'SENTINEL_TTS_PROVIDER',
     'COSYVOICE_BASE_URL',
@@ -56,6 +67,53 @@ const MANAGED_ENV_KEYS = [
     'COSYVOICE_TIMEOUT_MS',
     'COSYVOICE_FALLBACK_TO_SAY',
 ];
+
+const probeJobStages: CosyVoiceMaterialJobStageDefinition[] = [
+    { key: 'validate_url', percent: 10 },
+    { key: 'yt_dlp_probe', percent: 75 },
+    { key: 'parse_formats', percent: 92 },
+    { key: 'done', percent: 100 },
+];
+
+const extractJobStages: CosyVoiceMaterialJobStageDefinition[] = [
+    { key: 'upload', percent: 12 },
+    { key: 'extract_wav', percent: 28 },
+    { key: 'mdx_separation', percent: 50 },
+    { key: 'funasr_analyze', percent: 70 },
+    { key: 'candidate_filter', percent: 78 },
+    { key: 'candidate_cut', percent: 88 },
+    { key: 'candidate_export', percent: 94 },
+    { key: 'cleanup', percent: 98 },
+    { key: 'done', percent: 100 },
+];
+
+const importJobStages: CosyVoiceMaterialJobStageDefinition[] = [
+    { key: 'validate_url', percent: 8 },
+    { key: 'download', percent: 24 },
+    { key: 'extract_wav', percent: 38 },
+    { key: 'mdx_separation', percent: 56 },
+    { key: 'funasr_analyze', percent: 74 },
+    { key: 'candidate_filter', percent: 80 },
+    { key: 'candidate_cut', percent: 90 },
+    { key: 'candidate_export', percent: 95 },
+    { key: 'cleanup', percent: 98 },
+    { key: 'done', percent: 100 },
+];
+
+const saveJobStages: CosyVoiceMaterialJobStageDefinition[] = [
+    { key: 'save_profile', percent: 24 },
+    { key: 'cache_speaker', percent: 48 },
+    { key: 'apply_config', percent: 66 },
+    { key: 'wake_ack_prewarm', percent: 80 },
+    { key: 'voice_asset_index', percent: 90 },
+    { key: 'cleanup', percent: 96 },
+    { key: 'done', percent: 100 },
+];
+
+const materialJobStore = new CosyVoiceMaterialJobStore({
+    ttlMs: MATERIAL_JOB_STATUS_TTL_MS,
+    maxJobs: 100,
+});
 
 function getCosyVoicePaths() {
     const dataDir = getCosyVoiceDataRoot();
@@ -76,10 +134,59 @@ function getCosyVoicePaths() {
     };
 }
 
+function createTimingProgressReporter(progress?: CosyVoiceProgressReporter): ((timing: TaskTiming) => void) | undefined {
+    if (!progress) return undefined;
+    return (timing) => {
+        if (timing.key === 'total') return;
+        progress({
+            stageKey: timing.key,
+            detail: timing.detail,
+            timing,
+        });
+    };
+}
+
+async function runMaterialJob<T>(
+    jobId: string,
+    run: (progress: CosyVoiceProgressReporter) => Promise<T>,
+): Promise<void> {
+    const progress: CosyVoiceProgressReporter = (event) => {
+        if (event.timing) {
+            materialJobStore.completeStage(jobId, event.stageKey, event.timing);
+            return;
+        }
+        materialJobStore.updateStage(jobId, event.stageKey, event.detail, event.percent);
+    };
+
+    try {
+        const result = await run(progress);
+        const snapshot = materialJobStore.getJob(jobId);
+        materialJobStore.succeed(jobId, result, extractResultTimings(result) ?? snapshot?.timings ?? []);
+    } catch (error) {
+        materialJobStore.fail(jobId, error);
+        console.error(`[CosyVoiceMaterial] job failed id=${jobId}:`, error);
+    }
+}
+
+function extractResultTimings(value: unknown): TaskTiming[] | null {
+    if (!value || typeof value !== 'object') return null;
+    const timings = (value as { timings?: unknown }).timings;
+    return Array.isArray(timings) ? timings.filter(isTaskTiming) : null;
+}
+
+function isTaskTiming(value: unknown): value is TaskTiming {
+    if (!value || typeof value !== 'object') return false;
+    const item = value as Record<string, unknown>;
+    return typeof item.key === 'string'
+        && typeof item.label === 'string'
+        && typeof item.durationMs === 'number';
+}
+
 export type {
     CosyVoiceExtractOptions,
     CosyVoiceExtractResult,
     CosyVoiceMaterialCandidate,
+    CosyVoiceProgressReporter,
     CosyVoiceSaveInput,
     CosyVoiceServiceStatus,
     CosyVoiceSpeakerProfile,
@@ -87,6 +194,23 @@ export type {
     YtDlpAudioFormat,
     YtDlpStatus,
 } from '@/server/services/cosyvoice/types';
+export type { CosyVoiceMaterialJobSnapshot } from '@/server/services/cosyvoice/jobs';
+
+export type CosyVoiceMaterialCleanupOptions = {
+    now?: number;
+    jobTtlMs?: number;
+    sourceTtlMs?: number;
+    separatedMaxAgeMs?: number;
+    separatedMaxFiles?: number;
+};
+
+export type CosyVoiceMaterialCleanupResult = {
+    removedSelectedClipDuplicates: number;
+    removedSourceMediaFiles: number;
+    removedMaterialJobDirs: number;
+    removedEmptyDirs: number;
+    voiceAssets: Awaited<ReturnType<typeof cleanupVoiceAssets>>;
+};
 
 export function getCosyVoiceMaterialConfig() {
     return {
@@ -103,8 +227,9 @@ export function getCosyVoiceMaterialConfig() {
 }
 
 export async function extractCosyVoiceMaterial(video: File, options: CosyVoiceExtractOptions = {}): Promise<CosyVoiceExtractResult> {
-    const timer = createTaskTimer();
+    const timer = createTaskTimer({ onMark: createTimingProgressReporter(options.progress) });
     const { dataDir, uploadDir } = getCosyVoicePaths();
+    options.progress?.({ stageKey: 'upload', detail: video.name });
     validateMediaFile(video);
     await mkdir(uploadDir, { recursive: true });
     await mkdir(dataDir, { recursive: true });
@@ -119,11 +244,30 @@ export async function extractCosyVoiceMaterial(video: File, options: CosyVoiceEx
     return extractMaterialFromVideoPath(uploadPath, options, timer);
 }
 
-export async function probeYtDlpAudioFormats(url: string): Promise<{ formats: YtDlpAudioFormat[] }> {
+export function startCosyVoiceExtractJob(video: File, options: Omit<CosyVoiceExtractOptions, 'progress'> = {}): CosyVoiceMaterialJobSnapshot {
+    const job = materialJobStore.createJob('extract', extractJobStages);
+    void runMaterialJob(job.id, async (progress) => extractCosyVoiceMaterial(video, { ...options, progress }));
+    return job;
+}
+
+export async function probeYtDlpAudioFormats(url: string, progress?: CosyVoiceProgressReporter): Promise<{ formats: YtDlpAudioFormat[] }> {
+    progress?.({ stageKey: 'validate_url' });
     const normalizedUrl = normalizeHttpUrl(url);
-    const result = await runProcess(GLOBAL_CONFIG.YT_DLP.BIN, ['-J', normalizedUrl]);
+    progress?.({ stageKey: 'yt_dlp_probe', detail: normalizedUrl });
+    const result = await runProcess(GLOBAL_CONFIG.YT_DLP.BIN, buildYtDlpArgs(['-J', normalizedUrl]));
+    progress?.({ stageKey: 'parse_formats' });
     const metadata = JSON.parse(result.stdout) as { formats?: unknown[] };
     return { formats: parseYtDlpAudioFormats(metadata, normalizedUrl) };
+}
+
+export function startCosyVoiceProbeUrlJob(url: string): CosyVoiceMaterialJobSnapshot {
+    const job = materialJobStore.createJob('probe-url', probeJobStages);
+    void runMaterialJob(job.id, async (progress) => probeYtDlpAudioFormats(url, progress));
+    return job;
+}
+
+export function getCosyVoiceMaterialJob(jobId: string): CosyVoiceMaterialJobSnapshot | null {
+    return materialJobStore.getJob(jobId);
 }
 
 export async function getYtDlpStatus(): Promise<YtDlpStatus> {
@@ -197,8 +341,9 @@ export async function checkCosyVoiceService(
 }
 
 export async function importCosyVoiceMaterialFromUrl(url: string, formatId: string, options: CosyVoiceExtractOptions = {}): Promise<CosyVoiceExtractResult> {
-    const timer = createTaskTimer();
+    const timer = createTaskTimer({ onMark: createTimingProgressReporter(options.progress) });
     const { uploadDir } = getCosyVoicePaths();
+    options.progress?.({ stageKey: 'validate_url' });
     const normalizedUrl = normalizeHttpUrl(url);
     const safeFormatId = normalizeYtDlpFormatId(formatId);
 
@@ -206,16 +351,38 @@ export async function importCosyVoiceMaterialFromUrl(url: string, formatId: stri
     const id = `${Date.now()}-${crypto.randomUUID()}`;
     const outputTemplate = join(uploadDir, `source-${id}.%(ext)s`);
     const downloadStartedAt = Date.now();
-    await runProcess(GLOBAL_CONFIG.YT_DLP.BIN, [
+    options.progress?.({ stageKey: 'download', detail: safeFormatId });
+    await runProcess(GLOBAL_CONFIG.YT_DLP.BIN, buildYtDlpArgs([
         '-f', safeFormatId,
         '--no-playlist',
         '-o', outputTemplate,
         normalizedUrl,
-    ]);
+    ]), {
+        onStderr: chunk => {
+            const downloadPercent = parseYtDlpDownloadProgress(chunk);
+            if (downloadPercent !== null) {
+                options.progress?.({
+                    stageKey: 'download',
+                    percent: scalePercent(downloadPercent, 10, 24),
+                    detail: `${downloadPercent.toFixed(downloadPercent % 1 === 0 ? 0 : 1)}%`,
+                });
+            }
+        },
+    });
     timer.mark('download', '下载音频资源', downloadStartedAt, safeFormatId);
 
     const sourcePath = await findDownloadedSourcePath(id);
     return extractMaterialFromVideoPath(sourcePath, options, timer);
+}
+
+export function startCosyVoiceImportUrlJob(
+    url: string,
+    formatId: string,
+    options: Omit<CosyVoiceExtractOptions, 'progress'> = {},
+): CosyVoiceMaterialJobSnapshot {
+    const job = materialJobStore.createJob('import-url', importJobStages);
+    void runMaterialJob(job.id, async (progress) => importCosyVoiceMaterialFromUrl(url, formatId, { ...options, progress }));
+    return job;
 }
 
 export function createYtDlpAudioPreviewStream(url: string, formatId: string): ReadableStream<Uint8Array> {
@@ -223,13 +390,14 @@ export function createYtDlpAudioPreviewStream(url: string, formatId: string): Re
     const safeFormatId = normalizeYtDlpFormatId(formatId);
     console.info(`[CosyVoiceMaterial] preview start format=${safeFormatId}`);
 
-    const child = spawn(GLOBAL_CONFIG.YT_DLP.BIN, [
+    const child = spawn(GLOBAL_CONFIG.YT_DLP.BIN, buildYtDlpArgs([
         '-f', safeFormatId,
         '--no-playlist',
         '-o', '-',
         normalizedUrl,
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    ]), { stdio: ['ignore', 'pipe', 'pipe'] });
     const stderr: Buffer[] = [];
+    let cancelled = false;
 
     child.stderr?.on('data', chunk => stderr.push(Buffer.from(chunk)));
     child.once('error', (error) => {
@@ -241,27 +409,34 @@ export function createYtDlpAudioPreviewStream(url: string, formatId: string): Re
             console.info(`[CosyVoiceMaterial] preview end format=${safeFormatId}`);
             return;
         }
+        if (cancelled && signal === 'SIGTERM') {
+            console.info(`[CosyVoiceMaterial] preview cancelled format=${safeFormatId}`);
+            return;
+        }
         console.error(`[CosyVoiceMaterial] preview failed format=${safeFormatId} code=${code} signal=${signal}: ${output}`);
     });
 
+    let safeController: ReturnType<typeof createSafePreviewController> | null = null;
     return new ReadableStream<Uint8Array>({
         start(controller) {
+            safeController = createSafePreviewController(controller);
             child.stdout?.on('data', (chunk) => {
-                controller.enqueue(Buffer.from(chunk));
+                safeController?.enqueue(Buffer.from(chunk));
             });
             child.stdout?.once('end', () => {
-                controller.close();
+                safeController?.close();
             });
             child.stdout?.once('error', (error) => {
-                controller.error(error);
+                safeController?.error(error);
             });
             child.once('error', (error) => {
-                controller.error(error);
+                safeController?.error(error);
             });
         },
         cancel() {
+            cancelled = true;
+            safeController?.markClosed();
             child.kill('SIGTERM');
-            console.info(`[CosyVoiceMaterial] preview cancelled format=${safeFormatId}`);
         },
     });
 }
@@ -281,6 +456,7 @@ export async function extractMaterialFromVideoPath(videoPath: string, options: C
     await mkdir(jobDir, { recursive: true });
     await mkdir(dirname(rawAudioPath), { recursive: true });
     const extractStartedAt = Date.now();
+    options.progress?.({ stageKey: 'extract_wav', detail: basename(resolvedVideoPath) });
     await extractWavWithFfmpeg(resolvedVideoPath, rawAudioPath);
     timer.mark('extract_wav', '抽取 WAV', extractStartedAt, basename(resolvedVideoPath));
 
@@ -288,6 +464,7 @@ export async function extractMaterialFromVideoPath(videoPath: string, options: C
     let separationResult: Awaited<ReturnType<typeof separateVoice>> | null = null;
     if (options.enhanceVocals) {
         const uvrStartedAt = Date.now();
+        options.progress?.({ stageKey: 'mdx_separation' });
         separationResult = await separateVoice({
             inputPath: rawAudioPath,
             reason: 'prompt-import',
@@ -298,6 +475,7 @@ export async function extractMaterialFromVideoPath(videoPath: string, options: C
     }
 
     const analyzeStartedAt = Date.now();
+    options.progress?.({ stageKey: 'funasr_analyze', detail: basename(analysisPath) });
     const analysis = await funasrService.analyzeMaterial(analysisPath);
     timer.mark('funasr_analyze', 'FunASR 分析', analyzeStartedAt, `${analysis.segments.length} segments`);
 
@@ -309,9 +487,11 @@ export async function extractMaterialFromVideoPath(videoPath: string, options: C
         source: analysisPath === rawAudioPath ? 'raw' : 'vocal',
         segments: analysis.segments,
         timer,
+        progress: options.progress,
     });
     timer.mark('candidate_export', '候选导出汇总', exportStartedAt, `${candidates.length} candidates`);
     const cleanupStartedAt = Date.now();
+    options.progress?.({ stageKey: 'cleanup', detail: basename(resolvedVideoPath) });
     await cleanupExtractionArtifacts({
         uploadPath: resolvedVideoPath,
         rawAudioPath,
@@ -459,7 +639,7 @@ export async function deleteCosyVoiceSpeakerProfile(speakerId: string): Promise<
     };
 }
 
-export async function saveCosyVoiceMaterial(input: CosyVoiceSaveInput): Promise<{
+export async function saveCosyVoiceMaterial(input: CosyVoiceSaveInput, progress?: CosyVoiceProgressReporter): Promise<{
     config: ReturnType<typeof getCosyVoiceMaterialConfig>;
     speakers: CosyVoiceSpeakerProfile[];
     speaker: CosyVoiceSpeakerProfile;
@@ -467,9 +647,10 @@ export async function saveCosyVoiceMaterial(input: CosyVoiceSaveInput): Promise<
     cacheWarning?: string;
     timings?: TaskTiming[];
 }> {
-    const timer = createTaskTimer();
+    const timer = createTaskTimer({ onMark: createTimingProgressReporter(progress) });
     const normalized = normalizeSaveInput(input);
     const saveStartedAt = Date.now();
+    progress?.({ stageKey: 'save_profile', detail: normalized.speakerName });
     const sourceAudioPath = await assertManagedAudioPath(normalized.promptAudioPath);
     const audioPath = await persistSpeakerPromptAudio(sourceAudioPath, normalized.speakerName, normalized.speakerId);
     const speaker = await upsertSpeakerProfile({
@@ -483,6 +664,7 @@ export async function saveCosyVoiceMaterial(input: CosyVoiceSaveInput): Promise<
     let cacheWarning: string | undefined;
     let cached = false;
     const cacheStartedAt = Date.now();
+    progress?.({ stageKey: 'cache_speaker', detail: speaker.id });
     try {
         await cacheSpeakerInCosyVoiceService(
             normalized.baseUrl,
@@ -499,6 +681,7 @@ export async function saveCosyVoiceMaterial(input: CosyVoiceSaveInput): Promise<
     }
 
     const applyStartedAt = Date.now();
+    progress?.({ stageKey: 'apply_config', detail: speaker.name });
     await applyActiveCosyVoiceMaterial({
         ...normalized,
         speakerId: speaker.id,
@@ -508,16 +691,20 @@ export async function saveCosyVoiceMaterial(input: CosyVoiceSaveInput): Promise<
     timer.mark('apply_config', '应用配置', applyStartedAt, speaker.name);
 
     const wakeAckStartedAt = Date.now();
+    progress?.({ stageKey: 'wake_ack_prewarm', detail: speaker.id });
     await prewarmWakeAckAudio().catch((error) => {
         console.warn(`[CosyVoiceMaterial] wake ack prewarm failed id=${speaker.id}:`, error);
     });
     timer.mark('wake_ack_prewarm', '唤醒应答预热', wakeAckStartedAt, speaker.id);
     const assetStartedAt = Date.now();
+    progress?.({ stageKey: 'voice_asset_index', detail: speaker.id });
     await registerSpeakerVoiceAsset(speaker);
     timer.mark('voice_asset_index', 'VoiceAsset 索引', assetStartedAt, speaker.id);
 
     const cleanupStartedAt = Date.now();
+    progress?.({ stageKey: 'cleanup', detail: basename(sourceAudioPath) });
     await cleanupMaterialExtraction(sourceAudioPath);
+    await cleanupCosyVoiceMaterialStorage();
     timer.mark('cleanup', '清理临时文件', cleanupStartedAt, basename(sourceAudioPath));
 
     const timings = timer.finish();
@@ -545,6 +732,12 @@ export async function saveCosyVoiceMaterial(input: CosyVoiceSaveInput): Promise<
         cacheWarning,
         timings,
     };
+}
+
+export function startCosyVoiceSaveJob(input: CosyVoiceSaveInput): CosyVoiceMaterialJobSnapshot {
+    const job = materialJobStore.createJob('save', saveJobStages);
+    void runMaterialJob(job.id, async (progress) => saveCosyVoiceMaterial(input, progress));
+    return job;
 }
 
 async function applyActiveCosyVoiceMaterial(
@@ -682,6 +875,66 @@ export function parseYtDlpAudioFormats(metadata: { formats?: unknown[] }, source
         .filter((format): format is YtDlpAudioFormat => format !== null);
 }
 
+export function buildYtDlpArgs(args: string[], cookiesFromBrowser = GLOBAL_CONFIG.YT_DLP.COOKIES_FROM_BROWSER): string[] {
+    const cookiesArg = normalizeYtDlpCookiesFromBrowser(cookiesFromBrowser);
+    return cookiesArg ? ['--cookies-from-browser', cookiesArg, ...args] : [...args];
+}
+
+export function createSafePreviewController(
+    controller: Pick<ReadableStreamDefaultController<Uint8Array>, 'enqueue' | 'close' | 'error'>,
+): {
+    enqueue(chunk: Uint8Array): boolean;
+    close(): boolean;
+    error(error: unknown): boolean;
+    markClosed(): void;
+} {
+    let closed = false;
+    return {
+        enqueue(chunk: Uint8Array): boolean {
+            if (closed) return false;
+            try {
+                controller.enqueue(chunk);
+                return true;
+            } catch (error) {
+                if (isClosedReadableStreamError(error)) {
+                    closed = true;
+                    return false;
+                }
+                throw error;
+            }
+        },
+        close(): boolean {
+            if (closed) return false;
+            closed = true;
+            try {
+                controller.close();
+                return true;
+            } catch (error) {
+                if (isClosedReadableStreamError(error)) return false;
+                throw error;
+            }
+        },
+        error(error: unknown): boolean {
+            if (closed) return false;
+            closed = true;
+            try {
+                controller.error(error);
+                return true;
+            } catch (controllerError) {
+                if (isClosedReadableStreamError(controllerError)) return false;
+                throw controllerError;
+            }
+        },
+        markClosed(): void {
+            closed = true;
+        },
+    };
+}
+
+function isClosedReadableStreamError(error: unknown): boolean {
+    return error instanceof TypeError && /invalid state|closed|closing/iu.test(error.message);
+}
+
 async function assertManagedAudioPath(path: string): Promise<string> {
     const resolved = resolve(path);
     if (!isManagedCosyVoiceAudioPath(resolved)) {
@@ -697,26 +950,19 @@ async function assertManagedAudioPath(path: string): Promise<string> {
 }
 
 async function persistSpeakerPromptAudio(sourceAudioPath: string, speakerName: string, speakerId?: string): Promise<string> {
-    const { selectedAudioDir, speakerAudioDir } = getCosyVoicePaths();
+    const { speakerAudioDir } = getCosyVoicePaths();
     if (isInsideDirectory(sourceAudioPath, speakerAudioDir)) {
         return sourceAudioPath;
     }
 
-    await mkdir(selectedAudioDir, { recursive: true });
     await mkdir(speakerAudioDir, { recursive: true });
     const baseName = safeFilePart(speakerId || speakerName || 'speaker');
-    const selectedPath = resolve(selectedAudioDir, `${baseName}-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}.wav`);
-    if (!isInsideDirectory(selectedPath, selectedAudioDir)) {
-        throw new Error('Invalid selected audio target path.');
-    }
-    await copyFile(sourceAudioPath, selectedPath);
-
     const targetPath = resolve(speakerAudioDir, `${baseName}-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}.wav`);
     if (!isInsideDirectory(targetPath, speakerAudioDir)) {
         throw new Error('Invalid speaker audio target path.');
     }
 
-    await copyFile(selectedPath, targetPath);
+    await copyFile(sourceAudioPath, targetPath);
     return targetPath;
 }
 
@@ -779,6 +1025,211 @@ async function removeMaterialJobArtifacts(jobId: string): Promise<void> {
     }));
 }
 
+export async function cleanupCosyVoiceMaterialStorage(
+    options: CosyVoiceMaterialCleanupOptions = {},
+): Promise<CosyVoiceMaterialCleanupResult> {
+    const now = options.now ?? Date.now();
+    const jobTtlMs = options.jobTtlMs ?? DEFAULT_MATERIAL_JOB_TTL_MS;
+    const sourceTtlMs = options.sourceTtlMs ?? DEFAULT_SOURCE_MEDIA_TTL_MS;
+    const removedSelectedClipDuplicates = await cleanupSelectedClipDuplicates();
+    const removedSourceMediaFiles = await cleanupOldSourceMedia(now, sourceTtlMs);
+    const removedMaterialJobDirs = await cleanupOldMaterialJobs(now, jobTtlMs);
+    const removedEmptyDirs = await cleanupEmptyMaterialJobDirs();
+    const voiceAssets = await cleanupVoiceAssets({
+        now,
+        separatedMaxAgeMs: options.separatedMaxAgeMs,
+        separatedMaxFiles: options.separatedMaxFiles,
+        removeTemporaryCandidateAssets: true,
+    });
+
+    if (removedSelectedClipDuplicates > 0
+        || removedSourceMediaFiles > 0
+        || removedMaterialJobDirs > 0
+        || removedEmptyDirs > 0
+        || voiceAssets.removedStaleAssets > 0
+        || voiceAssets.removedTemporaryCandidateAssets > 0
+        || voiceAssets.removedSeparatedAssets > 0) {
+        pipelineLogs.append({
+            category: 'voice-material',
+            level: 'info',
+            title: 'Voice material storage cleaned',
+            message: `${removedSelectedClipDuplicates} duplicate selected clip(s), ${voiceAssets.removedStaleAssets} stale asset(s)`,
+            metadata: {
+                removedSelectedClipDuplicates,
+                removedSourceMediaFiles,
+                removedMaterialJobDirs,
+                removedEmptyDirs,
+                voiceAssets,
+            },
+        });
+    }
+
+    return {
+        removedSelectedClipDuplicates,
+        removedSourceMediaFiles,
+        removedMaterialJobDirs,
+        removedEmptyDirs,
+        voiceAssets,
+    };
+}
+
+async function cleanupSelectedClipDuplicates(): Promise<number> {
+    const { selectedAudioDir, speakerAudioDir } = getCosyVoicePaths();
+    const speakerFiles = await listFiles(speakerAudioDir);
+    if (speakerFiles.length === 0) return 0;
+
+    const speakerHashes = new Set<string>();
+    for (const filePath of speakerFiles) {
+        if (!filePath.endsWith('.wav')) continue;
+        speakerHashes.add(await hashFile(filePath));
+    }
+
+    let removed = 0;
+    for (const filePath of await listFiles(selectedAudioDir)) {
+        if (!filePath.endsWith('.wav')) continue;
+        const hash = await hashFile(filePath);
+        if (!speakerHashes.has(hash)) continue;
+        await removeSafeFile(filePath, selectedAudioDir);
+        removed += 1;
+    }
+    return removed;
+}
+
+async function cleanupOldSourceMedia(now: number, ttlMs: number): Promise<number> {
+    const { uploadDir } = getCosyVoicePaths();
+    let removed = 0;
+    for (const filePath of await listFiles(uploadDir)) {
+        const stats = await stat(filePath).catch(() => null);
+        if (!stats?.isFile()) continue;
+        if (now - stats.mtimeMs <= ttlMs) continue;
+        await removeSafeFile(filePath, uploadDir);
+        removed += 1;
+    }
+    return removed;
+}
+
+async function cleanupOldMaterialJobs(now: number, ttlMs: number): Promise<number> {
+    const protectedPaths = await getProtectedPromptAudioPaths();
+    const jobIds = await findMaterialJobIds();
+    let removed = 0;
+    for (const jobId of jobIds) {
+        if (protectedPaths.some(path => findJobId(path) === jobId)) continue;
+        const lastTouchedAt = await getMaterialJobLastTouchedAt(jobId);
+        if (lastTouchedAt === 0 || now - lastTouchedAt <= ttlMs) continue;
+        await removeMaterialJobArtifacts(jobId);
+        removed += 1;
+    }
+    return removed;
+}
+
+async function cleanupEmptyMaterialJobDirs(): Promise<number> {
+    const { materialJobsDir } = getCosyVoicePaths();
+    return removeEmptyDirectories(materialJobsDir, materialJobsDir);
+}
+
+async function getProtectedPromptAudioPaths(): Promise<string[]> {
+    const profiles = await readSpeakerProfiles();
+    return [
+        ...profiles.map(profile => profile.promptAudioPath),
+        ...profiles.flatMap(profile => (profile.promptList ?? []).map(prompt => prompt.audioPath)),
+        GLOBAL_CONFIG.VOICE.COSYVOICE_PROMPT_AUDIO_PATH,
+        process.env.COSYVOICE_PROMPT_AUDIO_PATH ?? '',
+    ]
+        .filter((path): path is string => Boolean(path))
+        .map(path => resolve(path));
+}
+
+async function findMaterialJobIds(): Promise<string[]> {
+    const {
+        materialJobsDir,
+        rawAudioDir,
+        vocalAudioDir,
+        slicedAudioDir,
+        candidateTextDir,
+        traceDir,
+    } = getCosyVoicePaths();
+    const roots = [materialJobsDir, rawAudioDir, vocalAudioDir, slicedAudioDir, candidateTextDir, traceDir];
+    const ids = new Set<string>();
+    for (const root of roots) {
+        for (const dirPath of await listDirectories(root)) {
+            const jobId = findJobId(dirPath);
+            if (jobId) ids.add(jobId);
+        }
+    }
+    return [...ids];
+}
+
+async function getMaterialJobLastTouchedAt(jobId: string): Promise<number> {
+    const {
+        materialJobsDir,
+        rawAudioDir,
+        vocalAudioDir,
+        slicedAudioDir,
+        candidateTextDir,
+        traceDir,
+    } = getCosyVoicePaths();
+    const roots = [materialJobsDir, rawAudioDir, vocalAudioDir, slicedAudioDir, candidateTextDir, traceDir];
+    const mtimes = await Promise.all(roots.map(root => newestMtime(resolve(root, jobId))));
+    return Math.max(0, ...mtimes);
+}
+
+async function listFiles(root: string): Promise<string[]> {
+    const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+    const files: string[] = [];
+    for (const entry of entries) {
+        const fullPath = join(root, entry.name);
+        if (entry.isFile()) {
+            files.push(fullPath);
+        } else if (entry.isDirectory()) {
+            files.push(...await listFiles(fullPath));
+        }
+    }
+    return files;
+}
+
+async function listDirectories(root: string): Promise<string[]> {
+    const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+    const dirs: string[] = [];
+    for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const fullPath = join(root, entry.name);
+        dirs.push(fullPath, ...await listDirectories(fullPath));
+    }
+    return dirs;
+}
+
+async function newestMtime(path: string): Promise<number> {
+    const stats = await stat(path).catch(() => null);
+    if (!stats) return 0;
+    if (stats.isFile()) return stats.mtimeMs;
+    if (!stats.isDirectory()) return 0;
+    const entries = await readdir(path, { withFileTypes: true }).catch(() => []);
+    const childMtimes = await Promise.all(entries.map(entry => newestMtime(join(path, entry.name))));
+    const existingChildMtimes = childMtimes.filter(value => value > 0);
+    return existingChildMtimes.length ? Math.max(...existingChildMtimes) : stats.mtimeMs;
+}
+
+async function removeEmptyDirectories(path: string, root: string): Promise<number> {
+    if (!isInsideDirectory(path, root)) return 0;
+    const entries = await readdir(path, { withFileTypes: true }).catch(() => []);
+    let removed = 0;
+    for (const entry of entries) {
+        if (entry.isDirectory()) {
+            removed += await removeEmptyDirectories(join(path, entry.name), root);
+        }
+    }
+    const nextEntries = await readdir(path).catch(() => []);
+    if (path !== root && nextEntries.length === 0) {
+        await rm(path, { recursive: true, force: true }).catch(() => undefined);
+        removed += 1;
+    }
+    return removed;
+}
+
+async function hashFile(path: string): Promise<string> {
+    return createHash('sha256').update(await readFile(path)).digest('hex');
+}
+
 function validateMediaFile(video: File): void {
     if (!(video instanceof File) || video.size === 0) {
         throw new Error('video is required.');
@@ -831,6 +1282,7 @@ async function exportMaterialCandidates(input: {
     source: 'raw' | 'vocal';
     segments: FunASRMaterialSegment[];
     timer?: TaskTimer;
+    progress?: CosyVoiceProgressReporter;
 }): Promise<CosyVoiceMaterialCandidate[]> {
     const { slicedAudioDir, candidateTextDir } = getCosyVoicePaths();
     const clipsDir = join(slicedAudioDir, input.jobId);
@@ -845,6 +1297,7 @@ async function exportMaterialCandidates(input: {
     const accepted = parseFunASRMaterialCandidates(input.segments)
         .sort((left, right) => rankSegment(right) - rankSegment(left))
         .slice(0, MAX_CANDIDATES);
+    input.progress?.({ stageKey: 'candidate_filter', detail: `${accepted.length}/${input.segments.length} accepted` });
     input.timer?.mark('candidate_filter', '候选过滤', filterStartedAt, `${accepted.length}/${input.segments.length} accepted`);
     const candidates: CosyVoiceMaterialCandidate[] = [];
 
@@ -855,6 +1308,11 @@ async function exportMaterialCandidates(input: {
         const textName = `${speaker}-${String(index + 1).padStart(2, '0')}.txt`;
         const audioPath = join(clipsDir, clipName);
         const textPath = join(textsDir, textName);
+        input.progress?.({
+            stageKey: 'candidate_cut',
+            detail: `${index + 1}/${accepted.length} ${clipName}`,
+            percent: scalePercent(index, 80, 90, Math.max(1, accepted.length)),
+        });
         await cutWavWithFfmpeg(input.sourceAudioPath, audioPath, segment.start_ms, segment.end_ms);
         const verifiedText = normalizeTranscript(await funasrService.transcribe(audioPath)) || segment.text;
         const qualityScore = await scorePromptQuality(audioPath).catch(() => undefined);
@@ -877,24 +1335,6 @@ async function exportMaterialCandidates(input: {
             source: input.source,
         };
         candidates.push(candidate);
-        await registerVoiceAssetFile({
-            kind: 'candidate',
-            sourcePath: audioPath,
-            copy: false,
-            assetId: createVoiceAssetId('candidate'),
-            metadata: {
-                jobId: input.jobId,
-                speaker: segment.spk,
-                source: input.source,
-                sourceAudioPath: input.sourceAudioPath,
-                text: verifiedText,
-                startMs: segment.start_ms,
-                endMs: segment.end_ms,
-                durationMs: segment.durationMs,
-                rankScore: segment.score,
-                qualityScore,
-            },
-        });
     }
 
     const metadataStartedAt = Date.now();
@@ -1311,18 +1751,36 @@ function formatEnvValue(value: string): string {
 }
 
 function isInsideDirectory(path: string, directory: string): boolean {
-    const relativePath = relative(resolve(directory), resolve(path));
+    const relativePath = relative(resolveForContainment(directory), resolveForContainment(path));
     return relativePath === '' || (!!relativePath && !relativePath.startsWith('..') && !relativePath.startsWith('/'));
 }
 
-function runProcess(command: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+function resolveForContainment(path: string): string {
+    return existsSync(path) ? realpathSync(path) : resolve(path);
+}
+
+function scalePercent(value: number, start: number, end: number, total = 100): number {
+    if (!Number.isFinite(value) || !Number.isFinite(total) || total <= 0) return start;
+    const ratio = Math.max(0, Math.min(1, value / total));
+    return Math.max(0, Math.min(100, start + ((end - start) * ratio)));
+}
+
+function runProcess(
+    command: string,
+    args: string[],
+    options: { onStderr?: (chunk: string) => void } = {},
+): Promise<{ stdout: string; stderr: string }> {
     return new Promise((resolveProcess, reject) => {
         const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
         const stdout: Buffer[] = [];
         const stderr: Buffer[] = [];
 
         child.stdout?.on('data', chunk => stdout.push(Buffer.from(chunk)));
-        child.stderr?.on('data', chunk => stderr.push(Buffer.from(chunk)));
+        child.stderr?.on('data', chunk => {
+            const buffer = Buffer.from(chunk);
+            stderr.push(buffer);
+            options.onStderr?.(buffer.toString('utf8'));
+        });
         child.once('error', (error) => {
             if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
                 reject(new Error(`${command} is not installed or not found in PATH.`));
@@ -1362,6 +1820,15 @@ function normalizeYtDlpFormatId(formatId: string): string {
         throw new Error('formatId is required.');
     }
     return safeFormatId;
+}
+
+function normalizeYtDlpCookiesFromBrowser(value: string): string {
+    const normalized = value.trim();
+    if (!normalized) return '';
+    if (/[\u0000-\u001f\u007f]/u.test(normalized)) {
+        throw new Error('YT_DLP_COOKIES_FROM_BROWSER must not contain control characters.');
+    }
+    return normalized;
 }
 
 function parseYtDlpFormat(value: unknown, sourceUrl: string): YtDlpAudioFormat | null {

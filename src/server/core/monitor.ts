@@ -43,7 +43,7 @@ const VISION_PROFILE_CLEANUP_INTERVAL_MS = 30_000;
 const VISION_PROFILE_IDLE_MIN_MS = 60_000;
 const VISION_PROFILE_IDLE_MAX_MS = 300_000;
 
-type AsrCacheReason = 'wake' | 'command' | 'subtitle' | 'audio-only' | 'barge-in';
+type AsrCacheReason = 'wake' | 'command' | 'subtitle' | 'barge-in';
 type AsrCacheEntry = {
     reason: AsrCacheReason;
     startTs: number;
@@ -274,17 +274,16 @@ async function detectVisionFrame(
     realtimeSocket.publishVisionDetection(detection);
 }
 
-async function monitor(): Promise<MonitorStop> {
+async function monitor(options: { video: boolean } = { video: true }): Promise<MonitorStop> {
     const startupStartedAt = Date.now();
     startRealtimeSocketServer();
     await validateTextToSpeechConfig().catch((error) => {
         console.warn('[TTS] config validation failed; monitor will continue without blocking camera/audio startup:', error);
     });
 
-    const [{ stream: video, stop: stopVideo }, { stream: audio, stop: stopAudio }] = await Promise.all([
-        initCamera(),
-        initAudioListen(),
-    ]);
+    const includeVideo = options.video;
+    const { stream: audio, stop: stopAudio } = await initAudioListen();
+    const videoRuntime = includeVideo ? await initCamera() : null;
     pipelineLogs.append({
         category: 'system',
         level: 'info',
@@ -292,15 +291,17 @@ async function monitor(): Promise<MonitorStop> {
         message: 'Monitor media streams are ready.',
         timings: [{ key: 'monitor_media_startup', label: 'Monitor media startup', durationMs: Date.now() - startupStartedAt }],
         metadata: {
-            mode: 'full',
-            camera: true,
+            mode: includeVideo ? 'full' : 'audio',
+            camera: includeVideo,
             audio: true,
         },
         pipelineId: 'system',
     });
 
-    const p2j = new Pipe2Jpeg();
-    video.pipe(p2j);
+    const p2j = includeVideo ? new Pipe2Jpeg() : null;
+    if (videoRuntime && p2j) {
+        videoRuntime.stream.pipe(p2j);
+    }
 
     const wakeSegmenter = new AudioSegmenter({
         speechThreshold: GLOBAL_CONFIG.VOICE.WAKE_VAD_THRESHOLD,
@@ -340,10 +341,9 @@ async function monitor(): Promise<MonitorStop> {
     let latestCameraRecognition: CameraRecognitionContext | null = null;
     let latestVisionFrame: Buffer | null = null;
     let faceRecognitionRunning = false;
-    const visionProfileCleanupTimer = setInterval(
-        () => cleanupIdleVisionProfiles('monitor_interval'),
-        VISION_PROFILE_CLEANUP_INTERVAL_MS,
-    );
+    const visionProfileCleanupTimer = includeVideo
+        ? setInterval(() => cleanupIdleVisionProfiles('monitor_interval'), VISION_PROFILE_CLEANUP_INTERVAL_MS)
+        : null;
     let activeSpeech: InterruptibleSpeech | null = null;
     let activeSpeechText = '';
     let activeSpeechStartedAt = 0;
@@ -1263,7 +1263,7 @@ async function monitor(): Promise<MonitorStop> {
         }
     }
 
-    p2j.on('data', (jpegBuffer: Buffer) => {
+    p2j?.on('data', (jpegBuffer: Buffer) => {
         latestVisionFrame = jpegBuffer;
         syncManager.addVideo(jpegBuffer, latestCameraRecognition);
 
@@ -1402,13 +1402,16 @@ async function monitor(): Promise<MonitorStop> {
             wakeTimer = null;
         }
         activeSpeech?.stop();
-        clearInterval(visionProfileCleanupTimer);
+        if (visionProfileCleanupTimer) clearInterval(visionProfileCleanupTimer);
         resetListeningSegments('manual_reset');
         audio.removeAllListeners('data');
-        p2j.removeAllListeners('data');
-        video.unpipe(p2j);
+        p2j?.removeAllListeners('data');
+        if (videoRuntime && p2j) videoRuntime.stream.unpipe(p2j);
         latestVisionFrame = null;
-        await Promise.allSettled([stopVideo(), stopAudio()]);
+        await Promise.allSettled([
+            videoRuntime?.stop(),
+            stopAudio(),
+        ].filter((task): task is Promise<void> => Boolean(task)));
     };
 }
 
@@ -1558,9 +1561,9 @@ export async function startMonitor(mode: MonitorMode = 'full') {
         if (mode === 'video') {
             stop = await monitorVideoOnly();
         } else if (mode === 'audio') {
-            stop = await monitorAudioOnly();
+            stop = await monitor({ video: false });
         } else {
-            stop = await monitor();
+            stop = await monitor({ video: true });
         }
         pipelineLogs.append({
             category: 'system',

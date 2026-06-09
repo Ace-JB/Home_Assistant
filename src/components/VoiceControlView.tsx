@@ -1,4 +1,4 @@
-import { type ChangeEvent, type FC, useEffect, useMemo, useState } from 'react';
+import { type ChangeEvent, type FC, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../i18n';
 import type { TranslationKey } from '../i18n';
 
@@ -34,10 +34,30 @@ type TaskTiming = {
   detail?: string;
 };
 
-type ProcessingStage = {
+type MaterialJobStageStatus = 'pending' | 'running' | 'done' | 'failed';
+
+type MaterialJobStage = {
   key: string;
-  label: TranslationKey;
   percent: number;
+  status: MaterialJobStageStatus;
+  detail?: string;
+  durationMs?: number;
+  startedAt?: string;
+  elapsedMs?: number;
+};
+
+type MaterialJobSnapshot<T = unknown> = {
+  id: string;
+  type: 'probe-url' | 'import-url' | 'extract' | 'save';
+  status: 'queued' | 'running' | 'succeeded' | 'failed';
+  percent: number;
+  stageKey: string;
+  stages: MaterialJobStage[];
+  timings: TaskTiming[];
+  result?: T;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 type MaterialCandidate = {
@@ -103,31 +123,6 @@ const defaultConfig: VoiceConfig = {
   fallbackToSay: false,
 };
 
-const extractStages: ProcessingStage[] = [
-  { key: 'upload', label: 'voice.progressUpload', percent: 12 },
-  { key: 'extract_wav', label: 'voice.progressExtract', percent: 26 },
-  { key: 'mdx_separation', label: 'voice.progressSeparate', percent: 48 },
-  { key: 'funasr_analyze', label: 'voice.progressAnalyze', percent: 68 },
-  { key: 'candidate_export', label: 'voice.progressCandidates', percent: 88 },
-  { key: 'done', label: 'voice.progressDone', percent: 100 },
-];
-
-const importStages: ProcessingStage[] = [
-  { key: 'download', label: 'voice.progressDownload', percent: 16 },
-  { key: 'extract_wav', label: 'voice.progressExtract', percent: 32 },
-  { key: 'mdx_separation', label: 'voice.progressSeparate', percent: 52 },
-  { key: 'funasr_analyze', label: 'voice.progressAnalyze', percent: 72 },
-  { key: 'candidate_export', label: 'voice.progressCandidates', percent: 90 },
-  { key: 'done', label: 'voice.progressDone', percent: 100 },
-];
-
-const saveStages: ProcessingStage[] = [
-  { key: 'save_profile', label: 'voice.progressSaveProfile', percent: 30 },
-  { key: 'cache_speaker', label: 'voice.progressCacheSpeaker', percent: 60 },
-  { key: 'apply_config', label: 'voice.progressApplyConfig', percent: 82 },
-  { key: 'done', label: 'voice.progressDone', percent: 100 },
-];
-
 export const VoiceControlView: FC = () => {
   const { t } = useI18n();
   const [videoFile, setVideoFile] = useState<File | null>(null);
@@ -143,9 +138,8 @@ export const VoiceControlView: FC = () => {
   const [applyingSpeakerId, setApplyingSpeakerId] = useState('');
   const [deletingSpeakerId, setDeletingSpeakerId] = useState('');
   const [timings, setTimings] = useState<TaskTiming[]>([]);
-  const [progressStages, setProgressStages] = useState<ProcessingStage[]>([]);
-  const [progressPercent, setProgressPercent] = useState(0);
-  const [progressLabel, setProgressLabel] = useState<TranslationKey>('voice.progressWorking');
+  const [activeJob, setActiveJob] = useState<MaterialJobSnapshot | null>(null);
+  const [jobDialogOpen, setJobDialogOpen] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState('');
@@ -160,8 +154,15 @@ export const VoiceControlView: FC = () => {
   const [ytDlpStatus, setYtDlpStatus] = useState<YtDlpStatus | null>(null);
   const [installingYtDlp, setInstallingYtDlp] = useState(false);
   const [checkingCosyVoice, setCheckingCosyVoice] = useState(false);
-  const canExtract = !!videoFile && !extracting;
-  const canSave = !!audioPath && !!transcript.trim() && !saving;
+  const activeJobIdRef = useRef('');
+  const jobRunning = extracting || saving || probing || importing;
+  const canExtract = !!videoFile && !jobRunning;
+  const canSave = !!audioPath && !!transcript.trim() && !jobRunning;
+  const resourceJobActive = activeJob?.type === 'probe-url' || activeJob?.type === 'import-url';
+  const resourceProgressVisible = probing
+    || importing
+    || resourceImportDone
+    || Boolean(resourceJobActive && activeJob?.status === 'failed');
 
   useEffect(() => {
     const controller = new AbortController();
@@ -184,7 +185,10 @@ export const VoiceControlView: FC = () => {
 
     void loadConfig();
     void refreshYtDlpStatus();
-    return () => controller.abort();
+    return () => {
+      activeJobIdRef.current = '';
+      controller.abort();
+    };
   }, []);
 
   const displayAudioUrl = useMemo(() => {
@@ -222,7 +226,6 @@ export const VoiceControlView: FC = () => {
       promptText: bestCandidate?.text || data.transcript || value.promptText,
     }));
     setStatus(nextCandidates.length > 0 ? t('voice.candidateAutoSelected') : t('voice.noCandidates'));
-    completeProgress(data.timings);
   }
 
   function applyTimings(next?: TaskTiming[]) {
@@ -238,25 +241,51 @@ export const VoiceControlView: FC = () => {
     }
   }
 
-  function startProgress(stages: ProcessingStage[]) {
-    setProgressStages(stages);
-    setProgressPercent(stages[0]?.percent ?? 8);
-    setProgressLabel(stages[0]?.label ?? 'voice.progressWorking');
-  }
+  const pollJob = useCallback(async <T,>(
+    jobId: string,
+    onSuccess: (result: T, job: MaterialJobSnapshot<T>) => void,
+  ): Promise<MaterialJobSnapshot<T>> => {
+    activeJobIdRef.current = jobId;
+    while (activeJobIdRef.current === jobId) {
+      const response = await fetch(`/api/voice/cosyvoice/jobs/${encodeURIComponent(jobId)}`);
+      const data = await response.json().catch(() => ({})) as { job?: MaterialJobSnapshot<T>; error?: string };
+      if (!response.ok || !data.job) {
+        throw new Error(data.error || `HTTP ${response.status}`);
+      }
 
-  function completeProgress(next?: TaskTiming[]) {
-    const activeStages = progressStages.length > 0 ? progressStages : extractStages;
-    const doneStage = activeStages[activeStages.length - 1];
-    setProgressPercent(100);
-    setProgressLabel(doneStage?.label ?? 'voice.progressDone');
-    if (next && next.length > 0) {
-      setProgressStages(mergeProgressStages(activeStages, next));
+      setActiveJob(data.job);
+      if (data.job.status === 'succeeded') {
+        activeJobIdRef.current = '';
+        if (data.job.timings.length > 0) {
+          applyTimings(data.job.timings);
+        }
+        onSuccess(data.job.result as T, data.job);
+        return data.job;
+      }
+      if (data.job.status === 'failed') {
+        activeJobIdRef.current = '';
+        if (data.job.timings.length > 0) {
+          applyTimings(data.job.timings);
+        }
+        throw new Error(data.job.error || 'Job failed');
+      }
+
+      await sleep(700);
     }
-  }
 
-  function failProgress() {
-    setProgressPercent(100);
-    setProgressLabel('voice.progressFailed');
+    throw new Error('Job polling stopped.');
+  }, []);
+
+  async function startJob<T>(
+    response: Response,
+    onSuccess: (result: T, job: MaterialJobSnapshot<T>) => void,
+  ): Promise<MaterialJobSnapshot<T>> {
+    const data = await response.json().catch(() => ({})) as { job?: MaterialJobSnapshot<T>; error?: string };
+    if (!response.ok || !data.job) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    setActiveJob(data.job);
+    return pollJob<T>(data.job.id, onSuccess);
   }
 
   async function extractMaterial() {
@@ -267,24 +296,21 @@ export const VoiceControlView: FC = () => {
 
     setExtracting(true);
     setStatus(t('voice.extracting'));
-    startProgress(extractStages);
+    setJobDialogOpen(true);
+    setActiveJob(null);
     try {
       const form = new FormData();
       form.set('video', videoFile);
       form.set('enhanceVocals', enhanceVocals ? '1' : '0');
-      const response = await fetch('/api/voice/cosyvoice/extract', {
+      const response = await fetch('/api/voice/cosyvoice/jobs/extract', {
         method: 'POST',
         body: form,
       });
-      const data = await response.json().catch(() => ({})) as Partial<ExtractResponse> & { error?: string };
-      if (!response.ok) {
-        throw new Error(data.error || `HTTP ${response.status}`);
-      }
-
-      applyExtractResult(data);
+      await startJob<ExtractResponse>(response, (result) => {
+        applyExtractResult(result);
+      });
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Extract failed');
-      failProgress();
     } finally {
       setExtracting(false);
     }
@@ -297,21 +323,22 @@ export const VoiceControlView: FC = () => {
     }
     setProbing(true);
     setResourceStatus(t('voice.resourceProbing'));
+    setResourceImportDone(false);
+    setActiveJob(null);
     setResources([]);
     setSelectedFormatId('');
     try {
-      const response = await fetch('/api/voice/cosyvoice/probe-url', {
+      const response = await fetch('/api/voice/cosyvoice/jobs/probe-url', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: resourceUrl, resourceType: 'audio' }),
       });
-      const data = await response.json().catch(() => ({})) as { formats?: AudioResource[]; error?: string };
-      if (!response.ok) {
-        throw new Error(data.error || `HTTP ${response.status}`);
-      }
-      setResources(data.formats ?? []);
-      setSelectedFormatId(data.formats?.[0]?.formatId ?? '');
-      setResourceStatus((data.formats?.length ?? 0) > 0 ? '' : t('voice.resourceEmpty'));
+      await startJob<{ formats?: AudioResource[] }>(response, (result) => {
+        const formats = result.formats ?? [];
+        setResources(formats);
+        setSelectedFormatId(formats[0]?.formatId ?? '');
+        setResourceStatus(formats.length > 0 ? '' : t('voice.resourceEmpty'));
+      });
     } catch (error) {
       setResourceStatus(error instanceof Error ? error.message : 'Probe failed');
     } finally {
@@ -327,7 +354,7 @@ export const VoiceControlView: FC = () => {
         setYtDlpStatus(data.status);
       }
     } catch {
-      setYtDlpStatus({ installed: false, bin: 'src/server/tools/bin/yt-dlp', version: null, error: 'status unavailable' });
+      setYtDlpStatus({ installed: false, bin: 'data/tools/bin/yt-dlp', version: null, error: 'status unavailable' });
     }
   }
 
@@ -359,29 +386,25 @@ export const VoiceControlView: FC = () => {
     setImporting(true);
     setResourceImportDone(false);
     setResourceStatus(t('voice.resourceImporting'));
-    startProgress(importStages);
+    setActiveJob(null);
     try {
-      const response = await fetch('/api/voice/cosyvoice/import-url', {
+      const response = await fetch('/api/voice/cosyvoice/jobs/import-url', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: resourceUrl, formatId: selectedFormatId, enhanceVocals }),
       });
-      const data = await response.json().catch(() => ({})) as Partial<ExtractResponse> & { error?: string };
-      if (!response.ok) {
-        throw new Error(data.error || `HTTP ${response.status}`);
-      }
-
-      if (videoUrl.startsWith('blob:')) {
-        URL.revokeObjectURL(videoUrl);
-      }
-      setVideoFile(null);
-      setVideoUrl(data.videoUrl || '');
-      applyExtractResult(data);
-      setResourceImportDone(true);
-      setResourceStatus(t('voice.resourceImportDone'));
+      await startJob<ExtractResponse>(response, (result) => {
+        if (videoUrl.startsWith('blob:')) {
+          URL.revokeObjectURL(videoUrl);
+        }
+        setVideoFile(null);
+        setVideoUrl(result.videoUrl || '');
+        applyExtractResult(result);
+        setResourceImportDone(true);
+        setResourceStatus(t('voice.resourceImportDone'));
+      });
     } catch (error) {
       setResourceStatus(error instanceof Error ? error.message : 'Import failed');
-      failProgress();
     } finally {
       setImporting(false);
     }
@@ -402,6 +425,7 @@ export const VoiceControlView: FC = () => {
   }
 
   function closeResourceDialog() {
+    if (probing || importing) return;
     setResourceDialogOpen(false);
     setResourceUrl('');
     setResources([]);
@@ -410,6 +434,15 @@ export const VoiceControlView: FC = () => {
     setProbing(false);
     setImporting(false);
     setResourceImportDone(false);
+    if (resourceJobActive) {
+      setActiveJob(null);
+    }
+  }
+
+  function closeJobDialog() {
+    if (extracting || saving) return;
+    setJobDialogOpen(false);
+    setActiveJob(null);
   }
 
   async function saveMaterial() {
@@ -420,9 +453,10 @@ export const VoiceControlView: FC = () => {
 
     setSaving(true);
     setStatus(t('voice.saving'));
-    startProgress(saveStages);
+    setJobDialogOpen(true);
+    setActiveJob(null);
     try {
-      const response = await fetch('/api/voice/cosyvoice/save', {
+      const response = await fetch('/api/voice/cosyvoice/jobs/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -432,7 +466,7 @@ export const VoiceControlView: FC = () => {
           promptText: transcript,
         }),
       });
-      const data = await response.json().catch(() => ({})) as {
+      await startJob<{
         config?: VoiceConfig;
         speakers?: SpeakerProfile[];
         speaker?: SpeakerProfile;
@@ -440,28 +474,22 @@ export const VoiceControlView: FC = () => {
         cacheWarning?: string;
         timings?: TaskTiming[];
         error?: string;
-      };
-      if (!response.ok) {
-        throw new Error(data.error || `HTTP ${response.status}`);
-      }
-
-      if (data.config) {
-        setConfig({ ...defaultConfig, ...data.config });
-      }
-      if (data.speakers) {
-        setSpeakers(data.speakers);
-      }
-      if (data.speaker) {
-        setConfig((value) => ({ ...value, speakerId: data.speaker!.id }));
-      }
-      applyTimings(data.timings);
-      completeProgress(data.timings);
-      setStatus(data.cached === false && data.cacheWarning
-        ? `${t('voice.savedWithCacheWarning')} ${data.speaker?.id ?? ''} · ${data.cacheWarning}`
-        : `${t('voice.saved')} ${data.speaker?.id ?? ''}`.trim());
+      }>(response, (result) => {
+        if (result.config) {
+          setConfig({ ...defaultConfig, ...result.config });
+        }
+        if (result.speakers) {
+          setSpeakers(result.speakers);
+        }
+        if (result.speaker) {
+          setConfig((value) => ({ ...value, speakerId: result.speaker!.id }));
+        }
+        setStatus(result.cached === false && result.cacheWarning
+          ? `${t('voice.savedWithCacheWarning')} ${result.speaker?.id ?? ''} · ${result.cacheWarning}`
+          : `${t('voice.saved')} ${result.speaker?.id ?? ''}`.trim());
+      });
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Save failed');
-      failProgress();
     } finally {
       setSaving(false);
     }
@@ -561,7 +589,8 @@ export const VoiceControlView: FC = () => {
             <button
               type="button"
               onClick={() => setResourceDialogOpen(true)}
-              className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 hover:border-indigo-500"
+              disabled={jobRunning}
+              className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 hover:border-indigo-500 disabled:cursor-not-allowed disabled:text-slate-500"
             >
               {t('voice.resourceLink')}
             </button>
@@ -665,7 +694,12 @@ export const VoiceControlView: FC = () => {
           <div className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-lg border border-slate-700 bg-slate-950 p-5 shadow-2xl">
             <div className="mb-4 flex items-center justify-between">
               <h3 className="text-base font-semibold text-white">{t('voice.resourceLink')}</h3>
-              <button type="button" onClick={closeResourceDialog} className="text-sm text-slate-400 hover:text-white">
+              <button
+                type="button"
+                onClick={closeResourceDialog}
+                disabled={probing || importing}
+                className="text-sm text-slate-400 hover:text-white disabled:cursor-not-allowed disabled:text-slate-600"
+              >
                 {t('voice.cancel')}
               </button>
             </div>
@@ -711,14 +745,10 @@ export const VoiceControlView: FC = () => {
               </button>
             )}
             <div className="mt-4 min-h-[220px] overflow-y-auto rounded-md border border-slate-800 bg-slate-900">
-              {importing || resourceImportDone ? (
+              {resourceProgressVisible ? (
                 <div className="p-4">
                   <ProcessingProgress
-                    active={importing}
-                    percent={progressPercent}
-                    label={t(progressLabel)}
-                    stages={progressStages}
-                    timings={timings}
+                    job={activeJob}
                     t={t}
                     compact
                   />
@@ -764,7 +794,8 @@ export const VoiceControlView: FC = () => {
                 <button
                   type="button"
                   onClick={closeResourceDialog}
-                  className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:border-slate-500"
+                  disabled={probing || importing}
+                  className="rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:border-slate-500 disabled:cursor-not-allowed disabled:text-slate-500"
                 >
                   {resourceImportDone ? t('voice.close') : t('voice.cancel')}
                 </button>
@@ -784,15 +815,26 @@ export const VoiceControlView: FC = () => {
         </div>
       )}
 
-      <ProcessingProgress
-        active={extracting || importing || saving}
-        percent={progressPercent}
-        label={t(progressLabel)}
-        stages={progressStages}
-        timings={timings}
-        t={t}
-        hidden={resourceDialogOpen && (importing || resourceImportDone)}
-      />
+      {jobDialogOpen && activeJob && activeJob.type !== 'probe-url' && activeJob.type !== 'import-url' ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6">
+          <div className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-lg border border-slate-700 bg-slate-950 p-5 shadow-2xl">
+            <div className="mb-4 flex items-center justify-between">
+              <h3 className="text-base font-semibold text-white">{t('voice.progressTitle')}</h3>
+              <button
+                type="button"
+                onClick={closeJobDialog}
+                disabled={extracting || saving}
+                className="text-sm text-slate-400 hover:text-white disabled:cursor-not-allowed disabled:text-slate-600"
+              >
+                {t('voice.close')}
+              </button>
+            </div>
+            <div className="overflow-y-auto">
+              <ProcessingProgress job={activeJob} t={t} compact />
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <section className="flex min-h-[320px] flex-col rounded-lg border border-slate-800 bg-slate-900/60 p-4 xl:col-span-2">
         <div className="mb-3 flex items-center justify-between gap-3">
@@ -969,61 +1011,66 @@ function getCosyVoiceAudioUrl(path: string): string {
   return relativePath ? `/api/voice/cosyvoice/audio/${encodeURIComponent(relativePath)}` : '';
 }
 
-function mergeProgressStages(stages: ProcessingStage[], timings: TaskTiming[]): ProcessingStage[] {
-  const timingKeys = new Set(timings.map(item => item.key));
-  return stages.map(stage => timingKeys.has(stage.key) || stage.key === 'done'
-    ? stage
-    : { ...stage, percent: Math.min(stage.percent, 96) });
-}
-
 function ProcessingProgress({
-  active,
-  percent,
-  label,
-  stages,
-  timings,
+  job,
   t,
   compact = false,
-  hidden = false,
 }: {
-  active: boolean;
-  percent: number;
-  label: string;
-  stages: ProcessingStage[];
-  timings: TaskTiming[];
+  job: MaterialJobSnapshot | null;
   t: (key: TranslationKey) => string;
   compact?: boolean;
-  hidden?: boolean;
 }) {
-  if (hidden) return null;
-  if (!active && timings.length === 0 && stages.length === 0) return null;
-  const timingMap = new Map(timings.map(item => [item.key, item]));
-  const visibleStages = stages.length > 0 ? stages : extractStages;
+  if (!job) {
+    return (
+      <section className={`rounded-lg border border-slate-800 bg-slate-900/60 p-4 ${compact ? '' : 'xl:col-span-2'}`}>
+        <div className="text-sm text-slate-400">{t('voice.progressWorking')}</div>
+      </section>
+    );
+  }
+
+  const failed = job.status === 'failed';
+  const currentStage = job.stages.find(stage => stage.key === job.stageKey)
+    ?? job.stages.find(stage => stage.status === 'running')
+    ?? job.stages[0];
+  const label = failed
+    ? t('voice.progressFailed')
+    : job.status === 'succeeded'
+      ? t('voice.progressDone')
+      : t(getProgressLabel(currentStage?.key ?? job.stageKey));
 
   return (
     <section className={`rounded-lg border border-slate-800 bg-slate-900/60 p-4 ${compact ? '' : 'xl:col-span-2'}`}>
       <div className="mb-3 flex items-center justify-between gap-3">
         <h3 className="text-sm font-semibold text-white">{t('voice.progressTitle')}</h3>
-        <span className="font-mono text-sm text-emerald-300">{Math.round(percent)}%</span>
+        <span className={`font-mono text-sm ${failed ? 'text-red-300' : 'text-emerald-300'}`}>{Math.round(job.percent)}%</span>
       </div>
       <div className="h-2 overflow-hidden rounded-full bg-slate-800">
         <div
-          className="h-full rounded-full bg-emerald-500 transition-all duration-500"
-          style={{ width: `${Math.max(0, Math.min(100, percent))}%` }}
+          className={`h-full rounded-full transition-all duration-500 ${failed ? 'bg-red-500' : 'bg-emerald-500'}`}
+          style={{ width: `${Math.max(0, Math.min(100, job.percent))}%` }}
         />
       </div>
       <div className="mt-2 text-sm text-slate-300">{label}</div>
       <div className={`mt-4 grid gap-2 ${compact ? 'md:grid-cols-2' : 'md:grid-cols-2 xl:grid-cols-3'}`}>
-        {visibleStages.map((stage) => {
-          const timing = timingMap.get(stage.key);
-          const done = Boolean(timing) || stage.percent <= percent;
+        {job.stages.map((stage) => {
+          const done = stage.status === 'done' || stage.status === 'running' || stage.status === 'failed';
+          const stageFailed = stage.status === 'failed';
           return (
-            <div key={stage.key} className={`rounded-md border p-3 ${done ? 'border-emerald-500/40 bg-emerald-500/10' : 'border-slate-800 bg-slate-950'}`}>
+            <div
+              key={stage.key}
+              className={`rounded-md border p-3 ${
+                stageFailed
+                  ? 'border-red-500/40 bg-red-500/10'
+                  : done
+                    ? 'border-emerald-500/40 bg-emerald-500/10'
+                    : 'border-slate-800 bg-slate-950'
+              }`}
+            >
               <div className="flex items-center justify-between gap-3">
-                <span className="text-sm text-slate-200">{t(stage.label)}</span>
-                <span className="font-mono text-xs text-slate-400">{timing ? formatDurationMs(timing.durationMs) : `${stage.percent}%`}</span>
+                <span className="text-sm text-slate-200">{t(getProgressLabel(stage.key))}</span>
+                <span className="font-mono text-xs text-slate-400">{formatStageProgressValue(stage)}</span>
               </div>
-              {timing?.detail ? <div className="mt-1 truncate text-xs text-slate-500">{timing.detail}</div> : null}
+              {stage.detail ? <div className="mt-1 truncate text-xs text-slate-500">{stage.detail}</div> : null}
             </div>
           );
         })}
@@ -1032,7 +1079,59 @@ function ProcessingProgress({
   );
 }
 
+function getProgressLabel(stageKey: string): TranslationKey {
+  switch (stageKey) {
+    case 'upload':
+      return 'voice.progressUpload';
+    case 'validate_url':
+      return 'voice.progressValidateUrl';
+    case 'yt_dlp_probe':
+      return 'voice.progressProbe';
+    case 'parse_formats':
+      return 'voice.progressParseFormats';
+    case 'download':
+      return 'voice.progressDownload';
+    case 'extract_wav':
+      return 'voice.progressExtract';
+    case 'mdx_separation':
+      return 'voice.progressSeparate';
+    case 'funasr_analyze':
+      return 'voice.progressAnalyze';
+    case 'candidate_filter':
+      return 'voice.progressCandidateFilter';
+    case 'candidate_cut':
+    case 'candidate_export':
+      return 'voice.progressCandidates';
+    case 'save_profile':
+      return 'voice.progressSaveProfile';
+    case 'cache_speaker':
+      return 'voice.progressCacheSpeaker';
+    case 'apply_config':
+      return 'voice.progressApplyConfig';
+    case 'wake_ack_prewarm':
+      return 'voice.progressWakeAck';
+    case 'voice_asset_index':
+      return 'voice.progressVoiceAsset';
+    case 'cleanup':
+      return 'voice.progressCleanup';
+    case 'done':
+      return 'voice.progressDone';
+    default:
+      return 'voice.progressWorking';
+  }
+}
+
 function formatDurationMs(durationMs: number): string {
   if (durationMs >= 1000) return `${(durationMs / 1000).toFixed(2)}s`;
   return `${Math.round(durationMs)}ms`;
+}
+
+function formatStageProgressValue(stage: MaterialJobStage): string {
+  if (stage.durationMs !== undefined) return formatDurationMs(stage.durationMs);
+  if (stage.status === 'running' && stage.elapsedMs !== undefined) return formatDurationMs(stage.elapsedMs);
+  return '--';
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => window.setTimeout(resolve, ms));
 }

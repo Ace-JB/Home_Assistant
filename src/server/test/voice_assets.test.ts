@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
-import { mkdir, readFile } from 'fs/promises';
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'fs';
+import { mkdir, readFile, readdir } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -97,6 +97,61 @@ describe('Voice Asset Foundation', () => {
     expect(await removeVoiceSpeakerProfile('spk1')).toBe(true);
     expect(await listVoiceSpeakerProfiles()).toHaveLength(0);
   });
+
+  test('should cleanup stale index entries and trim separated cache safely', async () => {
+    const {
+      cleanupVoiceAssets,
+      getVoiceAssetPaths,
+      upsertVoiceAsset,
+      readVoiceAssetIndex,
+      ensureVoiceAssetDirs,
+    } = await import('@server/services/voice-assets');
+
+    const paths = await ensureVoiceAssetDirs();
+    const speakerPath = join(paths.promptsDir, 'speaker.wav');
+    const newestSeparatedPath = join(paths.separatedDir, 'newest.wav');
+    const recentSeparatedPath = join(paths.separatedDir, 'recent.wav');
+    const oldSeparatedPath = join(paths.separatedDir, 'old.wav');
+    const oldPcmPath = join(paths.cacheDir, 'old-score.pcm');
+    const recentPcmPath = join(paths.cacheDir, 'recent-score.pcm');
+    const stalePath = join(paths.promptsDir, 'missing.wav');
+
+    writeFileSync(speakerPath, 'speaker');
+    writeFileSync(newestSeparatedPath, 'newest');
+    writeFileSync(recentSeparatedPath, 'recent');
+    writeFileSync(oldSeparatedPath, 'old');
+    writeFileSync(oldPcmPath, 'old-pcm');
+    writeFileSync(recentPcmPath, 'recent-pcm');
+
+    const now = new Date('2026-06-09T00:00:00.000Z').getTime();
+    utimesSync(newestSeparatedPath, new Date(now - 1_000), new Date(now - 1_000));
+    utimesSync(recentSeparatedPath, new Date(now - 2_000), new Date(now - 2_000));
+    utimesSync(oldSeparatedPath, new Date(now - 10 * 24 * 60 * 60 * 1000), new Date(now - 10 * 24 * 60 * 60 * 1000));
+    utimesSync(oldPcmPath, new Date(now - 20 * 60 * 1000), new Date(now - 20 * 60 * 1000));
+    utimesSync(recentPcmPath, new Date(now - 1_000), new Date(now - 1_000));
+
+    await upsertVoiceAsset({ id: 'speaker', kind: 'speaker_prompt', path: speakerPath, createdAt: '2026-01-01T00:00:00.000Z' });
+    await upsertVoiceAsset({ id: 'newest', kind: 'separated', path: newestSeparatedPath, createdAt: '2026-01-01T00:00:00.000Z' });
+    await upsertVoiceAsset({ id: 'recent', kind: 'separated', path: recentSeparatedPath, createdAt: '2026-01-01T00:00:00.000Z' });
+    await upsertVoiceAsset({ id: 'old', kind: 'separated', path: oldSeparatedPath, createdAt: '2026-01-01T00:00:00.000Z' });
+    await upsertVoiceAsset({ id: 'stale', kind: 'candidate', path: stalePath, createdAt: '2026-01-01T00:00:00.000Z' });
+
+    const result = await cleanupVoiceAssets({
+      now,
+      separatedMaxAgeMs: 7 * 24 * 60 * 60 * 1000,
+      separatedMaxFiles: 2,
+      pcmCacheMaxAgeMs: 10 * 60 * 1000,
+    });
+
+    expect(result.removedStaleAssets).toBe(1);
+    expect(result.removedSeparatedAssets).toBe(1);
+    expect(result.removedSeparatedFiles).toBe(1);
+    expect(result.removedPcmCacheFiles).toBe(1);
+    const nextIndex = await readVoiceAssetIndex();
+    expect(nextIndex.assets.map(asset => asset.id).sort()).toEqual(['newest', 'recent', 'speaker']);
+    expect(await readdir(getVoiceAssetPaths().cacheDir)).toEqual(['recent-score.pcm']);
+    expect(await readdir(getVoiceAssetPaths().separatedDir)).toEqual(['newest.wav', 'recent.wav']);
+  });
 });
 
 describe('Voice Quality Scoring', () => {
@@ -140,6 +195,8 @@ describe('Voice Quality Scoring', () => {
     expect(score.speechRatio).toBeGreaterThan(0.5);
     expect(score.silenceRatio).toBeLessThan(0.5);
     expect(score.estimatedSnr).toBeGreaterThan(8);
+    const cacheFiles = await readdir(join(process.env.VOICE_DATA_ROOT!, 'assets', 'cache'));
+    expect(cacheFiles.filter(file => file.endsWith('.pcm'))).toHaveLength(0);
   });
 });
 

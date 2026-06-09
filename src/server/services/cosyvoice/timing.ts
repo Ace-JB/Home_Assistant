@@ -2,28 +2,36 @@ import type { TaskTiming } from './types';
 
 export type TaskTimer = ReturnType<typeof createTaskTimer>;
 
-export function createTaskTimer() {
+export type TaskTimerOptions = {
+    onMark?: (timing: TaskTiming) => void;
+};
+
+export function createTaskTimer(options: TaskTimerOptions = {}) {
     const startedAt = Date.now();
     const timings: TaskTiming[] = [];
     let finished = false;
 
     return {
         mark(key: string, label: string, markStartedAt: number, detail?: string) {
-            timings.push({
+            const timing = {
                 key,
                 label,
                 durationMs: Math.max(0, Date.now() - markStartedAt),
                 ...(detail ? { detail } : {}),
-            });
+            };
+            timings.push(timing);
+            options.onMark?.(timing);
         },
         finish() {
             if (!finished) {
                 finished = true;
-                timings.push({
+                const timing = {
                     key: 'total',
                     label: '总耗时',
                     durationMs: Math.max(0, Date.now() - startedAt),
-                });
+                };
+                timings.push(timing);
+                options.onMark?.(timing);
             }
             return timings;
         },

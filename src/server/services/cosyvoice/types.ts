@@ -5,6 +5,15 @@ export type TaskTiming = {
     detail?: string;
 };
 
+export type CosyVoiceProgressEvent = {
+    stageKey: string;
+    detail?: string;
+    percent?: number;
+    timing?: TaskTiming;
+};
+
+export type CosyVoiceProgressReporter = (event: CosyVoiceProgressEvent) => void;
+
 export type CosyVoiceExtractResult = {
     audioUrl: string;
     audioPath: string;
@@ -60,6 +69,7 @@ export type CosyVoiceMaterialCandidate = {
 
 export type CosyVoiceExtractOptions = {
     enhanceVocals?: boolean;
+    progress?: CosyVoiceProgressReporter;
 };
 
 export type YtDlpAudioFormat = {
