@@ -7,6 +7,13 @@ import { GLOBAL_CONFIG } from '@/global_config';
 import { funasrService } from '@/server/services/FunASRService';
 import { checkCosyVoiceService, getYtDlpStatus } from '@/server/services/CosyVoiceMaterialService';
 import { mdxSeparationService } from '@/server/services/voice-assets/MdxSeparationService';
+import {
+  getAssistantRuntimeService,
+  getAssistantRuntimeServiceIfInitialized,
+  type AssistantRuntimeServiceState,
+  type AssistantRuntimeStatus,
+  type AssistantRuntimeTask,
+} from '@/server/services/AssistantRuntimeService';
 
 export type DashboardServiceStatus = 'running' | 'starting' | 'stopping' | 'stopped' | 'degraded' | 'error' | 'unknown';
 export type DashboardInterfaceStatus = 'ok' | 'failed' | 'unknown';
@@ -43,6 +50,13 @@ export type DashboardServiceItem = {
   logsAvailable: boolean;
   actions: Array<'start' | 'stop'>;
   lastError: string | null;
+};
+
+export type DashboardServiceGroup = {
+  id: 'primary' | 'advanced';
+  title: string;
+  collapsed: boolean;
+  services: DashboardServiceItem[];
 };
 
 export type DashboardStatus = {
@@ -88,6 +102,7 @@ export type DashboardStatus = {
     };
   };
   services: DashboardServiceItem[];
+  serviceGroups: DashboardServiceGroup[];
   recommendations: Array<{
     level: DashboardRecommendationLevel;
     title: string;
@@ -121,7 +136,34 @@ type MacProcessSnapshot = {
   uptimeSeconds: number | null;
 };
 
-const SERVICE_IDS = new Set(['main', 'realtime-socket', 'webrtc', 'monitor', 'funasr', 'cosyvoice', 'voice-separation', 'ffmpeg', 'yt-dlp']);
+const SERVICE_IDS = new Set(['main', 'assistant-runtime', 'voice-asr', 'live-vision', 'realtime-socket', 'webrtc', 'monitor', 'funasr', 'cosyvoice', 'voice-separation', 'ffmpeg', 'yt-dlp']);
+const STOPPED_ASSISTANT_RUNTIME: AssistantRuntimeStatus = {
+  status: 'stopped',
+  mode: 'minimal',
+  activeMode: null,
+  startedAt: null,
+  uptimeSeconds: null,
+  lastError: null,
+  degradedReasons: [],
+  actions: ['start'],
+  services: [
+    { id: 'monitor', status: 'stopped', message: null },
+    { id: 'realtime-socket', status: 'stopped', message: null },
+    { id: 'webrtc', status: 'stopped', message: null },
+    { id: 'python-services', status: 'stopped', message: null },
+  ],
+  tasks: [
+    { id: 'assistant-runtime', label: 'Assistant Runtime', group: 'core', status: 'pending', required: true, selected: true },
+    { id: 'funasr', label: 'Voice ASR / FunASR', group: 'core', status: 'pending', required: true, selected: true },
+    { id: 'audio-monitor', label: 'Audio Monitor / Wake ASR', group: 'core', status: 'pending', required: true, selected: true },
+    { id: 'realtime-socket', label: 'Realtime Socket', group: 'core', status: 'pending', required: true, selected: true },
+    { id: 'cosyvoice', label: 'CosyVoice TTS', group: 'optional', status: 'skipped', required: false, selected: false },
+    { id: 'live-vision', label: 'Live / Vision', group: 'optional', status: 'skipped', required: false, selected: false },
+    { id: 'webrtc', label: 'WebRTC Stream', group: 'optional', status: 'skipped', required: false, selected: false },
+    { id: 'voice-separation', label: 'MDX Voice Separation', group: 'optional', status: 'skipped', required: false, selected: false },
+  ],
+  operation: null,
+};
 const dashboardLogs = new Map<string, DashboardLogEntry[]>();
 const execFileAsync = promisify(execFile);
 let cosyVoiceStarting = false;
@@ -129,32 +171,58 @@ let cosyVoiceLastError: string | null = null;
 
 export async function getDashboardStatus(): Promise<DashboardStatus> {
   const metrics = await collectDashboardMetrics();
+  const assistantRuntime = getAssistantRuntimeSnapshot();
   const [cosyVoice, ytDlp] = await Promise.all([
     getCosyVoiceDashboardStatus(metrics),
     getYtDlpDashboardStatus(),
   ]);
   const funasr = getFunAsrDashboardStatus(metrics);
-  const services = [
-    getMainServiceStatus(metrics),
-    getRealtimeSocketStatus(metrics),
-    getWebRtcStatus(metrics),
-    getMonitorStatus(metrics),
-    funasr,
+  const main = getMainServiceStatus(metrics);
+  const assistant = getAssistantRuntimeDashboardStatus(metrics, assistantRuntime);
+  const realtimeSocket = getRealtimeSocketStatus(metrics, assistantRuntime);
+  const webRtc = getWebRtcStatus(metrics, assistantRuntime);
+  const monitor = getMonitorStatus(metrics, assistantRuntime);
+  const voiceAsr = getVoiceAsrDashboardStatus(metrics, assistantRuntime, funasr, monitor);
+  const liveVision = getLiveVisionDashboardStatus(metrics, assistantRuntime, monitor, webRtc);
+  const primaryServices = [
+    main,
+    assistant,
+    voiceAsr,
+    liveVision,
+  ];
+  const advancedServices = [
     cosyVoice,
     getVoiceSeparationDashboardStatus(metrics),
     getFfmpegStatus(),
     ytDlp,
+    realtimeSocket,
+    webRtc,
+  ];
+  const services = [
+    ...primaryServices,
+    ...advancedServices,
+    monitor,
+    funasr,
   ];
 
   return {
     system: getSystemStatus(metrics),
     services,
+    serviceGroups: [
+      { id: 'primary', title: 'Core Services', collapsed: false, services: primaryServices },
+      { id: 'advanced', title: 'Advanced Dependencies', collapsed: true, services: advancedServices },
+    ],
     recommendations: buildRecommendations(services),
   };
 }
 
 export async function startDashboardService(serviceId: string): Promise<DashboardServiceItem> {
   assertKnownService(serviceId);
+  if (serviceId === 'assistant-runtime') {
+    appendLog('assistant-runtime', 'info', 'Start requested from dashboard');
+    const status = await getAssistantRuntimeService().start();
+    return getAssistantRuntimeDashboardStatus(await collectDashboardMetrics(), status);
+  }
   if (serviceId === 'funasr') {
     appendLog('funasr', 'info', 'Start requested from dashboard');
     await funasrService.start();
@@ -173,6 +241,11 @@ export async function startDashboardService(serviceId: string): Promise<Dashboar
 
 export async function stopDashboardService(serviceId: string): Promise<DashboardServiceItem> {
   assertKnownService(serviceId);
+  if (serviceId === 'assistant-runtime') {
+    appendLog('assistant-runtime', 'info', 'Stop requested from dashboard');
+    const status = await getAssistantRuntimeService().stop();
+    return getAssistantRuntimeDashboardStatus(await collectDashboardMetrics(), status);
+  }
   if (serviceId === 'funasr') {
     appendLog('funasr', 'info', 'Stop requested from dashboard');
     await funasrService.stop();
@@ -194,6 +267,55 @@ export type StopAllDashboardManagedServicesDeps = {
   stopCosyVoice?: () => Promise<void>;
   stopMdx?: () => Promise<void>;
 };
+
+export type StartAllDashboardManagedServicesDeps = {
+  startFunASR?: () => Promise<void>;
+  startCosyVoice?: () => Promise<void>;
+  startMdx?: () => Promise<void>;
+};
+
+export async function startDashboardManagedFunASR(): Promise<void> {
+  appendLog('funasr', 'info', 'Start requested by assistant runtime');
+  await funasrService.start();
+}
+
+export async function startDashboardManagedCosyVoice(): Promise<void> {
+  await startManagedCosyVoice();
+}
+
+export async function startDashboardManagedVoiceSeparation(): Promise<void> {
+  appendLog('voice-separation', 'info', 'Start requested by assistant runtime');
+  await mdxSeparationService.start();
+}
+
+export async function startAllDashboardManagedServices(deps?: StartAllDashboardManagedServicesDeps): Promise<void> {
+  const tasks = deps
+    ? [
+      ['funasr', deps.startFunASR],
+      ['cosyvoice', deps.startCosyVoice],
+      ['voice-separation', deps.startMdx],
+    ] as const
+    : [
+      ['funasr', () => funasrService.start()],
+      ['cosyvoice', startManagedCosyVoice],
+      ['voice-separation', () => mdxSeparationService.start()],
+    ] as const;
+
+  appendLog('main', 'info', 'Starting all assistant runtime Python services...');
+  const results = await Promise.allSettled(tasks.map(async ([serviceId, start]) => {
+    if (!start) return;
+    appendLog(serviceId, 'info', 'Start requested by assistant runtime');
+    await start();
+  }));
+  const failures = results
+    .map((result, index) => result.status === 'rejected'
+      ? `${tasks[index]?.[0] ?? 'service'}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`
+      : null)
+    .filter((value): value is string => Boolean(value));
+  if (failures.length > 0) {
+    throw new Error(failures.join('; '));
+  }
+}
 
 export async function stopAllDashboardManagedServices(deps?: StopAllDashboardManagedServicesDeps): Promise<void> {
   if (deps) {
@@ -298,42 +420,77 @@ function getMainServiceStatus(metrics: DashboardMetrics): DashboardServiceItem {
   };
 }
 
-function getRealtimeSocketStatus(metrics: DashboardMetrics): DashboardServiceItem {
+function getAssistantRuntimeDashboardStatus(metrics: DashboardMetrics, runtime: AssistantRuntimeStatus): DashboardServiceItem {
   const processInfo = getProcessSnapshot(metrics, process.pid);
+  const running = runtime.status === 'running' || runtime.status === 'degraded' || runtime.status === 'starting' || runtime.status === 'stopping';
+  const detail = runtime.activeMode
+    ? `mode=${runtime.activeMode}`
+    : 'Assistant runtime is offline until started from the dashboard.';
+  return {
+    id: 'assistant-runtime',
+    name: 'Assistant Runtime',
+    status: runtime.status,
+    controllable: true,
+    controlReason: null,
+    pid: running ? process.pid : null,
+    resources: {
+      cpuPercent: running ? processInfo.cpuPercent : null,
+      memoryMb: running ? processInfo.memoryMb : null,
+      uptimeSeconds: runtime.uptimeSeconds,
+    },
+    interfaces: [{
+      label: 'Runtime control',
+      url: '/api/assistant-runtime/status',
+      status: runtime.status === 'error' ? 'failed' : 'ok',
+      statusCode: null,
+      latencyMs: null,
+      error: runtime.lastError ?? (runtime.degradedReasons.length > 0 ? runtime.degradedReasons.join('; ') : detail),
+    }],
+    logsAvailable: true,
+    actions: runtime.actions,
+    lastError: runtime.lastError ?? (runtime.degradedReasons.length > 0 ? runtime.degradedReasons.join('; ') : null),
+  };
+}
+
+function getRealtimeSocketStatus(metrics: DashboardMetrics, runtime: AssistantRuntimeStatus): DashboardServiceItem {
+  const processInfo = getProcessSnapshot(metrics, process.pid);
+  const state = getRuntimeOwnedService(runtime, 'realtime-socket');
+  const running = state.status === 'running' || state.status === 'degraded' || state.status === 'starting' || state.status === 'stopping';
   return {
     id: 'realtime-socket',
     name: 'Realtime Socket',
-    status: 'running',
+    status: toDashboardStatus(state.status),
     controllable: false,
     controlReason: 'Realtime socket is owned by the monitor/main server lifecycle.',
-    pid: process.pid,
+    pid: running ? process.pid : null,
     resources: {
-      cpuPercent: processInfo.cpuPercent,
-      memoryMb: processInfo.memoryMb,
-      uptimeSeconds: processInfo.uptimeSeconds ?? Math.floor(process.uptime()),
+      cpuPercent: running ? processInfo.cpuPercent : null,
+      memoryMb: running ? processInfo.memoryMb : null,
+      uptimeSeconds: running ? processInfo.uptimeSeconds ?? Math.floor(process.uptime()) : null,
     },
     interfaces: [{
       label: 'WebSocket',
       url: `ws://localhost:${GLOBAL_CONFIG.SERVER.SOCKET_PORT}/ws/realtime`,
-      status: 'unknown',
+      status: running ? 'unknown' : 'failed',
       statusCode: null,
       latencyMs: null,
-      error: 'WebSocket upgrade is not probed by dashboard polling.',
+      error: running ? 'WebSocket upgrade is not probed by dashboard polling.' : 'Assistant runtime is stopped.',
     }],
     logsAvailable: false,
     actions: [],
-    lastError: null,
+    lastError: state.message,
   };
 }
 
-function getWebRtcStatus(metrics: DashboardMetrics): DashboardServiceItem {
-  const enabled = GLOBAL_CONFIG.SERVER.DEMO_MODE !== 'audio';
+function getWebRtcStatus(metrics: DashboardMetrics, runtime: AssistantRuntimeStatus): DashboardServiceItem {
+  const state = getRuntimeOwnedService(runtime, 'webrtc');
   const ffmpeg = findProcessByName(metrics, 'ffmpeg');
   const processInfo = getProcessSnapshot(metrics, ffmpeg?.pid);
+  const running = state.status === 'running' || state.status === 'degraded' || state.status === 'starting' || state.status === 'stopping';
   return {
     id: 'webrtc',
     name: 'WebRTC Stream',
-    status: enabled ? 'unknown' : 'stopped',
+    status: toDashboardStatus(state.status),
     controllable: false,
     controlReason: 'WebRTC stream starts and stops with browser signaling sessions.',
     pid: ffmpeg?.pid ?? null,
@@ -345,38 +502,110 @@ function getWebRtcStatus(metrics: DashboardMetrics): DashboardServiceItem {
     interfaces: [{
       label: 'Signaling',
       url: `ws://localhost:${GLOBAL_CONFIG.SERVER.PORT}/webrtc`,
-      status: enabled ? 'unknown' : 'failed',
+      status: running ? 'unknown' : 'failed',
       statusCode: null,
       latencyMs: null,
-      error: enabled ? 'Waiting for a browser WebRTC session.' : 'Disabled in audio demo mode.',
+      error: running ? 'Waiting for a browser WebRTC session.' : 'Assistant runtime is stopped.',
     }],
     logsAvailable: false,
     actions: [],
-    lastError: null,
+    lastError: state.message,
   };
 }
 
-function getMonitorStatus(metrics: DashboardMetrics): DashboardServiceItem {
+function getMonitorStatus(metrics: DashboardMetrics, runtime: AssistantRuntimeStatus): DashboardServiceItem {
   const processInfo = getProcessSnapshot(metrics, process.pid);
+  const state = getRuntimeOwnedService(runtime, 'monitor');
+  const running = state.status === 'running' || state.status === 'degraded' || state.status === 'starting' || state.status === 'stopping';
   return {
     id: 'monitor',
     name: 'Sentinel Monitor',
-    status: 'running',
+    status: toDashboardStatus(state.status),
     controllable: false,
     controlReason: 'Camera and microphone loops are coupled to the assistant runtime.',
-    pid: process.pid,
+    pid: running ? process.pid : null,
     resources: {
-      cpuPercent: processInfo.cpuPercent,
-      memoryMb: processInfo.memoryMb,
-      uptimeSeconds: processInfo.uptimeSeconds ?? Math.floor(process.uptime()),
+      cpuPercent: running ? processInfo.cpuPercent : null,
+      memoryMb: running ? processInfo.memoryMb : null,
+      uptimeSeconds: running ? processInfo.uptimeSeconds ?? Math.floor(process.uptime()) : null,
     },
     interfaces: [
-      { label: 'Camera', url: `avfoundation:${GLOBAL_CONFIG.VIDEO.DEVICE}`, status: 'unknown', statusCode: null, latencyMs: null, error: 'Hardware stream health is reported in live monitor.' },
-      { label: 'Microphone', url: `avfoundation:${GLOBAL_CONFIG.VOICE.DEVICE}`, status: 'unknown', statusCode: null, latencyMs: null, error: 'Hardware stream health is reported in live monitor.' },
+      { label: 'Camera', url: `avfoundation:${GLOBAL_CONFIG.VIDEO.DEVICE}`, status: running ? 'unknown' : 'failed', statusCode: null, latencyMs: null, error: running ? 'Hardware stream health is reported in live monitor.' : 'Assistant runtime is stopped.' },
+      { label: 'Microphone', url: `avfoundation:${GLOBAL_CONFIG.VOICE.DEVICE}`, status: running ? 'unknown' : 'failed', statusCode: null, latencyMs: null, error: running ? 'Hardware stream health is reported in live monitor.' : 'Assistant runtime is stopped.' },
     ],
     logsAvailable: false,
     actions: [],
-    lastError: null,
+    lastError: state.message,
+  };
+}
+
+function getVoiceAsrDashboardStatus(
+  metrics: DashboardMetrics,
+  runtime: AssistantRuntimeStatus,
+  funasr: DashboardServiceItem,
+  monitor: DashboardServiceItem,
+): DashboardServiceItem {
+  const audioTask = getRuntimeTask(runtime, 'audio-monitor');
+  const funasrTask = getRuntimeTask(runtime, 'funasr');
+  const status = aggregateProductStatus(runtime, [funasrTask?.status, audioTask?.status], [funasr.status, monitor.status]);
+  const processInfo = getProcessSnapshot(metrics, process.pid);
+  const running = status === 'running' || status === 'degraded' || status === 'starting' || status === 'stopping';
+  const taskError = [funasrTask, audioTask].map(task => task?.message).find(Boolean) ?? null;
+
+  return {
+    id: 'voice-asr',
+    name: 'Voice ASR',
+    status,
+    controllable: false,
+    controlReason: 'Voice ASR is started by the Assistant Runtime minimal profile.',
+    pid: running ? process.pid : null,
+    resources: {
+      cpuPercent: running ? processInfo.cpuPercent : null,
+      memoryMb: running ? processInfo.memoryMb : null,
+      uptimeSeconds: running ? runtime.uptimeSeconds : null,
+    },
+    interfaces: [
+      ...funasr.interfaces,
+      ...monitor.interfaces.filter(item => item.label === 'Microphone'),
+    ],
+    logsAvailable: funasr.logsAvailable,
+    actions: [],
+    lastError: taskError ?? funasr.lastError ?? monitor.lastError,
+  };
+}
+
+function getLiveVisionDashboardStatus(
+  metrics: DashboardMetrics,
+  runtime: AssistantRuntimeStatus,
+  monitor: DashboardServiceItem,
+  webRtc: DashboardServiceItem,
+): DashboardServiceItem {
+  const liveTask = getRuntimeTask(runtime, 'live-vision');
+  const webRtcTask = getRuntimeTask(runtime, 'webrtc');
+  const status = aggregateProductStatus(runtime, [liveTask?.status, webRtcTask?.status], [monitor.status, webRtc.status]);
+  const processInfo = getProcessSnapshot(metrics, process.pid);
+  const running = status === 'running' || status === 'degraded' || status === 'starting' || status === 'stopping';
+  const taskError = [liveTask, webRtcTask].map(task => task?.message).find(Boolean) ?? null;
+
+  return {
+    id: 'live-vision',
+    name: 'Live / Vision',
+    status,
+    controllable: false,
+    controlReason: 'Live video and vision detection are optional startup tools.',
+    pid: running ? process.pid : null,
+    resources: {
+      cpuPercent: running ? processInfo.cpuPercent : null,
+      memoryMb: running ? processInfo.memoryMb : null,
+      uptimeSeconds: running ? runtime.uptimeSeconds : null,
+    },
+    interfaces: [
+      ...monitor.interfaces.filter(item => item.label === 'Camera'),
+      ...webRtc.interfaces,
+    ],
+    logsAvailable: false,
+    actions: [],
+    lastError: taskError ?? monitor.lastError ?? webRtc.lastError,
   };
 }
 
@@ -657,12 +886,25 @@ function withTrailingSlash(value: string): string {
 }
 
 function buildRecommendations(services: DashboardServiceItem[]): DashboardStatus['recommendations'] {
+  const assistantRuntime = services.find(service => service.id === 'assistant-runtime');
+  const assistantRuntimeStopped = assistantRuntime?.status === 'stopped';
   const recommendations: DashboardStatus['recommendations'] = [{
     level: 'info',
     title: 'GPU metrics unavailable',
     detail: 'The dashboard does not collect GPU metrics without an external exporter.',
   }];
+  if (assistantRuntimeStopped) {
+    recommendations.push({
+      level: 'info',
+      title: 'Assistant runtime is offline',
+      detail: 'Use the sidebar control or dashboard card to start camera, microphone, ASR, and model services.',
+      serviceId: 'assistant-runtime',
+    });
+  }
   for (const service of services) {
+    if (assistantRuntimeStopped && ['monitor', 'realtime-socket', 'webrtc', 'funasr', 'cosyvoice', 'voice-separation'].includes(service.id)) {
+      continue;
+    }
     if (service.status === 'error' || service.status === 'degraded') {
       recommendations.push({
         level: 'critical',
@@ -687,6 +929,37 @@ function buildRecommendations(services: DashboardServiceItem[]): DashboardStatus
     }
   }
   return recommendations;
+}
+
+function getAssistantRuntimeSnapshot(): AssistantRuntimeStatus {
+  return getAssistantRuntimeServiceIfInitialized()?.getStatus() ?? STOPPED_ASSISTANT_RUNTIME;
+}
+
+function getRuntimeOwnedService(runtime: AssistantRuntimeStatus, id: AssistantRuntimeServiceState['id']): AssistantRuntimeServiceState {
+  return runtime.services.find(service => service.id === id) ?? { id, status: 'stopped', message: null };
+}
+
+function getRuntimeTask(runtime: AssistantRuntimeStatus, id: AssistantRuntimeTask['id']): AssistantRuntimeTask | null {
+  return runtime.tasks.find(task => task.id === id) ?? null;
+}
+
+function aggregateProductStatus(
+  runtime: AssistantRuntimeStatus,
+  taskStatuses: Array<AssistantRuntimeTask['status'] | undefined>,
+  serviceStatuses: DashboardServiceStatus[],
+): DashboardServiceStatus {
+  if (runtime.status === 'stopped') return 'stopped';
+  if (runtime.status === 'error') return 'error';
+  if (taskStatuses.includes('failed') || serviceStatuses.includes('error')) return 'error';
+  if (runtime.status === 'degraded' || serviceStatuses.includes('degraded')) return 'degraded';
+  if (taskStatuses.includes('running') || serviceStatuses.includes('starting') || runtime.status === 'starting') return 'starting';
+  if (taskStatuses.includes('stopping') || serviceStatuses.includes('stopping') || runtime.status === 'stopping') return 'stopping';
+  if (taskStatuses.includes('ready') || serviceStatuses.includes('running')) return 'running';
+  return 'stopped';
+}
+
+function toDashboardStatus(status: AssistantRuntimeServiceState['status']): DashboardServiceStatus {
+  return status;
 }
 
 function appendLog(serviceId: string, level: DashboardLogEntry['level'], message: string): void {

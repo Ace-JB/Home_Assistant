@@ -33,25 +33,66 @@ import {
 import {
   getDashboardServiceLogs,
   getDashboardStatus,
+  startDashboardManagedCosyVoice,
+  startDashboardManagedFunASR,
+  startDashboardManagedVoiceSeparation,
   startDashboardService,
   stopAllDashboardManagedServices,
   stopDashboardService,
 } from "@server/services/DashboardService";
 import { benchmarkService, type BenchmarkRunInput, type BenchmarkScenarioId } from "@server/services/BenchmarkService";
 import { pipelineLogs } from "@server/services/PipelineLogService";
+import {
+  AssistantRuntimeService,
+  type AssistantRuntimeOptionalService,
+  type AssistantRuntimeStartInput,
+  getAssistantRuntimeService,
+  isAssistantRuntimeAvailable,
+} from "@server/services/AssistantRuntimeService";
 
 const serverStartedAt = Date.now();
 
 // 初始化生命周期管理
 LifecycleManager.init();
 
-const demoMode = GLOBAL_CONFIG.SERVER.DEMO_MODE;
-const demoPath = demoMode === 'video'
-  ? '/demo/video'
-  : demoMode === 'audio'
-    ? '/demo/audio'
-    : null;
-const webrtcManager = demoMode === 'audio' ? null : new WebRTCManager();
+let webrtcManager: WebRTCManager | null = null;
+
+function ensureWebRTCManager(): WebRTCManager {
+  if (!webrtcManager) {
+    webrtcManager = new WebRTCManager();
+  }
+  return webrtcManager;
+}
+
+function stopWebRTCManager(): void {
+  webrtcManager?.shutdown();
+  webrtcManager = null;
+}
+
+const assistantRuntime = getAssistantRuntimeService(() => new AssistantRuntimeService({
+  startMonitor,
+  stopMonitor,
+  startFunASR: startDashboardManagedFunASR,
+  startCosyVoice: startDashboardManagedCosyVoice,
+  startVoiceSeparation: startDashboardManagedVoiceSeparation,
+  stopPythonServices: stopAllDashboardManagedServices,
+  startWebRTC: () => {
+    ensureWebRTCManager();
+  },
+  stopRealtimeSocket: stopRealtimeSocketServer,
+  stopWebRTC: stopWebRTCManager,
+  now: () => Date.now(),
+  log: (event, metadata) => {
+    pipelineLogs.append({
+      category: 'system',
+      level: event.endsWith('failed') ? 'error' : 'info',
+      title: event,
+      message: event,
+      metadata,
+      pipelineId: 'assistant-runtime',
+    });
+  },
+}));
 
 
 const server = serve<SocketClientData>({
@@ -59,10 +100,6 @@ const server = serve<SocketClientData>({
   routes: {
     "/": {
       GET() {
-        if (demoPath) {
-          return Response.redirect(demoPath, 302);
-        }
-
         return index;
       },
     },
@@ -73,16 +110,23 @@ const server = serve<SocketClientData>({
       },
     },
 
-    ...(webrtcManager ? {
-      "/webrtc": {
+    "/webrtc": {
       GET(req: Request, server: any) {
+        if (!isAssistantRuntimeAvailable(assistantRuntime.getStatus())) {
+          return new Response("Assistant runtime is offline", { status: 409 });
+        }
+        try {
+          ensureWebRTCManager();
+        } catch (error) {
+          console.error("[WebRTC] failed to initialize:", error);
+          return new Response("WebRTC runtime unavailable", { status: 503 });
+        }
         console.log("⚡ Upgrading WebRTC Connection...");
         const success = server.upgrade(req, { data: { isWebRTC: true } });
         console.log(`⚡ Upgrade Success: ${success}`);
         return success ? undefined : new Response("Upgrade failed", { status: 400 });
       },
-      },
-    } : {}),
+    },
 
     "/models/*": async (req: Request) => {
       const url = new URL(req.url);
@@ -100,6 +144,35 @@ const server = serve<SocketClientData>({
     "/api/dashboard/status": {
       async GET() {
         return Response.json(await getDashboardStatus());
+      },
+    },
+
+    "/api/assistant-runtime/status": {
+      GET() {
+        return Response.json(assistantRuntime.getStatus());
+      },
+    },
+
+    "/api/assistant-runtime/start": {
+      async POST(req: Request) {
+        try {
+          const body = await req.json().catch(() => ({}));
+          return Response.json(await assistantRuntime.start(parseAssistantRuntimeStartInput(body)));
+        } catch (error) {
+          console.error("[AssistantRuntime] start failed:", error);
+          return Response.json({ error: error instanceof Error ? error.message : "start failed" }, { status: 409 });
+        }
+      },
+    },
+
+    "/api/assistant-runtime/stop": {
+      async POST() {
+        try {
+          return Response.json(await assistantRuntime.stop());
+        } catch (error) {
+          console.error("[AssistantRuntime] stop failed:", error);
+          return Response.json({ error: error instanceof Error ? error.message : "stop failed" }, { status: 409 });
+        }
       },
     },
 
@@ -883,15 +956,12 @@ const server = serve<SocketClientData>({
   },
 });
 
-LifecycleManager.registerShutdownTask('monitor runtime', stopMonitor);
-LifecycleManager.registerShutdownTask('WebRTC runtime', () => {
-  webrtcManager?.shutdown();
+LifecycleManager.registerShutdownTask('assistant runtime', async () => {
+  await assistantRuntime.stop();
 });
-LifecycleManager.registerShutdownTask('realtime socket server', stopRealtimeSocketServer);
 LifecycleManager.registerShutdownTask('HTTP server', () => {
   server.stop(true);
 });
-LifecycleManager.registerShutdownTask('Python model services', stopAllDashboardManagedServices);
 LifecycleManager.registerShutdownTask('SQLite databases', () => {
   db.close();
   memory.close();
@@ -907,17 +977,11 @@ pipelineLogs.append({
   timings: [{ key: 'server_startup', label: 'Server startup', durationMs: Date.now() - serverStartedAt }],
   metadata: {
     port: GLOBAL_CONFIG.SERVER.PORT,
-    demoMode,
     url: String(server.url),
   },
   pipelineId: 'system',
 });
-if (demoPath) {
-  console.log(`🧪 Demo mode: ${demoMode}. Open ${server.url}${demoPath}`);
-}
-
-// 启动后台监控 (摄像头、麦克风、语音识别等)
-void startMonitor(demoMode);
+console.log("🟢 Web shell is ready. Assistant runtime is stopped until started from the UI.");
 
 function getConversationIdFromUrl(req: Request): string | null {
   const url = new URL(req.url);
@@ -1137,4 +1201,21 @@ function parseMemoryLocation(value: unknown): MemoryLocation | undefined {
 
 function parseMemoryCandidateStatus(value: unknown): MemoryCandidateStatus | undefined {
   return value === "pending" || value === "approved" || value === "rejected" ? value : undefined;
+}
+
+function parseAssistantRuntimeStartInput(body: unknown): AssistantRuntimeStartInput {
+  const input = body && typeof body === "object" && !Array.isArray(body)
+    ? body as Record<string, unknown>
+    : {};
+  const optionalServices = Array.isArray(input.optionalServices)
+    ? input.optionalServices.filter(isAssistantRuntimeOptionalService)
+    : [];
+  return {
+    mode: input.mode === "full" ? "full" : "minimal",
+    optionalServices,
+  };
+}
+
+function isAssistantRuntimeOptionalService(value: unknown): value is AssistantRuntimeOptionalService {
+  return value === "cosyvoice" || value === "live-vision" || value === "voice-separation";
 }

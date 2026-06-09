@@ -5,7 +5,7 @@ import { LiveView } from './components/LiveView';
 import { MemoryView } from './components/MemoryView';
 import { VoiceControlView } from './components/VoiceControlView';
 import { LogsView } from './components/LogsView';
-import { DemoRouter } from './demos/DemoRouter';
+import { useAssistantRuntime } from './hooks/useAssistantRuntime';
 import { useRealtimeFeedback } from './hooks/useRealtimeFeedback';
 import { useI18n, type Language } from './i18n';
 
@@ -14,7 +14,8 @@ type AppTab = 'dashboard' | 'live' | 'memory' | 'voice' | 'logs';
 const App = () => {
   const [activeTab, setActiveTab] = useState<AppTab>('dashboard');
   const [currentTime, setCurrentTime] = useState(new Date());
-  const realtime = useRealtimeFeedback();
+  const assistantRuntime = useAssistantRuntime();
+  const realtime = useRealtimeFeedback(assistantRuntime.available);
   const { language, setLanguage, t } = useI18n();
 
   useEffect(() => {
@@ -26,10 +27,24 @@ const App = () => {
     realtime.setLanguage(language);
   }, [language]);
 
+  useEffect(() => {
+    if (!assistantRuntime.available && activeTab !== 'dashboard') {
+      setActiveTab('dashboard');
+    }
+  }, [assistantRuntime.available, activeTab]);
+
   return (
-    <DemoRouter>
     <div className="flex w-screen h-screen bg-slate-950 text-slate-200 font-sans overflow-hidden">
-      <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} />
+      <Sidebar
+        activeTab={activeTab}
+        setActiveTab={setActiveTab}
+        runtime={assistantRuntime.status}
+        runtimeAvailable={assistantRuntime.available}
+        runtimeBusy={assistantRuntime.busyAction !== null}
+        runtimeError={assistantRuntime.error}
+        onRuntimeStart={assistantRuntime.start}
+        onRuntimeStop={assistantRuntime.stop}
+      />
 
       <main className="flex-1 flex flex-col min-w-0 relative">
         <header className="h-16 border-b border-slate-800 flex items-center justify-between px-8 bg-slate-900/50">
@@ -70,7 +85,6 @@ const App = () => {
         </div>
       </main>
     </div>
-    </DemoRouter>
   );
 };
 

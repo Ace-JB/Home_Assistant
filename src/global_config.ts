@@ -1,4 +1,3 @@
-// src/config.ts
 import { loadRuntimeEnv } from '@/config/loadEnv';
 import { getCosyVoiceModelDir, getModelBasePath, getPythonServicesRoot, getPythonServicesScriptRoot } from '@/server/services/runtime-paths';
 
@@ -9,28 +8,32 @@ const PYTHON_SERVICES_SCRIPT_ROOT = getPythonServicesScriptRoot();
 const MODEL_BASE_PATH = getModelBasePath();
 
 export const GLOBAL_CONFIG = {
+  // Media sync window shared by camera/audio buffering.
   SYNC: {
     WINDOW_SIZE: 60000, // 60s 缓冲区
   },
+
+  // Local AVFoundation camera capture defaults.
   VIDEO: {
     WIDTH: 640,
     HEIGHT: 480,
     FPS: "30",
-    QUALITY: 0.3,
     DEVICE: "0",
   },
+
+  // Bun HTTP/WebSocket server ports.
   SERVER: {
     PORT: 3000,
     SOCKET_PORT: 3001,
-    DEMO_MODE: (process.env.SENTINEL_DEMO_MODE ?? 'full') as 'full' | 'video' | 'audio',
   },
+
+  // Face detection thresholds and processing cadence.
   FACE: {
     SIMILARITY_THRESHOLD: parseEnvNumber(process.env.SENTINEL_FACE_SIMILARITY_THRESHOLD, 0.6),
-    // Deprecated compatibility alias. Face matching now compares similarity, not distance.
-    DISTANCE_THRESHOLD: parseEnvNumber(process.env.SENTINEL_FACE_SIMILARITY_THRESHOLD, 0.6),
-    COOLDOWN: 5000, // 5秒内不重复触发同一个人的决策
     PROCESS_HZ: 2, // 每秒检测频率
   },
+
+  // Vision profile selection controls how much image context is gathered.
   VISION: {
     DEFAULT_PROFILE: (process.env.SENTINEL_VISION_DEFAULT_PROFILE ?? 'identity') as 'identity' | 'perception' | 'full',
     WAKE_PROFILE: (process.env.SENTINEL_VISION_WAKE_PROFILE ?? 'perception') as 'identity' | 'perception' | 'full',
@@ -38,12 +41,18 @@ export const GLOBAL_CONFIG = {
     INTENT_TTL_MS: parseEnvNumber(process.env.SENTINEL_VISION_INTENT_TTL_MS, 10000),
     PROFILE_IDLE_TTL_MS: parseEnvNumber(process.env.SENTINEL_VISION_PROFILE_IDLE_TTL_MS, 180000),
   },
+
   VOICE: {
+    // Wake word and fast acknowledgement behavior.
     WAKE_WORD: process.env.SENTINEL_WAKE_WORD ?? '管家',
     WAKE_ACK_TEXT: process.env.SENTINEL_WAKE_ACK_TEXT ?? '我在呢',
     WAKE_ACK_FAST_REPLY_ENABLED: parseEnvBoolean(process.env.SENTINEL_WAKE_ACK_FAST_REPLY_ENABLED, true),
+
+    // Local AVFoundation microphone capture defaults.
     DEVICE: ':0',
     SAMPLE_RATE: '16000',
+
+    // Managed Python service roots and shared ports.
     PYTHON_SERVICES_ROOT,
     PYTHON_SERVICES_SCRIPT_ROOT,
     PYTHON_SERVICES_DEVICE: process.env.PYTHON_SERVICES_DEVICE ?? 'mps',
@@ -52,32 +61,34 @@ export const GLOBAL_CONFIG = {
     COSYVOICE_PORT: parseEnvNumber(process.env.COSYVOICE_PORT, 10102),
     MDX_PORT: parseEnvNumber(process.env.MDX_PORT, 10103),
     VOICE_DATA_ROOT: process.env.VOICE_DATA_ROOT ?? 'data/voice',
+
+    // FunASR service and model selection.
     FUNASR_BASE_URL: process.env.FUNASR_BASE_URL ?? `http://localhost:${process.env.FUNASR_PORT ?? '10101'}`,
-    FUNASR_CMD: process.env.FUNASR_CMD ?? `${PYTHON_SERVICES_SCRIPT_ROOT}/bin/manage start funasr`,
     FUNASR_MODEL: 'iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch',
     FUNASR_MATERIAL_MODEL: process.env.FUNASR_MATERIAL_MODEL ?? 'iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch',
     FUNASR_PUNC_MODEL: process.env.FUNASR_PUNC_MODEL ?? 'iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch',
     FUNASR_SPK_MODEL: process.env.FUNASR_SPK_MODEL ?? 'iic/speech_campplus_sv_zh-cn_16k-common',
+
+    // Optional vocal enhancement command used by material processing.
     UVR5_CMD: process.env.UVR5_CMD ?? '',
+
+    // MDX vocal separation service. Base URL and device inherit the shared port/device by default.
     SEPARATION_ENABLED: parseEnvBoolean(process.env.VOICE_SEPARATION_ENABLED, true),
-    SEPARATION_PROVIDER: (process.env.VOICE_SEPARATION_PROVIDER ?? 'mdx-net') as 'mdx-net',
-    SEPARATION_LAZY_START: parseEnvBoolean(process.env.VOICE_SEPARATION_LAZY_START, true),
-    SEPARATION_IDLE_TTL_MS: parseEnvNumber(process.env.VOICE_SEPARATION_IDLE_TTL_MS, 300000),
     SEPARATION_ALLOW_FALLBACK: parseEnvBoolean(process.env.VOICE_SEPARATION_ALLOW_FALLBACK, false),
     SEPARATION_MODEL: process.env.VOICE_SEPARATION_MODEL ?? 'UVR-MDX-NET-Inst_HQ_3.onnx',
     SEPARATION_MODEL_PROFILE: (process.env.VOICE_SEPARATION_MODEL_PROFILE ?? 'balanced') as 'fast' | 'balanced' | 'quality',
     SEPARATION_MODEL_DIR: process.env.VOICE_SEPARATION_MODEL_DIR ?? `${PYTHON_SERVICES_ROOT}/models_cache/mdx`,
-    SEPARATION_CMD: process.env.VOICE_SEPARATION_CMD ?? `${PYTHON_SERVICES_SCRIPT_ROOT}/bin/manage start mdx`,
     SEPARATION_BASE_URL: process.env.VOICE_SEPARATION_BASE_URL ?? `http://localhost:${process.env.MDX_PORT ?? '10103'}`,
     SEPARATION_DEVICE: process.env.VOICE_SEPARATION_DEVICE ?? process.env.PYTHON_SERVICES_DEVICE ?? 'mps',
     SEPARATION_ONNX_PROVIDERS: process.env.VOICE_SEPARATION_ONNX_PROVIDERS ?? 'CoreMLExecutionProvider,CPUExecutionProvider',
-    SEPARATION_MAX_CONCURRENCY: parseEnvNumber(process.env.VOICE_SEPARATION_MAX_CONCURRENCY, 1),
+
+    // ASR preprocessing and VAD windows.
     ASR_SEPARATION_MODE: (process.env.VOICE_ASR_SEPARATION_MODE ?? 'off') as 'off' | 'auto' | 'preprocess' | 'utterance-mdx',
     ASR_SEPARATION_MAX_MS: parseEnvNumber(process.env.VOICE_ASR_SEPARATION_MAX_MS, 10000),
     VAD_START_FRAMES: parseEnvNumber(process.env.VOICE_VAD_START_FRAMES, 2),
     VAD_END_FRAMES: parseEnvNumber(process.env.VOICE_VAD_END_FRAMES, 4),
     VAD_COOLDOWN_MS: parseEnvNumber(process.env.VOICE_VAD_COOLDOWN_MS, 120),
-    WAKE_VAD_THRESHOLD: parseEnvNumber(process.env.VOICE_WAKE_VAD_THRESHOLD, 0.08),
+    WAKE_VAD_THRESHOLD: parseEnvNumber(process.env.VOICE_WAKE_VAD_THRESHOLD, 0.15),
     WAKE_WINDOW_MS: parseEnvNumber(process.env.VOICE_WAKE_WINDOW_MS, 2500),
     WAKE_PROBE_INTERVAL_MS: parseEnvNumber(process.env.VOICE_WAKE_PROBE_INTERVAL_MS, 700),
     WAKE_SESSION_IDLE_MS: parseEnvNumber(process.env.VOICE_WAKE_SESSION_IDLE_MS, 15000),
@@ -88,6 +99,8 @@ export const GLOBAL_CONFIG = {
     SUBTITLE_VAD_THRESHOLD: parseEnvNumber(process.env.VOICE_SUBTITLE_VAD_THRESHOLD, 0.02),
     SUBTITLE_SOFT_MAX_MS: parseEnvNumber(process.env.VOICE_SUBTITLE_SOFT_MAX_MS, 8000),
     SUBTITLE_HARD_MAX_MS: parseEnvNumber(process.env.VOICE_SUBTITLE_HARD_MAX_MS, 12000),
+
+    // TTS provider and CosyVoice inference settings.
     TTS_PROVIDER: (process.env.SENTINEL_TTS_PROVIDER ?? 'cosyvoice') as 'cosyvoice' | 'say',
     COSYVOICE_BASE_URL: process.env.COSYVOICE_BASE_URL ?? `http://localhost:${process.env.COSYVOICE_PORT ?? '10102'}`,
     COSYVOICE_ENDPOINT: process.env.COSYVOICE_ENDPOINT ?? '/inference_zero_shot',
@@ -102,6 +115,8 @@ export const GLOBAL_CONFIG = {
     COSYVOICE_TTS_MIN_UNITS: parseEnvNumber(process.env.COSYVOICE_TTS_MIN_UNITS, 28),
     COSYVOICE_TTS_MAX_UNITS: parseEnvNumber(process.env.COSYVOICE_TTS_MAX_UNITS, 60),
     COSYVOICE_TTS_CLEANUP_ON_CANCEL: parseEnvBoolean(process.env.COSYVOICE_TTS_CLEANUP_ON_CANCEL, true),
+
+    // Barge-in detection while the assistant is speaking.
     BARGE_IN_ENABLED: true,
     BARGE_IN_VAD_THRESHOLD: 0.08,
     BARGE_IN_MIN_DURATION_MS: 420,
@@ -145,6 +160,8 @@ export const GLOBAL_CONFIG = {
       'cancel',
     ],
   },
+
+  // External command-line tools.
   FFMPEG: {
     BIN: process.env.FFMPEG_PATH ?? 'ffmpeg',
     STARTUP_TIMEOUT_MS: 10000,
@@ -153,16 +170,8 @@ export const GLOBAL_CONFIG = {
     BIN: process.env.YT_DLP_BIN ?? 'data/tools/bin/yt-dlp',
     COOKIES_FROM_BROWSER: process.env.YT_DLP_COOKIES_FROM_BROWSER ?? 'chrome',
   },
-  FRAME_RATE: {
-    SILENCE: 5,
-    ACTIVE: 30,
-    STRONG: 60
-  },
-  FRAME_QUALITY: {
-    SILENCE: 10,
-    ACTIVE: 5,
-    STRONG: 3
-  },
+
+  // Local Ollama endpoints, model IDs, generation limits, and trace controls.
   OLLAMA: {
     IP: "http://localhost:11434/api",
     TEXT_MODEL: "qwen2.5:7b",
@@ -178,11 +187,14 @@ export const GLOBAL_CONFIG = {
     VISION_MAX_TOKENS: 256,
     VISION_TEMPERATURE: 0.1,
   },
+
+  // Generated media/cache retention.
   CACHE: {
     MAX_FILE_AGE: 30 * 24 * 60 * 60 * 1000, // 30 天
   },
+
+  // Model asset directories and intention-generation limits.
   MODELS: {
-    BASE_PATH: MODEL_BASE_PATH,
     METADATA_DIR: `${MODEL_BASE_PATH}/metadata`,
     INTENSION: {
       MAX_TOKENS: 900,

@@ -36,6 +36,13 @@ type DashboardService = {
   lastError: string | null;
 };
 
+type DashboardServiceGroup = {
+  id: 'primary' | 'advanced';
+  title: string;
+  collapsed: boolean;
+  services: DashboardService[];
+};
+
 type DashboardStatus = {
   system: {
     cpuPercent: number | null;
@@ -79,6 +86,7 @@ type DashboardStatus = {
     };
   };
   services: DashboardService[];
+  serviceGroups?: DashboardServiceGroup[];
   recommendations: Array<{
     level: 'info' | 'warning' | 'critical';
     title: string;
@@ -111,6 +119,7 @@ export const DashboardView: FC = () => {
   const [busyServiceId, setBusyServiceId] = useState('');
   const [expandedServiceIds, setExpandedServiceIds] = useState<Set<string>>(new Set());
   const [logServiceIds, setLogServiceIds] = useState<Set<string>>(new Set());
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [logsByService, setLogsByService] = useState<Record<string, DashboardLogEntry[]>>({});
 
   useEffect(() => {
@@ -132,11 +141,13 @@ export const DashboardView: FC = () => {
   }, [logServiceIds, dashboard]);
 
   const serviceSummary = useMemo(() => {
-    const services = dashboard?.services ?? [];
+    const services = dashboard?.serviceGroups?.find(group => group.id === 'primary')?.services ?? dashboard?.services ?? [];
     const running = services.filter(service => service.status === 'running').length;
     const attention = services.filter(service => service.status === 'error' || service.status === 'degraded').length;
     return { total: services.length, running, attention };
   }, [dashboard]);
+  const primaryServices = dashboard?.serviceGroups?.find(group => group.id === 'primary')?.services ?? dashboard?.services ?? [];
+  const advancedServices = dashboard?.serviceGroups?.find(group => group.id === 'advanced')?.services ?? [];
 
   async function loadDashboard(signal?: AbortSignal) {
     try {
@@ -188,6 +199,111 @@ export const DashboardView: FC = () => {
     if (next.has(serviceId)) next.delete(serviceId);
     else next.add(serviceId);
     setter(next);
+  }
+
+  function renderServiceCard(service: DashboardService) {
+    const expanded = expandedServiceIds.has(service.id);
+    const logsOpen = logServiceIds.has(service.id);
+    const busy = busyServiceId === service.id;
+    return (
+      <article key={service.id} className="rounded-lg border border-slate-800 bg-slate-900/80 p-5">
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h4 className="font-semibold text-white">{service.name}</h4>
+              <StatusPill status={service.status} />
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500 md:grid-cols-4">
+              <span>PID {service.pid ?? '-'}</span>
+              <span>CPU {formatPercent(service.resources.cpuPercent)}</span>
+              <span>MEM {service.resources.memoryMb === null ? '-' : `${service.resources.memoryMb} MB`}</span>
+              <span>{formatDuration(service.resources.uptimeSeconds)}</span>
+            </div>
+            {service.lastError ? <div className="mt-3 text-xs text-rose-300">{service.lastError}</div> : null}
+            {!service.controllable && service.controlReason ? (
+              <div className="mt-3 text-xs text-slate-500">{service.controlReason}</div>
+            ) : null}
+          </div>
+
+          <div className="flex shrink-0 flex-wrap gap-2">
+            {service.actions.includes('start') ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => runAction(service.id, 'start')}
+                className="rounded-md bg-emerald-600 px-3 py-2 text-xs font-bold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {busy ? t('dashboard.working') : t('dashboard.start')}
+              </button>
+            ) : null}
+            {service.actions.includes('stop') ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => runAction(service.id, 'stop')}
+                className="rounded-md bg-rose-600 px-3 py-2 text-xs font-bold text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {busy ? t('dashboard.working') : t('dashboard.stop')}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => toggleSet(setExpandedServiceIds, expandedServiceIds, service.id)}
+              className="rounded-md border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-slate-800"
+            >
+              {expanded ? t('dashboard.hideInterfaces') : t('dashboard.showInterfaces')}
+            </button>
+            {service.logsAvailable ? (
+              <button
+                type="button"
+                onClick={() => toggleSet(setLogServiceIds, logServiceIds, service.id)}
+                className="rounded-md border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-slate-800"
+              >
+                {logsOpen ? t('dashboard.hideLogs') : t('dashboard.showLogs')}
+              </button>
+            ) : null}
+          </div>
+        </div>
+
+        {expanded ? (
+          <div className="mt-5 space-y-2">
+            {service.interfaces.map((item, index) => (
+              <div key={`${service.id}-${item.label}-${index}`} className="rounded-md border border-slate-800 bg-slate-950/70 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-slate-200">{item.label}</div>
+                    <div className="mt-1 truncate font-mono text-xs text-slate-500">{item.url}</div>
+                  </div>
+                  <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase ${INTERFACE_STYLES[item.status]}`}>
+                    {item.status}
+                  </span>
+                </div>
+                <div className="mt-2 text-xs text-slate-500">
+                  HTTP {item.statusCode ?? '-'} · {item.latencyMs === null ? '-' : `${item.latencyMs}ms`}
+                </div>
+                {item.error ? <div className="mt-2 text-xs text-amber-300">{item.error}</div> : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        {logsOpen ? (
+          <div className="mt-5 rounded-md border border-slate-800 bg-slate-950 p-3">
+            <div className="mb-2 text-xs font-bold uppercase tracking-widest text-slate-500">{t('dashboard.logs')}</div>
+            <div className="max-h-56 space-y-1 overflow-auto font-mono text-[11px] leading-5">
+              {(logsByService[service.id] ?? []).map((entry, index) => (
+                <div key={`${entry.ts}-${index}`} className={entry.level === 'error' ? 'text-rose-300' : entry.level === 'warn' ? 'text-amber-300' : 'text-slate-400'}>
+                  {new Date(entry.ts).toLocaleTimeString()} [{entry.level}] {entry.message}
+                </div>
+              ))}
+              {(logsByService[service.id] ?? []).length === 0 ? (
+                <div className="text-slate-600">{t('dashboard.noLogs')}</div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+      </article>
+    );
   }
 
   return (
@@ -262,111 +378,31 @@ export const DashboardView: FC = () => {
         </div>
 
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-          {(dashboard?.services ?? []).map(service => {
-            const expanded = expandedServiceIds.has(service.id);
-            const logsOpen = logServiceIds.has(service.id);
-            const busy = busyServiceId === service.id;
-            return (
-              <article key={service.id} className="rounded-lg border border-slate-800 bg-slate-900/80 p-5">
-                <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h4 className="font-semibold text-white">{service.name}</h4>
-                      <StatusPill status={service.status} />
-                    </div>
-                    <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500 md:grid-cols-4">
-                      <span>PID {service.pid ?? '-'}</span>
-                      <span>CPU {formatPercent(service.resources.cpuPercent)}</span>
-                      <span>MEM {service.resources.memoryMb === null ? '-' : `${service.resources.memoryMb} MB`}</span>
-                      <span>{formatDuration(service.resources.uptimeSeconds)}</span>
-                    </div>
-                    {service.lastError ? <div className="mt-3 text-xs text-rose-300">{service.lastError}</div> : null}
-                    {!service.controllable && service.controlReason ? (
-                      <div className="mt-3 text-xs text-slate-500">{service.controlReason}</div>
-                    ) : null}
-                  </div>
-
-                  <div className="flex shrink-0 flex-wrap gap-2">
-                    {service.actions.includes('start') ? (
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => runAction(service.id, 'start')}
-                        className="rounded-md bg-emerald-600 px-3 py-2 text-xs font-bold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        {busy ? t('dashboard.working') : t('dashboard.start')}
-                      </button>
-                    ) : null}
-                    {service.actions.includes('stop') ? (
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => runAction(service.id, 'stop')}
-                        className="rounded-md bg-rose-600 px-3 py-2 text-xs font-bold text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        {busy ? t('dashboard.working') : t('dashboard.stop')}
-                      </button>
-                    ) : null}
-                    <button
-                      type="button"
-                      onClick={() => toggleSet(setExpandedServiceIds, expandedServiceIds, service.id)}
-                      className="rounded-md border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-slate-800"
-                    >
-                      {expanded ? t('dashboard.hideInterfaces') : t('dashboard.showInterfaces')}
-                    </button>
-                    {service.logsAvailable ? (
-                      <button
-                        type="button"
-                        onClick={() => toggleSet(setLogServiceIds, logServiceIds, service.id)}
-                        className="rounded-md border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-slate-800"
-                      >
-                        {logsOpen ? t('dashboard.hideLogs') : t('dashboard.showLogs')}
-                      </button>
-                    ) : null}
-                  </div>
-                </div>
-
-                {expanded ? (
-                  <div className="mt-5 space-y-2">
-                    {service.interfaces.map((item, index) => (
-                      <div key={`${service.id}-${item.label}-${index}`} className="rounded-md border border-slate-800 bg-slate-950/70 p-3">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="min-w-0">
-                            <div className="text-sm font-medium text-slate-200">{item.label}</div>
-                            <div className="mt-1 truncate font-mono text-xs text-slate-500">{item.url}</div>
-                          </div>
-                          <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase ${INTERFACE_STYLES[item.status]}`}>
-                            {item.status}
-                          </span>
-                        </div>
-                        <div className="mt-2 text-xs text-slate-500">
-                          HTTP {item.statusCode ?? '-'} · {item.latencyMs === null ? '-' : `${item.latencyMs}ms`}
-                        </div>
-                        {item.error ? <div className="mt-2 text-xs text-amber-300">{item.error}</div> : null}
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-
-                {logsOpen ? (
-                  <div className="mt-5 rounded-md border border-slate-800 bg-slate-950 p-3">
-                    <div className="mb-2 text-xs font-bold uppercase tracking-widest text-slate-500">{t('dashboard.logs')}</div>
-                    <div className="max-h-56 space-y-1 overflow-auto font-mono text-[11px] leading-5">
-                      {(logsByService[service.id] ?? []).map((entry, index) => (
-                        <div key={`${entry.ts}-${index}`} className={entry.level === 'error' ? 'text-rose-300' : entry.level === 'warn' ? 'text-amber-300' : 'text-slate-400'}>
-                          {new Date(entry.ts).toLocaleTimeString()} [{entry.level}] {entry.message}
-                        </div>
-                      ))}
-                      {(logsByService[service.id] ?? []).length === 0 ? (
-                        <div className="text-slate-600">{t('dashboard.noLogs')}</div>
-                      ) : null}
-                    </div>
-                  </div>
-                ) : null}
-              </article>
-            );
-          })}
+          {primaryServices.map(renderServiceCard)}
         </div>
+
+        {advancedServices.length > 0 ? (
+          <div className="rounded-lg border border-slate-800 bg-slate-900/60">
+            <button
+              type="button"
+              onClick={() => setAdvancedOpen(value => !value)}
+              className="flex w-full items-center justify-between px-5 py-4 text-left transition hover:bg-slate-800/50"
+            >
+              <span>
+                <span className="block text-sm font-semibold text-white">{t('dashboard.advancedServices')}</span>
+                <span className="mt-1 block text-xs text-slate-500">{t('dashboard.advancedServicesHint')}</span>
+              </span>
+              <span className="text-xs font-bold uppercase text-slate-400">
+                {advancedOpen ? t('dashboard.collapse') : t('dashboard.expand')}
+              </span>
+            </button>
+            {advancedOpen ? (
+              <div className="grid grid-cols-1 gap-4 border-t border-slate-800 p-4 xl:grid-cols-2">
+                {advancedServices.map(renderServiceCard)}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </section>
     </div>
   );

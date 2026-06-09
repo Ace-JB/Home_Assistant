@@ -32,7 +32,10 @@ describe('environment config files', () => {
         expect(content).toContain('COSYVOICE_PORT=10102');
         expect(content).toContain('MDX_PORT=10103');
         expect(content).toContain('VOICE_DATA_ROOT=data/voice');
-        expect(content).toContain('COSYVOICE_BASE_URL=http://localhost:10102');
+        expect(content).not.toContain('SENTINEL_DEMO_MODE=');
+        expect(content).not.toContain('COSYVOICE_BASE_URL=http://localhost:10102');
+        expect(content).not.toContain('FUNASR_BASE_URL=http://localhost:10101');
+        expect(content).not.toContain('VOICE_SEPARATION_BASE_URL=http://localhost:10103');
         expect(content).toContain(`COSYVOICE_MODEL_DIR=${COSYVOICE_MODEL_DIR}`);
         expect(content).not.toContain('COSYVOICE_BACKEND=');
         expect(content).not.toContain('COSYVOICE_REPO_URL=');
@@ -43,6 +46,22 @@ describe('environment config files', () => {
         expect(content).toContain('COSYVOICE_PROMPT_TEXT=');
         expect(content).toContain('COSYVOICE_FALLBACK_TO_SAY=0');
         expect(content).toContain('FFMPEG_PATH=');
+    });
+
+    test('should document optional and python-only environment keys in example env', () => {
+        const example = readFileSync('.env.example', 'utf8');
+
+        expect(example).toContain('# FUNASR_BASE_URL=http://localhost:10101');
+        expect(example).toContain('# VOICE_SEPARATION_BASE_URL=http://localhost:10103');
+        expect(example).toContain('# VOICE_SEPARATION_DEVICE=mps');
+        expect(example).toContain('# COSYVOICE_BASE_URL=http://localhost:10102');
+        expect(example).toContain('COSYVOICE_TRIM_SILENCE=1');
+        expect(example).toContain('src/server/python_services/src/cosyvoice_service.py');
+        expect(example).not.toContain('SENTINEL_DEMO_MODE=');
+        expect(example).not.toContain('VOICE_SEPARATION_PROVIDER=');
+        expect(example).not.toContain('VOICE_SEPARATION_LAZY_START=');
+        expect(example).not.toContain('VOICE_SEPARATION_IDLE_TTL_MS=');
+        expect(example).not.toContain('VOICE_SEPARATION_MAX_CONCURRENCY=');
     });
 
     test('should keep CosyVoice runtime on the managed python services surface', () => {
