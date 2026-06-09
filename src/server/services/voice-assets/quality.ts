@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { mkdir, readFile, writeFile } from 'fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'fs/promises';
 import { basename, dirname, join, resolve } from 'path';
 import { GLOBAL_CONFIG } from '@/global_config';
 import { funasrService } from '@/server/services/FunASRService';
@@ -313,17 +313,22 @@ async function analyzePcmStats(audioPath: string): Promise<{
 }> {
   const pcmPath = join(getVoiceAssetPaths().cacheDir, `${safeVoiceAssetName(basename(audioPath))}-${Date.now().toString(36)}.pcm`);
   await ensureVoiceAssetDirs();
-  await runProcess(GLOBAL_CONFIG.FFMPEG.BIN, [
-    '-hide_banner',
-    '-loglevel', 'error',
-    '-y',
-    '-i', audioPath,
-    '-f', 's16le',
-    '-ar', '16000',
-    '-ac', '1',
-    pcmPath,
-  ]);
-  const pcm = await readFile(pcmPath);
+  let pcm: Buffer;
+  try {
+    await runProcess(GLOBAL_CONFIG.FFMPEG.BIN, [
+      '-hide_banner',
+      '-loglevel', 'error',
+      '-y',
+      '-i', audioPath,
+      '-f', 's16le',
+      '-ar', '16000',
+      '-ac', '1',
+      pcmPath,
+    ]);
+    pcm = await readFile(pcmPath);
+  } finally {
+    await rm(pcmPath, { force: true }).catch(() => undefined);
+  }
   const frameSamples = 1600;
   const frameRms: number[] = [];
   for (let offset = 0; offset + 1 < pcm.length; offset += frameSamples * 2) {

@@ -1,5 +1,5 @@
 import { beforeEach, afterEach, describe, expect, mock, test } from 'bun:test';
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -24,6 +24,7 @@ describe('CosyVoice cleanup', () => {
         mkdirSync(join(tempRoot, 'data', 'voice', 'cosyvoice', 'material-jobs'), { recursive: true });
         mkdirSync(join(tempRoot, 'data', 'voice', 'cosyvoice', 'speakers'), { recursive: true });
         process.env.COSYVOICE_DATA_ROOT = join(tempRoot, 'data', 'voice', 'cosyvoice');
+        process.env.VOICE_DATA_ROOT = join(tempRoot, 'data', 'voice');
         process.env.NODE_ENV = 'test';
         process.env.SENTINEL_TTS_PROVIDER = 'cosyvoice';
         process.env.COSYVOICE_BASE_URL = 'http://localhost:50000';
@@ -47,7 +48,7 @@ describe('CosyVoice cleanup', () => {
         }
     });
 
-    test('should move saved prompt audio into speakers and remove temporary job files', async () => {
+    test('should save one canonical speaker prompt and remove temporary job files', async () => {
         const { saveCosyVoiceMaterial, getCosyVoiceMaterialConfig } = await import('@server/services/CosyVoiceMaterialService');
 
         const sourceAudioPath = join('data', 'voice', 'cosyvoice', 'material-jobs', 'sliced-audio', 'job-123', 'spk0-01.wav');
@@ -80,12 +81,85 @@ describe('CosyVoice cleanup', () => {
         expect(speaker.speaker.promptAudioPath).toContain(join('data', 'voice', 'cosyvoice', 'speakers'));
         expect(readFileSync(speaker.speaker.promptAudioPath, 'utf8')).toBe('wav-data');
         expect(() => readFileSync(absoluteSourceAudioPath, 'utf8')).toThrow();
-        const selectedClips = readdirSync(join(tempRoot, 'data', 'voice', 'cosyvoice', 'selected-clips'));
-        expect(selectedClips.length).toBe(1);
-        expect(readFileSync(join(tempRoot, 'data', 'voice', 'cosyvoice', 'selected-clips', selectedClips[0]!), 'utf8')).toBe('wav-data');
+        const selectedClipsDir = join(tempRoot, 'data', 'voice', 'cosyvoice', 'selected-clips');
+        expect(existsSync(selectedClipsDir) ? readdirSync(selectedClipsDir) : []).toHaveLength(0);
         expect(readFileSync(join(tempRoot, 'data', 'voice', 'cosyvoice', 'wake-ack', 'wake-ack.wav')).byteLength).toBeGreaterThan(44);
         expect(getCosyVoiceMaterialConfig().promptAudioPath).toBe(speaker.speaker.promptAudioPath);
         expect(speakerCache.get('prompt')).toBe('欢迎回家，我已经准备好了今天的计划。');
+    });
+
+    test('should cleanup selected clip duplicates, stale assets, old jobs, and old source media', async () => {
+        const { cleanupCosyVoiceMaterialStorage } = await import('@server/services/CosyVoiceMaterialService');
+
+        const voiceRoot = join(tempRoot, 'data', 'voice');
+        const cosyRoot = join(voiceRoot, 'cosyvoice');
+        const assetsRoot = join(voiceRoot, 'assets');
+        const speakerPath = join(cosyRoot, 'speakers', 'active.wav');
+        const selectedDuplicate = join(cosyRoot, 'selected-clips', 'active-copy.wav');
+        const selectedUnique = join(cosyRoot, 'selected-clips', 'keep-review.wav');
+        const sourceMediaPath = join(cosyRoot, 'source-media', 'source-old.wav');
+        const wakeAckPath = join(cosyRoot, 'wake-ack', 'wake-ack.wav');
+        const jobPath = join(cosyRoot, 'material-jobs', 'sliced-audio', 'job-old', 'candidate.wav');
+        const assetIndexPath = join(assetsRoot, 'index.json');
+        const staleCandidatePath = join(cosyRoot, 'material-jobs', 'sliced-audio', 'missing-job', 'missing.wav');
+        const temporaryCandidatePath = join(cosyRoot, 'material-jobs', 'sliced-audio', 'job-current', 'candidate.wav');
+
+        mkdirSync(join(cosyRoot, 'speakers'), { recursive: true });
+        mkdirSync(join(cosyRoot, 'selected-clips'), { recursive: true });
+        mkdirSync(join(cosyRoot, 'source-media'), { recursive: true });
+        mkdirSync(join(cosyRoot, 'wake-ack'), { recursive: true });
+        mkdirSync(join(jobPath, '..'), { recursive: true });
+        mkdirSync(join(temporaryCandidatePath, '..'), { recursive: true });
+        mkdirSync(assetsRoot, { recursive: true });
+        writeFileSync(speakerPath, 'canonical-wav');
+        writeFileSync(selectedDuplicate, 'canonical-wav');
+        writeFileSync(selectedUnique, 'review-copy');
+        writeFileSync(sourceMediaPath, 'old-source');
+        writeFileSync(wakeAckPath, 'wake-ack');
+        writeFileSync(jobPath, 'candidate');
+        writeFileSync(temporaryCandidatePath, 'temporary-candidate');
+        writeFileSync(join(cosyRoot, 'speakers.json'), JSON.stringify([{
+            id: 'active',
+            name: 'Active',
+            promptAudioPath: speakerPath,
+            promptText: '欢迎回家，我已经准备好了今天的计划。',
+            promptList: [{ id: 'prompt', audioPath: speakerPath, text: '欢迎回家，我已经准备好了今天的计划。', createdAt: '2026-01-01T00:00:00.000Z' }],
+            benchmarkResults: [],
+            cachedResponses: [],
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+        }], null, 2));
+        writeFileSync(assetIndexPath, JSON.stringify({
+            assets: [
+                { id: 'speaker-prompt-active', kind: 'speaker_prompt', path: speakerPath, createdAt: '2026-01-01T00:00:00.000Z' },
+                { id: 'candidate-stale', kind: 'candidate', path: staleCandidatePath, createdAt: '2026-01-01T00:00:00.000Z' },
+                { id: 'candidate-temporary', kind: 'candidate', path: temporaryCandidatePath, createdAt: '2026-01-01T00:00:00.000Z' },
+            ],
+            speakers: [],
+            updatedAt: '2026-01-01T00:00:00.000Z',
+        }, null, 2));
+
+        const oldTime = new Date('2026-01-01T00:00:00.000Z');
+        utimesSync(sourceMediaPath, oldTime, oldTime);
+        utimesSync(jobPath, oldTime, oldTime);
+
+        const result = await cleanupCosyVoiceMaterialStorage({
+            now: new Date('2026-01-03T00:00:00.000Z').getTime(),
+            jobTtlMs: 60_000,
+            sourceTtlMs: 60_000,
+        });
+
+        expect(result.removedSelectedClipDuplicates).toBe(1);
+        expect(existsSync(selectedDuplicate)).toBe(false);
+        expect(existsSync(selectedUnique)).toBe(true);
+        expect(existsSync(sourceMediaPath)).toBe(false);
+        expect(existsSync(jobPath)).toBe(false);
+        expect(existsSync(temporaryCandidatePath)).toBe(true);
+        expect(existsSync(speakerPath)).toBe(true);
+        expect(existsSync(wakeAckPath)).toBe(true);
+
+        const nextIndex = JSON.parse(readFileSync(assetIndexPath, 'utf8'));
+        expect(nextIndex.assets.map((asset: { id: string }) => asset.id)).toEqual(['speaker-prompt-active']);
     });
 });
 

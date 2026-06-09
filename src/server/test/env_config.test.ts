@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import {
+    buildYtDlpArgs,
+    createSafePreviewController,
     isManagedCosyVoiceAudioPath,
     parseFunASRMaterialCandidates,
     parseYtDlpAudioFormats,
@@ -197,6 +199,50 @@ describe('environment config files', () => {
         expect(formats[0]?.previewUrl).toContain('formatId=140');
     });
 
+    test('should build yt-dlp args with Chrome cookies by default', () => {
+        expect(buildYtDlpArgs(['-J', 'https://example.com/video'])).toEqual([
+            '--cookies-from-browser',
+            'chrome',
+            '-J',
+            'https://example.com/video',
+        ]);
+    });
+
+    test('should allow disabling yt-dlp browser cookies', () => {
+        expect(buildYtDlpArgs(['-J', 'https://example.com/video'], '')).toEqual([
+            '-J',
+            'https://example.com/video',
+        ]);
+    });
+
+    test('should keep custom yt-dlp browser cookie profile as one argument', () => {
+        expect(buildYtDlpArgs(['-J', 'https://example.com/video'], 'chrome:Profile 1')).toEqual([
+            '--cookies-from-browser',
+            'chrome:Profile 1',
+            '-J',
+            'https://example.com/video',
+        ]);
+    });
+
+    test('should reject unsafe yt-dlp browser cookie values', () => {
+        expect(() => buildYtDlpArgs(['-J', 'https://example.com/video'], 'chrome\n--proxy http://bad')).toThrow('YT_DLP_COOKIES_FROM_BROWSER');
+    });
+
+    test('should ignore preview stream events after cancellation closes the controller', () => {
+        const events: string[] = [];
+        const controller = createSafePreviewController({
+            enqueue: () => events.push('enqueue'),
+            close: () => events.push('close'),
+            error: () => events.push('error'),
+        });
+
+        expect(controller.close()).toBe(true);
+        expect(controller.close()).toBe(false);
+        expect(controller.enqueue(Buffer.from('late'))).toBe(false);
+        expect(controller.error(new Error('late'))).toBe(false);
+        expect(events).toEqual(['close']);
+    });
+
     test('should reject unsupported yt-dlp URL schemes before spawning', async () => {
         await expect(probeYtDlpAudioFormats('file:///tmp/video.mp4')).rejects.toThrow('Only http and https URLs are supported.');
     });
@@ -205,5 +251,6 @@ describe('environment config files', () => {
         const env = readFileSync('.env', 'utf8');
 
         expect(env).toContain('YT_DLP_BIN=data/tools/bin/yt-dlp');
+        expect(env).toContain('YT_DLP_COOKIES_FROM_BROWSER=chrome');
     });
 });

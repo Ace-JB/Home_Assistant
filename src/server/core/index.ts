@@ -24,6 +24,11 @@ import {
   resolveCosyVoiceVideoFile,
   saveCosyVoiceMaterial,
   selectCosyVoiceSpeakerProfile,
+  getCosyVoiceMaterialJob,
+  startCosyVoiceExtractJob,
+  startCosyVoiceImportUrlJob,
+  startCosyVoiceProbeUrlJob,
+  startCosyVoiceSaveJob,
 } from "@server/services/CosyVoiceMaterialService";
 import {
   getDashboardServiceLogs,
@@ -579,6 +584,26 @@ const server = serve<SocketClientData>({
       },
     },
 
+    "/api/voice/cosyvoice/jobs/extract": {
+      async POST(req: Request) {
+        try {
+          const form = await req.formData();
+          const video = form.get("video");
+          if (!(video instanceof File)) {
+            return Response.json({ error: "video is required" }, { status: 400 });
+          }
+
+          const job = startCosyVoiceExtractJob(video, {
+            enhanceVocals: form.get("enhanceVocals") === "1",
+          });
+          return Response.json({ job });
+        } catch (error) {
+          console.error("[CosyVoiceMaterial] extract job failed:", error);
+          return Response.json({ error: error instanceof Error ? error.message : "extract job failed" }, { status: 400 });
+        }
+      },
+    },
+
     "/api/voice/cosyvoice/probe-url": {
       async POST(req: Request) {
         const body = await req.json().catch(() => null) as { url?: unknown; resourceType?: unknown } | null;
@@ -592,6 +617,23 @@ const server = serve<SocketClientData>({
         } catch (error) {
           console.error("[CosyVoiceMaterial] probe-url failed:", error);
           return Response.json({ error: error instanceof Error ? error.message : "probe failed" }, { status: 400 });
+        }
+      },
+    },
+
+    "/api/voice/cosyvoice/jobs/probe-url": {
+      async POST(req: Request) {
+        const body = await req.json().catch(() => null) as { url?: unknown; resourceType?: unknown } | null;
+        if (body?.resourceType !== "audio") {
+          return Response.json({ error: "Only audio resources are supported" }, { status: 400 });
+        }
+
+        try {
+          const job = startCosyVoiceProbeUrlJob(typeof body.url === "string" ? body.url : "");
+          return Response.json({ job });
+        } catch (error) {
+          console.error("[CosyVoiceMaterial] probe-url job failed:", error);
+          return Response.json({ error: error instanceof Error ? error.message : "probe job failed" }, { status: 400 });
         }
       },
     },
@@ -627,6 +669,24 @@ const server = serve<SocketClientData>({
         } catch (error) {
           console.error("[CosyVoiceMaterial] import-url failed:", error);
           return Response.json({ error: error instanceof Error ? error.message : "import failed" }, { status: 400 });
+        }
+      },
+    },
+
+    "/api/voice/cosyvoice/jobs/import-url": {
+      async POST(req: Request) {
+        const body = await req.json().catch(() => null) as { url?: unknown; formatId?: unknown; enhanceVocals?: unknown } | null;
+
+        try {
+          const job = startCosyVoiceImportUrlJob(
+            typeof body?.url === "string" ? body.url : "",
+            typeof body?.formatId === "string" ? body.formatId : "",
+            { enhanceVocals: body?.enhanceVocals === true },
+          );
+          return Response.json({ job });
+        } catch (error) {
+          console.error("[CosyVoiceMaterial] import-url job failed:", error);
+          return Response.json({ error: error instanceof Error ? error.message : "import job failed" }, { status: 400 });
         }
       },
     },
@@ -683,6 +743,56 @@ const server = serve<SocketClientData>({
           console.error("[CosyVoiceMaterial] save failed:", error);
           return Response.json({ error: error instanceof Error ? error.message : "save failed" }, { status: 400 });
         }
+      },
+    },
+
+    "/api/voice/cosyvoice/jobs/save": {
+      async POST(req: Request) {
+        const body = await req.json().catch(() => null) as {
+          provider?: unknown;
+          baseUrl?: unknown;
+          endpoint?: unknown;
+          promptAudioPath?: unknown;
+          promptText?: unknown;
+          speakerId?: unknown;
+          speakerName?: unknown;
+          timeoutMs?: unknown;
+          fallbackToSay?: unknown;
+        } | null;
+
+        try {
+          const job = startCosyVoiceSaveJob({
+            provider: body?.provider === "say" ? "say" : "cosyvoice",
+            baseUrl: typeof body?.baseUrl === "string" ? body.baseUrl : "",
+            endpoint: typeof body?.endpoint === "string" ? body.endpoint : "",
+            speakerId: typeof body?.speakerId === "string" ? body.speakerId : "",
+            speakerName: typeof body?.speakerName === "string" ? body.speakerName : "",
+            promptAudioPath: typeof body?.promptAudioPath === "string" ? body.promptAudioPath : "",
+            promptText: typeof body?.promptText === "string" ? body.promptText : "",
+            timeoutMs: typeof body?.timeoutMs === "number" ? body.timeoutMs : Number(body?.timeoutMs),
+            fallbackToSay: body?.fallbackToSay === true,
+          });
+          return Response.json({ job });
+        } catch (error) {
+          console.error("[CosyVoiceMaterial] save job failed:", error);
+          return Response.json({ error: error instanceof Error ? error.message : "save job failed" }, { status: 400 });
+        }
+      },
+    },
+
+    "/api/voice/cosyvoice/jobs/:jobId": {
+      GET(req: Request) {
+        const jobId = getCosyVoiceMaterialJobIdFromUrl(req);
+        if (!jobId) {
+          return Response.json({ error: "jobId is required" }, { status: 400 });
+        }
+
+        const job = getCosyVoiceMaterialJob(jobId);
+        if (!job) {
+          return Response.json({ error: "job not found" }, { status: 404 });
+        }
+
+        return Response.json({ job });
       },
     },
 
@@ -869,6 +979,12 @@ function parseBenchmarkScenarioIds(value: BenchmarkRunInput["scenarioIds"]): Ben
     "conversation_end",
   ]);
   return value.filter((item): item is BenchmarkScenarioId => allowed.has(item as BenchmarkScenarioId));
+}
+
+function getCosyVoiceMaterialJobIdFromUrl(req: Request): string | null {
+  const url = new URL(req.url);
+  const match = url.pathname.match(/^\/api\/voice\/cosyvoice\/jobs\/([^/]+)$/);
+  return match?.[1] ? decodeURIComponent(match[1]) : null;
 }
 
 function getCosyVoiceAudioFileNameFromUrl(req: Request): string | null {

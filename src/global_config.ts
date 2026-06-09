@@ -151,6 +151,7 @@ export const GLOBAL_CONFIG = {
   },
   YT_DLP: {
     BIN: process.env.YT_DLP_BIN ?? 'data/tools/bin/yt-dlp',
+    COOKIES_FROM_BROWSER: process.env.YT_DLP_COOKIES_FROM_BROWSER ?? 'chrome',
   },
   FRAME_RATE: {
     SILENCE: 5,

@@ -1,6 +1,6 @@
-import { existsSync } from 'fs';
-import { copyFile, readFile, writeFile } from 'fs/promises';
-import { basename, join, resolve } from 'path';
+import { existsSync, realpathSync } from 'fs';
+import { copyFile, readFile, readdir, rm, stat, writeFile } from 'fs/promises';
+import { basename, join, relative, resolve } from 'path';
 import { ensureVoiceAssetDirs, getVoiceAssetKindDir, getVoiceAssetPaths } from './paths';
 import type { VoiceAsset, VoiceAssetIndex, VoiceAssetKind, VoiceSpeakerProfile } from './types';
 
@@ -67,6 +67,87 @@ export async function removeVoiceAsset(assetId: string): Promise<boolean> {
   return removed;
 }
 
+export type VoiceAssetCleanupOptions = {
+  now?: number;
+  separatedMaxAgeMs?: number;
+  separatedMaxFiles?: number;
+  pcmCacheMaxAgeMs?: number;
+  removeTemporaryCandidateAssets?: boolean;
+};
+
+export type VoiceAssetCleanupResult = {
+  removedStaleAssets: number;
+  removedTemporaryCandidateAssets: number;
+  removedSeparatedAssets: number;
+  removedSeparatedFiles: number;
+  removedPcmCacheFiles: number;
+};
+
+export async function cleanupVoiceAssets(options: VoiceAssetCleanupOptions = {}): Promise<VoiceAssetCleanupResult> {
+  const now = options.now ?? Date.now();
+  const separatedMaxAgeMs = options.separatedMaxAgeMs ?? 7 * 24 * 60 * 60 * 1000;
+  const separatedMaxFiles = Math.max(0, Math.floor(options.separatedMaxFiles ?? 20));
+  const pcmCacheMaxAgeMs = options.pcmCacheMaxAgeMs ?? 10 * 60 * 1000;
+  const paths = await ensureVoiceAssetDirs();
+  const index = await readVoiceAssetIndex();
+  const existingAssets: VoiceAsset[] = [];
+  let removedStaleAssets = 0;
+  let removedTemporaryCandidateAssets = 0;
+
+  for (const asset of index.assets) {
+    if (!existsSync(asset.path)) {
+      removedStaleAssets += 1;
+    } else if (options.removeTemporaryCandidateAssets && isTemporaryCandidateAsset(asset)) {
+      removedTemporaryCandidateAssets += 1;
+    } else {
+      existingAssets.push(asset);
+    }
+  }
+
+  const separatedAssets = await Promise.all(existingAssets
+    .filter(asset => asset.kind === 'separated')
+    .map(async asset => ({
+      asset,
+      mtimeMs: await stat(asset.path).then(item => item.mtimeMs).catch(() => 0),
+    })));
+  const newestSeparated = new Set(separatedAssets
+    .sort((left, right) => right.mtimeMs - left.mtimeMs)
+    .slice(0, separatedMaxFiles)
+    .map(item => item.asset.id));
+  const removeSeparated = new Set<string>();
+
+  for (const item of separatedAssets) {
+    const ageMs = Math.max(0, now - item.mtimeMs);
+    if (!newestSeparated.has(item.asset.id) && ageMs > separatedMaxAgeMs) {
+      removeSeparated.add(item.asset.id);
+    }
+  }
+
+  let removedSeparatedFiles = 0;
+  for (const asset of existingAssets) {
+    if (!removeSeparated.has(asset.id)) continue;
+    if (isInsideDirectory(asset.path, paths.separatedDir)) {
+      await rm(asset.path, { force: true }).then(() => {
+        removedSeparatedFiles += 1;
+      }).catch(() => undefined);
+    }
+  }
+
+  const nextAssets = existingAssets.filter(asset => !removeSeparated.has(asset.id));
+  const removedPcmCacheFiles = await cleanupPcmCacheFiles(paths.cacheDir, now, pcmCacheMaxAgeMs);
+  if (removedStaleAssets > 0 || removedTemporaryCandidateAssets > 0 || removeSeparated.size > 0) {
+    await writeVoiceAssetIndex({ ...index, assets: nextAssets });
+  }
+
+  return {
+    removedStaleAssets,
+    removedTemporaryCandidateAssets,
+    removedSeparatedAssets: removeSeparated.size,
+    removedSeparatedFiles,
+    removedPcmCacheFiles,
+  };
+}
+
 export async function listVoiceSpeakerProfiles(): Promise<VoiceSpeakerProfile[]> {
   return (await readVoiceAssetIndex()).speakers;
 }
@@ -131,6 +212,36 @@ export function safeVoiceAssetName(value: string): string {
     .replace(/[^a-z0-9\u4e00-\u9fa5._-]+/gu, '-')
     .replace(/^-+|-+$/gu, '')
     || 'voice-asset';
+}
+
+function isInsideDirectory(path: string, root: string): boolean {
+  const relativePath = relative(resolveForContainment(root), resolveForContainment(path));
+  return relativePath === '' || (!!relativePath && !relativePath.startsWith('..') && !relativePath.startsWith('/'));
+}
+
+function resolveForContainment(path: string): string {
+  return existsSync(path) ? realpathSync(path) : resolve(path);
+}
+
+function isTemporaryCandidateAsset(asset: VoiceAsset): boolean {
+  return asset.kind === 'candidate' && resolve(asset.path).split(/[\\/]+/u).includes('material-jobs');
+}
+
+async function cleanupPcmCacheFiles(cacheDir: string, now: number, maxAgeMs: number): Promise<number> {
+  const entries = await readdir(cacheDir, { withFileTypes: true }).catch(() => []);
+  let removed = 0;
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.pcm')) continue;
+    const filePath = join(cacheDir, entry.name);
+    const stats = await stat(filePath).catch(() => null);
+    if (!stats?.isFile()) continue;
+    if (now - stats.mtimeMs <= maxAgeMs) continue;
+    if (!isInsideDirectory(filePath, cacheDir)) continue;
+    await rm(filePath, { force: true }).then(() => {
+      removed += 1;
+    }).catch(() => undefined);
+  }
+  return removed;
 }
 
 function isVoiceAsset(value: unknown): value is VoiceAsset {
