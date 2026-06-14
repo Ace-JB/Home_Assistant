@@ -1,27 +1,38 @@
 {
   "tests": [
     {
+      "name": "model runtime logging > records generate metadata as model metrics",
+      "duration": 1.46,
+      "status": "pass"
+    },
+    {
+      "name": "model runtime logging > records stream metadata after the text stream is consumed",
+      "duration": 1.16,
+      "status": "pass"
+    },
+    {
       "name": "Media Save Performance > should save a small snapshot as MP4 and measure performance",
-      "duration": 130.5,
+      "duration": 123.02,
       "status": "pass"
     },
     {
       "name": "VisionAttentionManager > defaults to identity without persisted runtime state",
+      "duration": 0.26,
       "status": "pass"
     },
     {
       "name": "VisionAttentionManager > expires requests and falls back to identity",
-      "duration": 0.68,
+      "duration": 0.26,
       "status": "pass"
     },
     {
       "name": "VisionAttentionManager > snapshot reflects expired requests without explicit resolve",
-      "duration": 0.01,
+      "duration": 0.04,
       "status": "pass"
     },
     {
       "name": "VisionAttentionManager > starts idle metadata when requests expire",
-      "duration": 0.03,
+      "duration": 0.04,
       "status": "pass"
     },
     {
@@ -31,67 +42,107 @@
     },
     {
       "name": "VisionAttentionManager > new requests reset idle metadata",
-      "duration": 0.04,
+      "duration": 0.05,
       "status": "pass"
     },
     {
       "name": "VisionAttentionManager > higher priority request overrides lower priority request",
-      "duration": 0.14,
+      "duration": 0.05,
       "status": "pass"
     },
     {
       "name": "VisionAttentionManager > same priority selects the stronger profile",
-      "duration": 0.07,
+      "duration": 0.03,
       "status": "pass"
     },
     {
       "name": "VisionAttentionManager > clears requests by source",
-      "duration": 0.12,
+      "duration": 0.08,
       "status": "pass"
     },
     {
-      "name": "Intention analysis > parses core direct answer without memory retrieval",
-      "duration": 1.38,
+      "name": "Intention analysis > records pre-router rule checks and timings on the pipeline for matched, missed, and skipped outcomes",
+      "duration": 4.51,
       "status": "pass"
     },
     {
-      "name": "Intention analysis > parses core memory recall into recent recall retrieval",
-      "duration": 0.21,
+      "name": "Intention analysis > pre-router normalizes ASR filler for session and safe device commands without calling model",
+      "duration": 0.24,
       "status": "pass"
     },
     {
-      "name": "Intention analysis > parses core clarification route without memory retrieval",
-      "duration": 0.55,
+      "name": "Intention analysis > pre-router sends multi-intent commands to the model router",
+      "duration": 0.26,
       "status": "pass"
     },
     {
-      "name": "Intention analysis > uses core routing topic for semantic memory context",
-      "duration": 0.13,
+      "name": "Intention analysis > pre-router refuses to classify blacklisted ordinary QA and lets model decide when context is ambiguous",
+      "duration": 0.29,
       "status": "pass"
     },
     {
-      "name": "Intention analysis > deterministically corrects memory recall that disables memory",
+      "name": "Intention analysis > pre-router handles obvious context routes conservatively",
       "duration": 0.2,
       "status": "pass"
     },
     {
+      "name": "Intention analysis > pre-router direct-answers local utility time but leaves weather to the model",
+      "duration": 0.25,
+      "status": "pass"
+    },
+    {
+      "name": "Intention analysis > pre-router guards high-risk system, privacy, and security commands",
+      "duration": 0.44,
+      "status": "pass"
+    },
+    {
+      "name": "Intention analysis > parses core direct answer without memory retrieval",
+      "duration": 0.17,
+      "status": "pass"
+    },
+    {
+      "name": "Intention analysis > falls back to direct answer without long-term memory when router fails for ordinary QA",
+      "duration": 0.27,
+      "status": "pass"
+    },
+    {
+      "name": "Intention analysis > parses core memory recall into recent recall retrieval",
+      "duration": 0.15,
+      "status": "pass"
+    },
+    {
+      "name": "Intention analysis > parses core clarification route without memory retrieval",
+      "duration": 0.1,
+      "status": "pass"
+    },
+    {
+      "name": "Intention analysis > uses core routing topic for semantic memory context",
+      "duration": 0.15,
+      "status": "pass"
+    },
+    {
+      "name": "Intention analysis > deterministically corrects memory recall that disables memory",
+      "duration": 0.1,
+      "status": "pass"
+    },
+    {
       "name": "Intention analysis > uses core output to rewrite short follow-ups with context",
-      "duration": 0.11,
+      "duration": 0.09,
       "status": "pass"
     },
     {
       "name": "Intention analysis > uses core output to avoid memory retrieval for device control",
-      "duration": 0.06,
+      "duration": 0.14,
       "status": "pass"
     },
     {
       "name": "Intention analysis > handles proposal answers as current-session follow-ups without long-term memory",
-      "duration": 0.13,
+      "duration": 0.17,
       "status": "pass"
     },
     {
       "name": "Intention analysis > can ignore non-actionable input without memory retrieval",
-      "duration": 0.08,
+      "duration": 0.09,
       "status": "pass"
     },
     {
@@ -101,105 +152,182 @@
     },
     {
       "name": "Intention analysis > preserves core visual routing decision",
-      "duration": 0.67,
+      "duration": 0.18,
       "status": "pass"
     },
     {
       "name": "Intention analysis > repairs invalid core output before falling back",
-      "duration": 1.47,
+      "duration": 0.94,
+      "status": "pass"
+    },
+    {
+      "name": "Intention analysis > uses separate repair generator after invalid core routing output",
+      "duration": 0.39,
       "status": "pass"
     },
     {
       "name": "Intention analysis > can end session without memory retrieval",
-      "duration": 0.19,
+      "duration": 0.18,
       "status": "pass"
     },
     {
-      "name": "Intention analysis > falls back to recent context rewrite when model fails on short follow-up",
-      "duration": 0.78,
+      "name": "Intention analysis > pre-router rewrites explicit short follow-up from recent assistant context",
+      "duration": 0.14,
       "status": "pass"
     },
     {
-      "name": "Dashboard assistant runtime status > includes assistant-runtime and derives owned services from stopped runtime",
-      "duration": 1636.07,
+      "name": "Scoring engine > hides candidates below the hard relevance gate",
+      "duration": 0.88,
       "status": "pass"
     },
     {
-      "name": "Dashboard assistant runtime status > groups service status into primary and advanced sections",
-      "duration": 1616.83,
-      "status": "pass"
-    },
-    {
-      "name": "Dashboard assistant runtime status > dashboard assistant-runtime actions delegate to runtime coordinator",
-      "duration": 2364.43,
-      "status": "pass"
-    },
-    {
-      "name": "DetectionValve > should allow execution based on frequency",
-      "duration": 601.05,
-      "status": "pass"
-    },
-    {
-      "name": "FaceDatabase > should save, update, get, list, and remove face records",
-      "duration": 13.99,
-      "status": "pass"
-    },
-    {
-      "name": "FaceDatabase > save should upsert records by name",
-      "duration": 6.27,
-      "status": "pass"
-    },
-    {
-      "name": "Monitor shutdown cleanup > stopMonitor waits for in-flight startup and stops the created runtime",
-      "duration": 1.69,
-      "status": "pass"
-    },
-    {
-      "name": "WebRTCManager cleanup > stop keeps UDP socket available while shutdown closes it",
-      "duration": 2.76,
-      "status": "pass"
-    },
-    {
-      "name": "CosyVoice material jobs > tracks running, succeeded, and failed stages immutably",
-      "duration": 0.59,
-      "status": "pass"
-    },
-    {
-      "name": "CosyVoice material jobs > removes expired jobs and caps retained jobs",
-      "duration": 0.13,
-      "status": "pass"
-    },
-    {
-      "name": "CosyVoice material jobs > reports running elapsed time and keeps completed stage duration",
-      "duration": 0.17,
-      "status": "pass"
-    },
-    {
-      "name": "CosyVoice material jobs > parses yt-dlp download percentages from stderr chunks",
+      "name": "Scoring engine > soft gate midpoint compresses rank score before final scoring",
       "duration": 0.09,
       "status": "pass"
     },
     {
+      "name": "Scoring engine > ranks eligible candidates with additive base freshness and feedback components",
+      "duration": 0.04,
+      "status": "pass"
+    },
+    {
+      "name": "Scoring engine > uses neutral freshness when freshness timestamps are unknown",
+      "duration": 0.02,
+      "status": "pass"
+    },
+    {
+      "name": "Scoring engine > uses timestamp freshness instead of the unknown freshness default when dates exist",
+      "duration": 0.04,
+      "status": "pass"
+    },
+    {
+      "name": "Scoring engine > starts feedback at neutral and weighs negative feedback more heavily than positive feedback",
+      "duration": 0.03,
+      "status": "pass"
+    },
+    {
+      "name": "Scoring engine > reduces exploration bonus as impressions grow",
+      "duration": 0.01,
+      "status": "pass"
+    },
+    {
+      "name": "Scoring engine > ambient profile bypasses relevance gating for global preferences",
+      "duration": 0.01,
+      "status": "pass"
+    },
+    {
+      "name": "Dashboard assistant runtime status > includes assistant-runtime and derives owned services from stopped runtime",
+      "duration": 1553.48,
+      "status": "pass"
+    },
+    {
+      "name": "Dashboard assistant runtime status > groups service status into primary and advanced sections",
+      "duration": 1581.7,
+      "status": "pass"
+    },
+    {
+      "name": "Dashboard assistant runtime status > dashboard assistant-runtime actions delegate to runtime coordinator",
+      "duration": 2343.24,
+      "status": "pass"
+    },
+    {
+      "name": "Dashboard assistant runtime status > starts dashboard-managed service groups serially",
+      "duration": 24.22,
+      "status": "pass"
+    },
+    {
+      "name": "DetectionValve > should allow execution based on frequency",
+      "duration": 601.67,
+      "status": "pass"
+    },
+    {
+      "name": "FaceDatabase > should save, update, get, list, and remove face records",
+      "duration": 12.76,
+      "status": "pass"
+    },
+    {
+      "name": "FaceDatabase > save should upsert records by name",
+      "duration": 6.1,
+      "status": "pass"
+    },
+    {
+      "name": "Monitor shutdown cleanup > stopMonitor waits for in-flight startup and stops the created runtime",
+      "duration": 0.5,
+      "status": "pass"
+    },
+    {
+      "name": "Monitor shutdown cleanup > startMonitor rethrows startup failures and clears the in-flight startup",
+      "duration": 0.76,
+      "status": "pass"
+    },
+    {
+      "name": "MlxModelClient > streams text deltas from qwen-vlm ndjson",
+      "duration": 1.3,
+      "status": "pass"
+    },
+    {
+      "name": "MlxModelClient > keeps qwen-vlm stream metadata out of user text",
+      "duration": 0.36,
+      "status": "pass"
+    },
+    {
+      "name": "MlxModelClient > sends multipart vision requests without base64 wrapping",
+      "duration": 3.92,
+      "status": "pass"
+    },
+    {
+      "name": "MlxModelClient > routes fast and repair generation to qwen-router roles",
+      "duration": 0.33,
+      "status": "pass"
+    },
+    {
+      "name": "WebRTCManager cleanup > stop keeps UDP socket available while shutdown closes it",
+      "duration": 0.2,
+      "status": "pass"
+    },
+    {
+      "name": "CosyVoice material jobs > tracks running, succeeded, and failed stages immutably",
+      "duration": 0.88,
+      "status": "pass"
+    },
+    {
+      "name": "CosyVoice material jobs > removes expired jobs and caps retained jobs",
+      "duration": 0.05,
+      "status": "pass"
+    },
+    {
+      "name": "CosyVoice material jobs > reports running elapsed time and keeps completed stage duration",
+      "duration": 0.12,
+      "status": "pass"
+    },
+    {
+      "name": "CosyVoice material jobs > parses yt-dlp download percentages from stderr chunks",
+      "duration": 0.12,
+      "status": "pass"
+    },
+    {
       "name": "SyncManager > should add video frames and retrieve snapshot",
-      "duration": 0.23,
+      "duration": 0.29,
       "status": "pass"
     },
     {
       "name": "SyncManager > should add audio frames and retrieve snapshot",
-      "duration": 0.1,
+      "duration": 0.11,
       "status": "pass"
     },
     {
       "name": "SyncManager > should clean old frames",
-      "duration": 1101.54,
+      "duration": 1104.09,
       "status": "pass"
     },
     {
       "name": "SyncManager > should calculate correct durationMs",
+      "duration": 0.42,
       "status": "pass"
     },
     {
       "name": "SyncManager > should prune multiple expired frames while preserving valid frames",
+      "duration": 0.44,
       "status": "pass"
     },
     {
@@ -207,268 +335,307 @@
       "status": "pass"
     },
     {
+      "name": "HomeBrain > records high-risk pre-router incidents on the active pipeline",
+      "duration": 5.11,
+      "status": "pass"
+    },
+    {
+      "name": "HomeBrain > returns clarification directly without fetching data or calling response model",
+      "duration": 1.87,
+      "status": "pass"
+    },
+    {
+      "name": "HomeBrain > returns device placeholder without reporting actual tool use",
+      "duration": 1.35,
+      "status": "pass"
+    },
+    {
       "name": "HomeBrain > should answer assistant proposal using resolved rewrite without long-term memory",
-      "duration": 5.52,
+      "duration": 2.69,
       "status": "pass"
     },
     {
       "name": "HomeBrain > should stream response deltas and return full text",
-      "duration": 0.81,
+      "duration": 0.45,
       "status": "pass"
     },
     {
       "name": "HomeBrain > should not inject pending memory candidates as approved memories",
-      "duration": 1.4,
+      "duration": 1.65,
       "status": "pass"
     },
     {
       "name": "HomeBrain > should label recent recall memories as long-term context",
-      "duration": 1.07,
+      "duration": 0.86,
+      "status": "pass"
+    },
+    {
+      "name": "HomeBrain > should inject ambient memories separately from semantic retrieval",
+      "duration": 1.47,
       "status": "pass"
     },
     {
       "name": "HomeBrain > should fetch layered memory and vision context in one response path",
-      "duration": 41.56,
+      "duration": 36.1,
       "status": "pass"
     },
     {
       "name": "HomeBrain > should use intention visual decision instead of keyword matching",
-      "duration": 47.35,
+      "duration": 29.11,
       "status": "pass"
     },
     {
       "name": "HomeBrain > should prepare valid jpeg before sending image to vision model",
-      "duration": 44.14,
+      "duration": 38.58,
       "status": "pass"
     },
     {
       "name": "VideoSavingQueue > should process tasks sequentially",
-      "duration": 77.72,
+      "duration": 78.99,
       "status": "pass"
     },
     {
       "name": "PipelineLogService > creates a pipeline and records ordered events",
-      "duration": 0.97,
+      "duration": 1.29,
       "status": "pass"
     },
     {
       "name": "PipelineLogService > records model calls and connects them to one pipeline",
-      "duration": 0.82,
-      "status": "pass"
-    },
-    {
-      "name": "PipelineLogService > updates one model call row across its lifecycle",
-      "duration": 0.66,
-      "status": "pass"
-    },
-    {
-      "name": "PipelineLogService > bounds model call metadata without corrupting json",
-      "duration": 0.54,
-      "status": "pass"
-    },
-    {
-      "name": "PipelineLogService > keeps model call prompt and output text complete",
-      "duration": 1.4,
-      "status": "pass"
-    },
-    {
-      "name": "PipelineLogService > does not write legacy runtime metadata fields",
-      "duration": 0.6,
-      "status": "pass"
-    },
-    {
-      "name": "PipelineLogService > keeps unlinked wake diagnostics out of conversation pipelines",
-      "duration": 0.65,
-      "status": "pass"
-    },
-    {
-      "name": "PipelineLogService > gets one model call by id",
-      "duration": 0.74,
-      "status": "pass"
-    },
-    {
-      "name": "PipelineLogService > removes one model call without removing its pipeline event",
-      "duration": 1.09,
-      "status": "pass"
-    },
-    {
-      "name": "PipelineLogService > removes one incident without removing its pipeline event",
-      "duration": 0.6,
-      "status": "pass"
-    },
-    {
-      "name": "PipelineLogService > does not create a pipeline from unlinked model calls or incidents",
-      "duration": 0.81,
-      "status": "pass"
-    },
-    {
-      "name": "PipelineLogService > normalizes system runtime logs into one system pipeline",
-      "duration": 0.79,
-      "status": "pass"
-    },
-    {
-      "name": "PipelineLogService > merges CosyVoice TTS chunk queue, generation, and playback events into one lifecycle event",
-      "duration": 1.12,
-      "status": "pass"
-    },
-    {
-      "name": "PipelineLogService > keeps different TTS chunks and wake acknowledgement events separate",
-      "duration": 1.07,
-      "status": "pass"
-    },
-    {
-      "name": "PipelineLogService > aggregates legacy raw CosyVoice TTS chunk events when reading pipeline detail",
-      "duration": 0.89,
-      "status": "pass"
-    },
-    {
-      "name": "PipelineLogService > records incidents for review",
       "duration": 0.59,
       "status": "pass"
     },
     {
-      "name": "PipelineLogService > persists pipelines across service instances",
-      "duration": 12.92,
+      "name": "PipelineLogService > updates one model call row across its lifecycle",
+      "duration": 1.43,
       "status": "pass"
     },
     {
-      "name": "PipelineLogService > removes a pipeline and its related rows",
-      "duration": 1.12,
+      "name": "PipelineLogService > treats intention model call failures as recoverable warnings",
+      "duration": 0.65,
       "status": "pass"
     },
     {
-      "name": "Voice Asset Foundation > should create path convention and support asset CRUD",
-      "duration": 4.53,
+      "name": "PipelineLogService > bounds model call metadata without corrupting json",
+      "duration": 0.44,
       "status": "pass"
     },
     {
-      "name": "Voice Asset Foundation > should upsert minimal speaker profiles in JSON index",
-      "duration": 2.49,
+      "name": "PipelineLogService > keeps model call prompt and output text complete",
+      "duration": 0.78,
       "status": "pass"
     },
     {
-      "name": "Voice Asset Foundation > should cleanup stale index entries and trim separated cache safely",
-      "duration": 5.53,
+      "name": "PipelineLogService > does not write legacy runtime metadata fields",
+      "duration": 0.43,
       "status": "pass"
     },
     {
-      "name": "Voice Quality Scoring > should score a valid wav prompt",
-      "duration": 45.57,
+      "name": "PipelineLogService > keeps unlinked wake diagnostics out of conversation pipelines",
+      "duration": 0.18,
       "status": "pass"
     },
     {
-      "name": "MDX separation plugin config > should prefer CoreML provider on Apple Silicon auto mode",
-      "duration": 0.13,
+      "name": "PipelineLogService > gets one model call by id",
+      "duration": 0.57,
       "status": "pass"
     },
     {
-      "name": "MDX separation plugin config > should resolve model profiles",
-      "duration": 0.04,
-      "status": "pass"
-    },
-    {
-      "name": "Dashboard managed service shutdown > stops all managed Python services through one shutdown entrypoint",
-      "duration": 0.16,
-      "status": "pass"
-    },
-    {
-      "name": "CosyVoice cleanup > should save one canonical speaker prompt and remove temporary job files",
-      "duration": 10.13,
-      "status": "pass"
-    },
-    {
-      "name": "CosyVoice cleanup > should cleanup selected clip duplicates, stale assets, old jobs, and old source media",
-      "duration": 5.57,
-      "status": "pass"
-    },
-    {
-      "name": "Socket Utils > should calculate PCM level and measure performance",
-      "duration": 1.78,
-      "status": "pass"
-    },
-    {
-      "name": "Socket Utils > should ignore legacy subtitle enable commands without publishing status",
-      "duration": 0.19,
-      "status": "pass"
-    },
-    {
-      "name": "Socket Utils > should omit realtime subtitle state from connection status messages",
-      "duration": 0.07,
-      "status": "pass"
-    },
-    {
-      "name": "Socket Utils > should publish voice text by default",
-      "duration": 0.1,
-      "status": "pass"
-    },
-    {
-      "name": "Socket Utils > should publish vision detection profile metadata",
-      "duration": 0.1,
-      "status": "pass"
-    },
-    {
-      "name": "Socket Utils > should close tracked clients when stopping realtime socket server",
-      "duration": 0.05,
-      "status": "pass"
-    },
-    {
-      "name": "environment config files > should define shared runtime keys in base env",
-      "duration": 0.67,
-      "status": "pass"
-    },
-    {
-      "name": "environment config files > should document optional and python-only environment keys in example env",
-      "duration": 0.08,
-      "status": "pass"
-    },
-    {
-      "name": "environment config files > should keep CosyVoice runtime on the managed python services surface",
-      "duration": 0.17,
-      "status": "pass"
-    },
-    {
-      "name": "environment config files > should resolve CosyVoice model to the fixed managed cache directory",
-      "duration": 0.14,
-      "status": "pass"
-    },
-    {
-      "name": "environment config files > should keep environment files focused on overrides",
-      "duration": 0.08,
-      "status": "pass"
-    },
-    {
-      "name": "environment config files > should restrict CosyVoice prompt audio to managed wav files",
-      "duration": 0.42,
-      "status": "pass"
-    },
-    {
-      "name": "environment config files > should parse only audio-only formats from yt-dlp metadata",
+      "name": "PipelineLogService > removes one model call without removing its pipeline event",
       "duration": 0.11,
       "status": "pass"
     },
     {
-      "name": "environment config files > should filter FunASR material candidates for CosyVoice prompts",
+      "name": "PipelineLogService > removes one incident without removing its pipeline event",
+      "duration": 0.89,
+      "status": "pass"
+    },
+    {
+      "name": "PipelineLogService > does not create a pipeline from unlinked model calls or incidents",
+      "duration": 0.31,
+      "status": "pass"
+    },
+    {
+      "name": "PipelineLogService > normalizes system runtime logs into one system pipeline",
+      "duration": 0.43,
+      "status": "pass"
+    },
+    {
+      "name": "PipelineLogService > merges CosyVoice TTS chunk queue, generation, and playback events into one lifecycle event",
       "duration": 0.51,
       "status": "pass"
     },
     {
-      "name": "environment config files > should reject candidates too close to another speaker",
+      "name": "PipelineLogService > keeps different TTS chunks and wake acknowledgement events separate",
+      "duration": 0.96,
+      "status": "pass"
+    },
+    {
+      "name": "PipelineLogService > aggregates legacy raw CosyVoice TTS chunk events when reading pipeline detail",
+      "duration": 0.85,
+      "status": "pass"
+    },
+    {
+      "name": "PipelineLogService > records incidents for review",
+      "duration": 0.54,
+      "status": "pass"
+    },
+    {
+      "name": "PipelineLogService > persists pipelines across service instances",
+      "duration": 9.1,
+      "status": "pass"
+    },
+    {
+      "name": "PipelineLogService > removes a pipeline and its related rows",
+      "duration": 0.6,
+      "status": "pass"
+    },
+    {
+      "name": "AssistantConfigService > applies wake config to env file, process env, and global config immediately",
+      "duration": 0.78,
+      "status": "pass"
+    },
+    {
+      "name": "AssistantConfigService > parses assistant voice request body booleans like env values",
+      "duration": 0.06,
+      "status": "pass"
+    },
+    {
+      "name": "Voice Asset Foundation > should create path convention and support asset CRUD",
+      "duration": 3.74,
+      "status": "pass"
+    },
+    {
+      "name": "Voice Asset Foundation > should upsert minimal speaker profiles in JSON index",
+      "duration": 2.91,
+      "status": "pass"
+    },
+    {
+      "name": "Voice Asset Foundation > should cleanup stale index entries and trim separated cache safely",
+      "duration": 5.03,
+      "status": "pass"
+    },
+    {
+      "name": "Voice Quality Scoring > should score a valid wav prompt",
+      "duration": 48.34,
+      "status": "pass"
+    },
+    {
+      "name": "MDX separation plugin config > should prefer CoreML provider on Apple Silicon auto mode",
+      "duration": 0.55,
+      "status": "pass"
+    },
+    {
+      "name": "MDX separation plugin config > should resolve model profiles",
+      "duration": 0.05,
+      "status": "pass"
+    },
+    {
+      "name": "Dashboard managed service shutdown > stops all managed Python services through one shutdown entrypoint",
+      "duration": 0.36,
+      "status": "pass"
+    },
+    {
+      "name": "CosyVoice cleanup > should save one canonical speaker prompt and remove temporary job files",
+      "duration": 9.66,
+      "status": "pass"
+    },
+    {
+      "name": "CosyVoice cleanup > should cleanup selected clip duplicates, stale assets, old jobs, and old source media",
+      "duration": 5.83,
+      "status": "pass"
+    },
+    {
+      "name": "Socket Utils > should calculate PCM level and measure performance",
+      "duration": 1.67,
+      "status": "pass"
+    },
+    {
+      "name": "Socket Utils > should ignore legacy subtitle enable commands without publishing status",
       "duration": 0.08,
       "status": "pass"
     },
     {
-      "name": "environment config files > should merge short adjacent segments only within the same speaker",
-      "duration": 0.13,
+      "name": "Socket Utils > should omit realtime subtitle state from connection status messages",
+      "duration": 0.17,
       "status": "pass"
     },
     {
-      "name": "environment config files > should expose a preview URL for parsed yt-dlp audio formats",
+      "name": "Socket Utils > should publish voice text by default",
+      "duration": 0.05,
+      "status": "pass"
+    },
+    {
+      "name": "Socket Utils > should publish vision detection profile metadata",
+      "duration": 0.08,
+      "status": "pass"
+    },
+    {
+      "name": "Socket Utils > should close tracked clients when stopping realtime socket server",
+      "duration": 0.07,
+      "status": "pass"
+    },
+    {
+      "name": "environment config files > should define shared runtime keys in base env",
+      "status": "pass"
+    },
+    {
+      "name": "environment config files > should document optional and python-only environment keys in example env",
+      "duration": 0.18,
+      "status": "pass"
+    },
+    {
+      "name": "environment config files > should keep CosyVoice runtime on the managed python services surface",
+      "duration": 0.71,
+      "status": "pass"
+    },
+    {
+      "name": "environment config files > should resolve CosyVoice model to the fixed managed cache directory",
+      "duration": 0.04,
+      "status": "pass"
+    },
+    {
+      "name": "environment config files > should keep environment files focused on overrides",
+      "duration": 0.06,
+      "status": "pass"
+    },
+    {
+      "name": "environment config files > should keep barge-in enabled by default and allow env opt-out parsing",
       "duration": 0.03,
       "status": "pass"
     },
     {
+      "name": "environment config files > should restrict CosyVoice prompt audio to managed wav files",
+      "duration": 0.48,
+      "status": "pass"
+    },
+    {
+      "name": "environment config files > should parse only audio-only formats from yt-dlp metadata",
+      "duration": 0.14,
+      "status": "pass"
+    },
+    {
+      "name": "environment config files > should filter FunASR material candidates for CosyVoice prompts",
+      "duration": 0.49,
+      "status": "pass"
+    },
+    {
+      "name": "environment config files > should reject candidates too close to another speaker",
+      "duration": 0.03,
+      "status": "pass"
+    },
+    {
+      "name": "environment config files > should merge short adjacent segments only within the same speaker",
+      "duration": 0.12,
+      "status": "pass"
+    },
+    {
+      "name": "environment config files > should expose a preview URL for parsed yt-dlp audio formats",
+      "duration": 0.06,
+      "status": "pass"
+    },
+    {
       "name": "environment config files > should build yt-dlp args with Chrome cookies by default",
-      "duration": 0.05,
+      "duration": 0.04,
       "status": "pass"
     },
     {
@@ -478,106 +645,111 @@
     },
     {
       "name": "environment config files > should keep custom yt-dlp browser cookie profile as one argument",
-      "duration": 0.01,
       "status": "pass"
     },
     {
       "name": "environment config files > should reject unsafe yt-dlp browser cookie values",
-      "duration": 0.03,
-      "status": "pass"
-    },
-    {
-      "name": "environment config files > should ignore preview stream events after cancellation closes the controller",
-      "duration": 0.14,
-      "status": "pass"
-    },
-    {
-      "name": "environment config files > should reject unsupported yt-dlp URL schemes before spawning",
-      "duration": 0.11,
-      "status": "pass"
-    },
-    {
-      "name": "environment config files > should keep yt-dlp default install target under server tools bin",
-      "duration": 0.04,
-      "status": "pass"
-    },
-    {
-      "name": "LogsView navigation helpers > uses pending returned pipeline before falling back to the first refreshed item",
-      "status": "pass"
-    },
-    {
-      "name": "LogsView navigation helpers > keeps the selected pipeline when no pending return target exists",
-      "duration": 0.27,
-      "status": "pass"
-    },
-    {
-      "name": "FaceEngine Performance > should extract descriptor and measure performance",
-      "duration": 39.65,
-      "status": "pass"
-    },
-    {
-      "name": "FaceEngine Performance > should recognize faces and measure performance",
-      "duration": 381.41,
-      "status": "pass"
-    },
-    {
-      "name": "FaceEngine Performance > should run identity profile without perception outputs",
-      "duration": 11.59,
-      "status": "pass"
-    },
-    {
-      "name": "FaceEngine Performance > should expose profile metadata for full detection",
-      "duration": 59.86,
-      "status": "pass"
-    },
-    {
-      "name": "FaceEngine Performance > should not cleanup identity profile",
-      "duration": 0.23,
-      "status": "pass"
-    },
-    {
-      "name": "FaceEngine Performance > should not cleanup running or loading high profiles",
-      "duration": 0.08,
-      "status": "pass"
-    },
-    {
-      "name": "FaceEngine Performance > should cleanup idle perception and full profiles",
-      "duration": 0.06,
-      "status": "pass"
-    },
-    {
-      "name": "FaceEngine Performance > should not cleanup while attention has active request",
       "duration": 0.02,
       "status": "pass"
     },
     {
+      "name": "environment config files > should ignore preview stream events after cancellation closes the controller",
+      "duration": 0.05,
+      "status": "pass"
+    },
+    {
+      "name": "environment config files > should reject unsupported yt-dlp URL schemes before spawning",
+      "duration": 0.08,
+      "status": "pass"
+    },
+    {
+      "name": "environment config files > should keep yt-dlp default install target under server tools bin",
+      "duration": 0.09,
+      "status": "pass"
+    },
+    {
+      "name": "LogsView navigation helpers > uses pending returned pipeline before falling back to the first refreshed item",
+      "duration": 0.06,
+      "status": "pass"
+    },
+    {
+      "name": "LogsView navigation helpers > keeps the selected pipeline when no pending return target exists",
+      "duration": 0.05,
+      "status": "pass"
+    },
+    {
+      "name": "LogsView navigation helpers > uses a pending incident target before the previously selected incident",
+      "duration": 0.02,
+      "status": "pass"
+    },
+    {
+      "name": "FaceEngine Performance > should extract descriptor and measure performance",
+      "duration": 40.14,
+      "status": "pass"
+    },
+    {
+      "name": "FaceEngine Performance > should recognize faces and measure performance",
+      "duration": 398.29,
+      "status": "pass"
+    },
+    {
+      "name": "FaceEngine Performance > should run identity profile without perception outputs",
+      "duration": 12.01,
+      "status": "pass"
+    },
+    {
+      "name": "FaceEngine Performance > should expose profile metadata for full detection",
+      "duration": 57.2,
+      "status": "pass"
+    },
+    {
+      "name": "FaceEngine Performance > should not cleanup identity profile",
+      "duration": 0.26,
+      "status": "pass"
+    },
+    {
+      "name": "FaceEngine Performance > should not cleanup running or loading high profiles",
+      "duration": 0.11,
+      "status": "pass"
+    },
+    {
+      "name": "FaceEngine Performance > should cleanup idle perception and full profiles",
+      "duration": 0.07,
+      "status": "pass"
+    },
+    {
+      "name": "FaceEngine Performance > should not cleanup while attention has active request",
+      "duration": 0.07,
+      "status": "pass"
+    },
+    {
       "name": "MemoryDatabase > should create and get a conversation session by conversation_id",
-      "duration": 11.69,
+      "duration": 13.41,
       "status": "pass"
     },
     {
       "name": "MemoryDatabase > should append multiple user-agent turns to one session",
-      "duration": 4.58,
+      "duration": 4.51,
       "status": "pass"
     },
     {
       "name": "MemoryDatabase > should hide empty conversation sessions from search and count",
-      "duration": 5.43,
+      "duration": 4.13,
       "status": "pass"
     },
     {
       "name": "MemoryDatabase > should remove empty conversation sessions on initialization",
-      "duration": 5.36,
+      "duration": 4.94,
       "status": "pass"
     },
     {
       "name": "MemoryDatabase > should return recent conversation messages for follow-up context",
-      "duration": 4.1,
+      "duration": 4.08,
       "status": "pass"
     },
     {
       "name": "MemoryDatabase > should fuzzy search session messages",
-      "duration": 3.89,
+      "duration": 5.4,
       "status": "pass"
     },
     {
@@ -587,112 +759,141 @@
     },
     {
       "name": "MemoryDatabase > should paginate newest-first sessions",
-      "duration": 4.87,
+      "duration": 4.15,
       "status": "pass"
     },
     {
       "name": "MemoryDatabase > should count sessions with and without filters",
-      "duration": 4.81,
+      "duration": 3.91,
       "status": "pass"
     },
     {
       "name": "MemoryDatabase > should remove a single conversation session",
-      "duration": 4.1,
+      "duration": 3.92,
       "status": "pass"
     },
     {
       "name": "MemoryDatabase > should save pruned memories in a separate table and search them for context",
-      "duration": 5.47,
+      "duration": 5.28,
       "status": "pass"
     },
     {
       "name": "MemoryDatabase > should update and remove pruned memories",
-      "duration": 4.36,
-      "status": "pass"
-    },
-    {
-      "name": "MemoryDatabase > should update instead of duplicating pruned memories for the same source session",
-      "duration": 4.5,
-      "status": "pass"
-    },
-    {
-      "name": "MemoryDatabase > should create new pruned memories as warm even with a low base score",
-      "duration": 3.43,
-      "status": "pass"
-    },
-    {
-      "name": "MemoryDatabase > should rank context memories by content and situation and update hit count",
-      "duration": 4.21,
-      "status": "pass"
-    },
-    {
-      "name": "MemoryDatabase > should rank context memories with heat score decay over time",
-      "duration": 4.11,
-      "status": "pass"
-    },
-    {
-      "name": "MemoryDatabase > should not inject hot memories without semantic relevance",
-      "duration": 4.53,
-      "status": "pass"
-    },
-    {
-      "name": "MemoryDatabase > should not inject memories from situation match alone",
-      "duration": 4.07,
-      "status": "pass"
-    },
-    {
-      "name": "MemoryDatabase > should use situation and heat only to rank semantically relevant memories",
-      "duration": 4.17,
-      "status": "pass"
-    },
-    {
-      "name": "MemoryDatabase > should return recent long-term memories for recent recall mode",
-      "duration": 3.9,
-      "status": "pass"
-    },
-    {
-      "name": "MemoryDatabase > should supplement semantic results with recent memories in hybrid mode",
-      "duration": 4.09,
-      "status": "pass"
-    },
-    {
-      "name": "MemoryDatabase > should create, approve, and reject memory candidates",
-      "duration": 4.42,
-      "status": "pass"
-    },
-    {
-      "name": "MemoryDatabase > should filter cold memories from semantic retrieval but include them in recent recall",
-      "duration": 4.12,
-      "status": "pass"
-    },
-    {
-      "name": "MemoryDatabase > should cool low-value stale memories during lifecycle maintenance",
-      "duration": 3.77,
-      "status": "pass"
-    },
-    {
-      "name": "MemoryDatabase > should reject old exchange table at runtime instead of auto migrating it",
-      "duration": 2.54,
-      "status": "pass"
-    },
-    {
-      "name": "runtime data migration script > migrates legacy face json into an empty sqlite table",
       "duration": 4.05,
       "status": "pass"
     },
     {
+      "name": "MemoryDatabase > should update instead of duplicating pruned memories for the same source session",
+      "duration": 4.49,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should create new pruned memories as warm even with a low base score",
+      "duration": 3.93,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should rank context memories by content and situation and update hit count",
+      "duration": 4.38,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should rank context memories with heat score decay over time",
+      "duration": 4.49,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should not inject hot memories without semantic relevance",
+      "duration": 4.25,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should not inject memories from situation match alone",
+      "duration": 4.21,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should use situation and heat only to rank semantically relevant memories",
+      "duration": 4.18,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should return recent long-term memories for recent recall mode",
+      "duration": 4.43,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should supplement semantic results with recent memories in hybrid mode",
+      "duration": 4.64,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should create, approve, and reject memory candidates",
+      "duration": 4.88,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should score ambient freshness from creation time instead of ordinary access time",
+      "duration": 5.36,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should score cold memories instead of filtering them from semantic retrieval",
+      "duration": 5.1,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should retrieve ambient memories without query relevance gating",
+      "duration": 6.57,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should record explicit positive negative and ignored memory feedback",
+      "duration": 5.11,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should cool low-value stale memories during lifecycle maintenance",
+      "duration": 16.24,
+      "status": "pass"
+    },
+    {
+      "name": "MemoryDatabase > should reject old exchange table at runtime instead of auto migrating it",
+      "duration": 2.43,
+      "status": "pass"
+    },
+    {
+      "name": "realtime socket URL resolution > uses configured socket URL when provided",
+      "status": "pass"
+    },
+    {
+      "name": "realtime socket URL resolution > falls back to current port plus one when socket URL is not configured",
+      "duration": 0.18,
+      "status": "pass"
+    },
+    {
+      "name": "realtime socket URL resolution > uses secure websocket fallback for https pages without explicit port",
+      "duration": 0.03,
+      "status": "pass"
+    },
+    {
+      "name": "runtime data migration script > migrates legacy face json into an empty sqlite table",
+      "duration": 3.71,
+      "status": "pass"
+    },
+    {
       "name": "runtime data migration script > fails when legacy face json is missing",
-      "duration": 0.15,
+      "duration": 0.12,
       "status": "pass"
     },
     {
       "name": "runtime data migration script > migrates legacy memory exchange rows into the new conversations table",
-      "duration": 4.5,
+      "duration": 4.65,
       "status": "pass"
     },
     {
       "name": "wake text helpers > extracts only the command after the wake word",
-      "duration": 0.75,
+      "duration": 0.56,
       "status": "pass"
     },
     {
@@ -702,27 +903,27 @@
     },
     {
       "name": "wake text helpers > returns no command when wake word is absent",
-      "duration": 0.02,
+      "duration": 0.14,
       "status": "pass"
     },
     {
       "name": "BenchmarkService > normalizes benchmark metadata from pipeline metadata",
-      "duration": 0.12,
+      "duration": 0.4,
       "status": "pass"
     },
     {
       "name": "BenchmarkService > calculates avg and percentile metrics",
-      "duration": 0.08,
+      "duration": 0.16,
       "status": "pass"
     },
     {
       "name": "BenchmarkService > aggregates benchmark pipelines while excluding warmup latency",
-      "duration": 1.94,
+      "duration": 1.93,
       "status": "pass"
     },
     {
       "name": "BenchmarkService > lists benchmark runs separately from ordinary pipelines",
-      "duration": 0.62,
+      "duration": 0.47,
       "status": "pass"
     },
     {
@@ -731,32 +932,37 @@
     },
     {
       "name": "LifecycleManager > continues later shutdown tasks after one task fails",
-      "duration": 0.42,
+      "duration": 0.35,
       "status": "pass"
     },
     {
       "name": "AssistantRuntimeService > defaults to stopped and exposes start action",
+      "duration": 0.07,
+      "status": "pass"
+    },
+    {
+      "name": "AssistantRuntimeService > starts minimal runtime with core model services by default",
       "duration": 0.32,
       "status": "pass"
     },
     {
-      "name": "AssistantRuntimeService > starts minimal runtime by default without optional services",
-      "duration": 0.25,
-      "status": "pass"
-    },
-    {
       "name": "AssistantRuntimeService > starts selected optional services and promotes live vision to full mode",
-      "duration": 0.24,
+      "duration": 0.06,
       "status": "pass"
     },
     {
       "name": "AssistantRuntimeService > marks runtime error and cleans up when monitor startup fails",
-      "duration": 0.18,
+      "duration": 0.3,
+      "status": "pass"
+    },
+    {
+      "name": "AssistantRuntimeService > fails runtime startup when a core model service fails",
+      "duration": 0.12,
       "status": "pass"
     },
     {
       "name": "AssistantRuntimeService > stops all runtime resources and is idempotent",
-      "duration": 0.15,
+      "duration": 0.12,
       "status": "pass"
     },
     {
@@ -766,7 +972,7 @@
     },
     {
       "name": "AudioSegmenter > forces a segment to end when active audio exceeds hard max duration",
-      "duration": 0.2,
+      "duration": 0.21,
       "status": "pass"
     },
     {
@@ -776,7 +982,7 @@
     },
     {
       "name": "AudioSegmenter > ends confirmed speech after consecutive silence frames",
-      "duration": 0.04,
+      "duration": 0.03,
       "status": "pass"
     },
     {
@@ -785,7 +991,7 @@
     },
     {
       "name": "Voice Utils > should remove content in parentheses",
-      "duration": 0.06,
+      "duration": 0.05,
       "status": "pass"
     },
     {
@@ -795,27 +1001,27 @@
     },
     {
       "name": "Voice Utils > should remove multiple spaces",
-      "duration": 0.01,
+      "duration": 0.03,
       "status": "pass"
     },
     {
       "name": "Voice Utils > should detect echo-like transcripts",
-      "duration": 0.67,
+      "duration": 0.71,
       "status": "pass"
     },
     {
       "name": "Voice Utils > should calculate lower similarity for unrelated text",
-      "duration": 0.07,
+      "duration": 0.05,
       "status": "pass"
     },
     {
       "name": "Voice Utils > should filter invalid barge-in candidates",
-      "duration": 0.07,
+      "duration": 0.09,
       "status": "pass"
     },
     {
       "name": "Voice Utils > should detect configured barge-in keywords",
-      "duration": 0.04,
+      "duration": 0.1,
       "status": "pass"
     },
     {
@@ -825,37 +1031,37 @@
     },
     {
       "name": "Voice Utils > should wait for short soft punctuation before splitting",
-      "duration": 0.1,
+      "duration": 0.09,
       "status": "pass"
     },
     {
       "name": "Voice Utils > should use elastic punctuation windows instead of fixed length cuts",
-      "duration": 0.22,
+      "duration": 0.29,
       "status": "pass"
     },
     {
       "name": "Voice Utils > should not split short soft punctuation before the elastic window",
-      "duration": 0.03,
+      "duration": 0.07,
       "status": "pass"
     },
     {
       "name": "Voice Utils > should fallback split long text without punctuation",
-      "duration": 0.94,
+      "duration": 0.88,
       "status": "pass"
     },
     {
       "name": "Voice Utils > should keep sentence punctuation attached to the preceding cosyvoice chunk",
-      "duration": 0.1,
+      "duration": 0.06,
       "status": "pass"
     },
     {
       "name": "Voice Utils > should force split long punctuation-free cjk text near max units",
-      "duration": 4.14,
+      "duration": 4.53,
       "status": "pass"
     },
     {
       "name": "Voice Utils > should merge dense short punctuation into one cosyvoice chunk",
-      "duration": 0.11,
+      "duration": 0.03,
       "status": "pass"
     },
     {
@@ -865,63 +1071,64 @@
     },
     {
       "name": "Voice Utils > should not split english words versions or urls in mixed text",
-      "duration": 0.73,
+      "duration": 0.6,
       "status": "pass"
     },
     {
       "name": "Voice Utils > should split cjk earlier than english for the same visible length",
-      "duration": 0.88,
+      "duration": 1.17,
       "status": "pass"
     },
     {
       "name": "Voice Utils > should preserve a short final tail",
-      "duration": 0.32,
-      "status": "pass"
-    },
-    {
-      "name": "Voice Utils > should fallback to say for CosyVoice service errors only",
-      "duration": 0.06,
-      "status": "pass"
-    },
-    {
-      "name": "Report Generation > should parse Bun test output and performance metrics",
-      "status": "pass"
-    },
-    {
-      "name": "Report Generation > should rank hotspots by duration and compare baselines",
-      "duration": 0.35,
-      "status": "pass"
-    },
-    {
-      "name": "Report Generation > should generate a report with hotspot and test sections",
       "duration": 0.19,
       "status": "pass"
     },
     {
+      "name": "Voice Utils > should fallback to say for CosyVoice service errors only",
+      "duration": 0.04,
+      "status": "pass"
+    },
+    {
+      "name": "Report Generation > should parse Bun test output and performance metrics",
+      "duration": 0.13,
+      "status": "pass"
+    },
+    {
+      "name": "Report Generation > should rank hotspots by duration and compare baselines",
+      "duration": 0.17,
+      "status": "pass"
+    },
+    {
+      "name": "Report Generation > should generate a report with hotspot and test sections",
+      "duration": 0.24,
+      "status": "pass"
+    },
+    {
       "name": "Report Generation > should generate a README report block",
-      "duration": 0.29,
+      "duration": 0.32,
       "status": "pass"
     },
     {
       "name": "Report Generation > should sync the managed README report block",
-      "duration": 0.91,
+      "duration": 0.66,
       "status": "pass"
     },
     {
       "name": "Report Generation > should preserve README feature docs when syncing the report block",
-      "duration": 0.53,
+      "duration": 0.58,
       "status": "pass"
     }
   ],
   "performanceMetrics": [
     {
       "name": "Async_Voice_Video.safeSave",
-      "duration": 129.97,
+      "duration": 122.49,
       "category": "media-synthesis"
     },
     {
       "name": "SyncManager.addVideo",
-      "duration": 0.07,
+      "duration": 0.05,
       "category": "media-synthesis"
     },
     {
@@ -931,78 +1138,78 @@
     },
     {
       "name": "Queue.push",
-      "duration": 77.05,
+      "duration": 78.48,
       "category": "media-synthesis"
     },
     {
       "name": "Socket.calculatePcmLevel",
-      "duration": 0.46,
+      "duration": 0.44,
       "category": "socket-audio"
     },
     {
       "name": "FaceEngine.loadModels",
-      "duration": 81.74,
+      "duration": 84,
       "category": "face-inference"
     },
     {
       "name": "FaceEngine.extractDescriptor",
-      "duration": 39.54,
+      "duration": 40.04,
       "category": "face-inference"
     },
     {
       "name": "FaceEngine.detectAll.faces",
-      "duration": 381,
+      "duration": 397.88,
       "category": "face-inference"
     }
   ],
   "summary": {
-    "pass": 184,
+    "pass": 225,
     "fail": 0,
-    "total": 184,
-    "time": "8.94s",
-    "files": 29,
-    "assertions": 643
+    "total": 225,
+    "time": "8.92s",
+    "files": 34,
+    "assertions": 940
   },
   "hotspots": [
     {
       "name": "FaceEngine.detectAll.faces",
-      "duration": 381,
+      "duration": 397.88,
       "category": "face-inference",
       "rank": 1
     },
     {
       "name": "Async_Voice_Video.safeSave",
-      "duration": 129.97,
+      "duration": 122.49,
       "category": "media-synthesis",
       "rank": 2
     },
     {
       "name": "FaceEngine.loadModels",
-      "duration": 81.74,
+      "duration": 84,
       "category": "face-inference",
       "rank": 3
     },
     {
       "name": "Queue.push",
-      "duration": 77.05,
+      "duration": 78.48,
       "category": "media-synthesis",
       "rank": 4
     },
     {
       "name": "FaceEngine.extractDescriptor",
-      "duration": 39.54,
+      "duration": 40.04,
       "category": "face-inference",
       "rank": 5
     },
     {
       "name": "Socket.calculatePcmLevel",
-      "duration": 0.46,
+      "duration": 0.44,
       "category": "socket-audio",
       "rank": 6
     },
     {
       "name": "SyncManager.addVideo",
-      "duration": 0.07,
+      "duration": 0.05,
       "category": "media-synthesis",
       "rank": 7
     },
