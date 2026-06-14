@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { choosePipelineIdAfterLogRefresh } from '../../components/logsNavigation';
+import { chooseLogItemIdAfterRefresh, choosePipelineIdAfterLogRefresh } from '../../components/logsNavigation';
 
 describe('LogsView navigation helpers', () => {
     test('uses pending returned pipeline before falling back to the first refreshed item', () => {
@@ -12,5 +12,11 @@ describe('LogsView navigation helpers', () => {
         const pipelines = [{ id: 'latest-pipeline' }, { id: 'selected-pipeline' }];
 
         expect(choosePipelineIdAfterLogRefresh(pipelines, null, 'selected-pipeline')).toBe('selected-pipeline');
+    });
+
+    test('uses a pending incident target before the previously selected incident', () => {
+        const incidents = [{ id: 'latest-incident' }, { id: 'selected-incident' }, { id: 'pending-incident' }];
+
+        expect(chooseLogItemIdAfterRefresh(incidents, 'pending-incident', 'selected-incident')).toBe('pending-incident');
     });
 });

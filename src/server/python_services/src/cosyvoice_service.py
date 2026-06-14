@@ -63,6 +63,11 @@ def env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() not in ("0", "false", "no", "off", "")
 
 
+def configure_hf_offline_mode():
+    if env_bool("COSYVOICE_HF_OFFLINE", True):
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
+
 def env_float(name: str, default: float) -> float:
     value = os.environ.get(name)
     if value is None:
@@ -88,6 +93,7 @@ def ensure_started():
     if TTS_MODEL is not None:
         return
     try:
+        configure_hf_offline_mode()
         from mlx_audio.tts.utils import load_model
         resolved_model_dir = validate_model_dir(model_dir())
         print(f"[CosyVoice] loading model={resolved_model_dir}", flush=True)
@@ -141,6 +147,7 @@ def find_generated_wav(prefix: Path) -> Path:
 
 
 def generate_wav(tts_text: str, ref_audio: str, ref_text: str) -> bytes:
+    configure_hf_offline_mode()
     from mlx_audio.tts.generate import generate_audio
 
     request_dir = Path(tempfile.mkdtemp(prefix="ha-cosyvoice-mlx-"))

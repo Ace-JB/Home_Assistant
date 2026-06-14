@@ -11,3 +11,15 @@ export function choosePipelineIdAfterLogRefresh(
   }
   return pipelines[0]?.id;
 }
+
+export function chooseLogItemIdAfterRefresh(
+  items: { id: string }[],
+  pendingItemId: string | null,
+  selectedItemId: string | null,
+): string | undefined {
+  if (pendingItemId) return pendingItemId;
+  if (selectedItemId && items.some(item => item.id === selectedItemId)) {
+    return selectedItemId;
+  }
+  return undefined;
+}

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RealtimeMessage, BufferedFrame, SubtitleCue, RealtimeState, TranscriptEntry } from '../types/realtime';
+import { appConfig } from '../config/appConfig';
+import { resolveRealtimeSocketUrl } from '../config/realtimeSocketUrl';
 
 export function useRealtimeFeedback(enabled = true): RealtimeState {
   const socketRef = useRef<WebSocket | null>(null);
@@ -43,10 +45,7 @@ export function useRealtimeFeedback(enabled = true): RealtimeState {
       return;
     }
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const currentPort = Number(window.location.port || (window.location.protocol === 'https:' ? 443 : 80));
-    const socketHost = `${window.location.hostname}:${currentPort + 1}`;
-    const socket = new WebSocket(`${protocol}//${socketHost}/ws/realtime`);
+    const socket = new WebSocket(resolveRealtimeSocketUrl(window.location, appConfig.socketUrl));
     socketRef.current = socket;
 
     socket.addEventListener('open', () => {

@@ -1,13 +1,14 @@
-import { createOllama } from 'ollama-ai-provider';
-import { generateText, type CoreMessage } from 'ai';
+import type { CoreMessage } from 'ai';
 import { z } from 'zod';
 import { GLOBAL_CONFIG } from '@/global_config';
 import type { AssistantLanguage } from '@tools/Socket';
 import type { ConversationMessage } from '@modules/memory';
+import { routerRuleProfile, scoreCandidate, type ScoringResult } from '@modules/scoring';
 import { buildIntentionUserPrompt, getIntentionSystemPrompt } from '@server/prompts';
 import { recordModelDecision } from '@server/observability/modelTrace';
 import { generateTextWithRuntimeLog } from '@server/observability/modelRuntime';
 import { pipelineLogs } from '@server/services/PipelineLogService';
+import { mlxModelClient } from '@server/services/model-runtime/MlxModelClient';
 
 export const UserIntentSchema = z.enum([
     'qa',
@@ -51,6 +52,7 @@ export const SafetyRiskLevelSchema = z.enum(['none', 'privacy', 'device_risk', '
 export type SafetyRiskLevel = z.infer<typeof SafetyRiskLevelSchema>;
 export const ResponsePlanStyleSchema = z.enum(['brief_answer', 'brief_confirm', 'clarification_question', 'refusal']);
 export type ResponsePlanStyle = z.infer<typeof ResponsePlanStyleSchema>;
+export type RoutingDiagnosticSource = 'pre-router' | 'qwen-router' | 'fallback';
 
 export const CoreRoutingDecisionSchema = z.object({
     traceId: z.string().min(1),
@@ -72,6 +74,14 @@ export interface IntentionAnalysis {
     routingAction?: RoutingAction;
     requiresLongTermMemory?: boolean;
     requiresToolsOrMCP?: boolean;
+    routingDiagnostics?: {
+        source: RoutingDiagnosticSource;
+        preRouterLayer?: PreRouterLayer;
+        preRouterRule?: string;
+        normalizedCommand?: string;
+        modelSkipped: boolean;
+        scoring?: ScoringResult;
+    };
     routing?: {
         action: RoutingAction;
         confidence: number;
@@ -150,7 +160,7 @@ export interface AnalyzeCommandInput {
     benchmark?: unknown;
 }
 
-type GenerateTextLike = typeof generateText;
+type GenerateTextLike = (options: any) => Promise<{ text: string }>;
 type PartialVisualUnderstanding = Partial<IntentionAnalysis['visualUnderstanding']>;
 type PartialMemoryRetrieval = Partial<IntentionAnalysis['memoryRetrieval']>;
 type PartialResolvedContext = Partial<IntentionAnalysis['resolvedContext']>;
@@ -164,16 +174,56 @@ type ValidationResult =
 type CoreValidationResult =
     | { ok: true; data: CoreRoutingDecision }
     | { ok: false; errors: string[] };
+export type PreRouterLayer = 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6' | 'P7';
+const PreRouterLayerValues: PreRouterLayer[] = ['P0', 'P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7'];
+type PreRouterMeta = {
+    layer: PreRouterLayer;
+    rule: string;
+    normalizedCommand: string;
+    routingReason: string;
+    memoryReason: string;
+    visualReason: string;
+    confidence: number;
+    safetyRiskLevel?: SafetyRiskLevel;
+    safetyReason?: string;
+    clarificationQuestion?: string;
+};
+type PreRouterDecision = {
+    decision: CoreRoutingDecision;
+    meta: PreRouterMeta;
+};
+type PreRouterTraceCheck = {
+    layer: PreRouterLayer;
+    rule: string;
+    matched: boolean;
+    durationMs: number;
+    reason?: string;
+};
+type PreRouterTrace = {
+    startedAt: number;
+    normalizedCommand: string;
+    checks: PreRouterTraceCheck[];
+};
+type PreRouterTraceOutcome = 'matched' | 'missed' | 'skipped_to_model';
+type RoutingDiagnostics = NonNullable<IntentionAnalysis['routingDiagnostics']>;
+type DeviceRisk = 'safe' | 'ambiguous' | 'high_risk';
+type IntentionTraceContext = {
+    pipelineId?: string;
+    conversationId?: string;
+    userCommand: string;
+};
 
-const ollama = createOllama({
-    baseURL: GLOBAL_CONFIG.OLLAMA.IP,
+const defaultRoutingGenerate: GenerateTextLike = (options: any) => mlxModelClient.generateRoutingJson({
+    role: 'fast',
+    messages: options.messages ?? [],
+    maxTokens: options.maxTokens,
+    temperature: options.temperature,
 });
-
-const textModel = ollama(GLOBAL_CONFIG.OLLAMA.TEXT_MODEL, {
-    numCtx: GLOBAL_CONFIG.OLLAMA.TEXT_NUM_CTX,
-});
-const intentionModel = ollama(GLOBAL_CONFIG.OLLAMA.INTENTION_MODEL ?? GLOBAL_CONFIG.OLLAMA.TEXT_MODEL, {
-    numCtx: GLOBAL_CONFIG.OLLAMA.TEXT_NUM_CTX,
+const defaultRepairGenerate: GenerateTextLike = (options: any) => mlxModelClient.generateRoutingJson({
+    role: 'repair',
+    messages: options.messages ?? [],
+    maxTokens: options.maxTokens,
+    temperature: options.temperature,
 });
 
 const INTENTS = UserIntentSchema.options;
@@ -265,35 +315,54 @@ const LayeredAnalysisValidationSchema = z.object({
 
 export async function analyzeCommand(
     input: AnalyzeCommandInput,
-    deps: { generateText?: GenerateTextLike } = {},
+    deps: { generateText?: GenerateTextLike; repairGenerateText?: GenerateTextLike } = {},
 ): Promise<IntentionAnalysis> {
     const traceId = input.traceId || createTraceId();
     const command = input.userCommand.trim();
+    const traceContext = buildIntentionTraceContext(input, command);
 
-    const fastTrack = analyzeStaticFastTrack(command, traceId);
+    const fastTrack = analyzeStaticFastTrack(command, traceId, input.recentConversationMessages ?? [], traceContext);
     if (fastTrack) {
+        const routingDiagnostics = createPreRouterDiagnostics(fastTrack);
         logIntentionTrace({
+            ...traceContext,
             traceId,
-            stage: 'static_fast_track_hit',
+            stage: 'pre_router_hit',
             command,
-            decision: fastTrack,
+            decision: fastTrack.decision,
+            routerSource: routingDiagnostics.source,
+            preRouterLayer: routingDiagnostics.preRouterLayer,
+            preRouterRule: routingDiagnostics.preRouterRule,
+            normalizedCommand: routingDiagnostics.normalizedCommand,
+            modelSkipped: routingDiagnostics.modelSkipped,
+        }, fastTrack.meta.safetyRiskLevel && fastTrack.meta.safetyRiskLevel !== 'none' ? 'warn' : 'info');
+        const analysis = toCompatAnalysis(fastTrack.decision, {
+            routingReason: fastTrack.meta.routingReason,
+            memoryReason: fastTrack.meta.memoryReason,
+            visualReason: fastTrack.meta.visualReason,
+            confidence: fastTrack.meta.confidence,
+            safetyRiskLevel: fastTrack.meta.safetyRiskLevel,
+            safetyReason: fastTrack.meta.safetyReason,
+            clarificationQuestion: fastTrack.meta.clarificationQuestion,
+            routingDiagnostics,
         });
-        const analysis = toCompatAnalysis(fastTrack, {
-            routingReason: command ? 'static fast-track matched an unambiguous command' : 'empty command',
-            memoryReason: command ? 'static fast-track does not need long-term memory' : 'empty command',
-            visualReason: 'static fast-track does not need visual understanding',
-            confidence: command ? 0.96 : 0.99,
+        traceIntention(command, analysis, 'pre-router', {
+            preRouterLayer: routingDiagnostics.preRouterLayer,
+            preRouterRule: routingDiagnostics.preRouterRule,
+            normalizedCommand: routingDiagnostics.normalizedCommand,
+            modelSkipped: routingDiagnostics.modelSkipped,
         });
-        traceIntention(command, analysis, 'fallback');
         return analysis;
     }
 
     try {
-        const generate = deps.generateText ?? generateText;
+        const generate = deps.generateText ?? defaultRoutingGenerate;
+        const repairGenerate = deps.repairGenerateText ?? (deps.generateText ? generate : defaultRepairGenerate);
         const requestInput = { ...input, userCommand: command, traceId };
         const messages = buildCoreRoutingMessages(requestInput);
         const startedAt = Date.now();
         logIntentionTrace({
+            ...traceContext,
             traceId,
             stage: 'core_routing_request',
             command,
@@ -301,15 +370,14 @@ export async function analyzeCommand(
             messages,
         });
         const options = {
-            model: intentionModel as any,
             maxTokens: GLOBAL_CONFIG.MODELS.INTENSION.MAX_TOKENS,
             temperature: 0,
             messages,
         };
-        const result = generate === generateText
+        const result = generate === defaultRoutingGenerate
             ? await generateTextWithRuntimeLog(generate, options, {
                 scope: 'intention.routing',
-                modelId: GLOBAL_CONFIG.OLLAMA.INTENTION_MODEL ?? GLOBAL_CONFIG.OLLAMA.TEXT_MODEL,
+                modelId: GLOBAL_CONFIG.MODEL_SERVICES.QWEN_ROUTER_FAST_MODEL_ID,
                 traceId,
                 pipelineId: input.pipelineId,
                 conversationId: input.conversationId,
@@ -318,6 +386,7 @@ export async function analyzeCommand(
             })
             : await generate(options);
         logIntentionTrace({
+            ...traceContext,
             traceId,
             stage: 'core_routing_raw_output',
             command,
@@ -329,9 +398,11 @@ export async function analyzeCommand(
             input: requestInput,
             messages,
             generate,
+            repairGenerate,
         });
-        const guarded = applyDeterministicRoutingRules(parsed, command, traceId);
+        const guarded = applyDeterministicRoutingRules(parsed, command, requestInput);
         logIntentionTrace({
+            ...traceContext,
             traceId,
             stage: 'core_routing_complete',
             command,
@@ -342,6 +413,10 @@ export async function analyzeCommand(
             memoryReason: guarded.requiresLongTermMemory ? 'core routing requested long-term memory' : 'core routing did not request long-term memory',
             visualReason: guarded.requiresToolsOrMCP ? 'core routing requested tool, MCP, or visual context' : 'core routing did not request tool, MCP, or visual context',
             confidence: 0.86,
+            routingDiagnostics: {
+                source: 'qwen-router',
+                modelSkipped: false,
+            },
         });
         traceIntention(command, analysis, 'model');
         return analysis;
@@ -354,7 +429,7 @@ export async function analyzeCommand(
             conversationId: input.conversationId,
             stage: 'intent',
             reason: 'model_error',
-            severity: 'error',
+            severity: 'warn',
             inputSnapshot: buildAnalysisMessages(input),
             outputSnapshot: detail,
             metadata: {
@@ -370,6 +445,37 @@ export async function analyzeCommand(
     }
 }
 
+function buildIntentionTraceContext(input: AnalyzeCommandInput, command: string): IntentionTraceContext {
+    return {
+        pipelineId: input.pipelineId,
+        conversationId: input.conversationId,
+        userCommand: command || input.userCommand,
+    };
+}
+
+function createPreRouterDiagnostics(fastTrack: PreRouterDecision): RoutingDiagnostics {
+    return {
+        source: 'pre-router',
+        preRouterLayer: fastTrack.meta.layer,
+        preRouterRule: fastTrack.meta.rule,
+        normalizedCommand: fastTrack.meta.normalizedCommand,
+        modelSkipped: true,
+        scoring: fastTrack.meta.layer === 'P2' ? undefined : scorePreRouterDecision(fastTrack),
+    };
+}
+
+function scorePreRouterDecision(fastTrack: PreRouterDecision): ScoringResult {
+    return scoreCandidate({
+        baseScore: 1,
+        relevance: fastTrack.meta.confidence,
+        confidence: fastTrack.meta.confidence,
+        freshness: { score: routerRuleProfile.freshness.unknownScore },
+        feedback: {},
+        situation: fastTrack.decision.requiresLongTermMemory || fastTrack.decision.requiresToolsOrMCP ? 0.8 : 0.5,
+        exploration: { impressions: 0 },
+    }, routerRuleProfile);
+}
+
 export function parseIntentionAnalysis(raw: string, fallbackQuery: string): IntentionAnalysis {
     const validation = validateIntentionAnalysis(raw);
     if (validation.ok) {
@@ -381,8 +487,9 @@ export function parseIntentionAnalysis(raw: string, fallbackQuery: string): Inte
 
 function analyzeByFallback(input: AnalyzeCommandInput, reason: string): IntentionAnalysis {
     const command = input.userCommand.trim();
-    const contextTopic = inferRecentTopic(input.recentConversationMessages ?? []);
-    if (contextTopic && isShortAmbiguousCommand(command)) {
+    const normalized = normalizeCommand(command);
+    const contextTopic = inferRecentAssistantTopic(input.recentConversationMessages ?? []);
+    if (contextTopic && isExplicitShortFollowUp(normalized)) {
         const rewrite = `${contextTopic} ${command}`;
         console.log(`[Intention] fallback=${reason} strategy=recent_context_rewrite`);
         return createAnalysis({
@@ -393,20 +500,24 @@ function analyzeByFallback(input: AnalyzeCommandInput, reason: string): Intentio
             shouldEndSession: false,
             visualRequired: false,
             visualReason: 'fallback cannot safely infer visual need',
-            memoryEnabled: true,
-            memoryMode: 'semantic',
+            memoryEnabled: false,
+            memoryMode: 'none',
             memoryQuery: rewrite,
             topics: [],
             timeScope: 'unspecified',
-            memoryConfidence: 0.55,
-            memoryReason: 'fallback short follow-up uses recent conversation context',
+            memoryConfidence: 0.5,
+            memoryReason: 'fallback uses current session context only',
             isFollowUp: true,
             topic: contextTopic,
             rewrite,
-            routingAction: 'answer_after_context',
-            routingReason: 'fallback short follow-up needs context',
-            currentSessionSufficient: false,
+            routingAction: 'direct_answer',
+            routingReason: 'fallback rewrote short follow-up from recent session context',
+            currentSessionSufficient: true,
             responseStyle: 'brief_answer',
+            routingDiagnostics: {
+                source: 'fallback',
+                modelSkipped: false,
+            },
         });
     }
 
@@ -419,20 +530,24 @@ function analyzeByFallback(input: AnalyzeCommandInput, reason: string): Intentio
         shouldEndSession: false,
         visualRequired: false,
         visualReason: 'fallback cannot safely infer visual need',
-        memoryEnabled: true,
-        memoryMode: 'semantic',
+        memoryEnabled: false,
+        memoryMode: 'none',
         memoryQuery: command,
         topics: [],
         timeScope: 'unspecified',
-        memoryConfidence: 0.55,
-        memoryReason: 'fallback semantic retrieval for user command',
+        memoryConfidence: 0.5,
+        memoryReason: 'fallback direct answer avoids unnecessary long-term memory',
         isFollowUp: false,
         topic: '',
         rewrite: command,
-        routingAction: 'answer_after_context',
-        routingReason: 'fallback uses memory for safer personalization',
-        currentSessionSufficient: false,
+        routingAction: 'direct_answer',
+        routingReason: 'fallback direct answer for ordinary user command',
+        currentSessionSufficient: true,
         responseStyle: 'brief_answer',
+        routingDiagnostics: {
+            source: 'fallback',
+            modelSkipped: false,
+        },
     });
 }
 
@@ -454,27 +569,307 @@ function buildAnalysisMessages(input: AnalyzeCommandInput): CoreMessage[] {
     ];
 }
 
-function analyzeStaticFastTrack(command: string, traceId: string): CoreRoutingDecision | null {
-    if (!command) {
-        return {
+function nowMs(): number {
+    return globalThis.performance?.now?.() ?? Date.now();
+}
+
+function roundDurationMs(durationMs: number): number {
+    return Math.max(0, Math.round(durationMs * 1000) / 1000);
+}
+
+function isPreRouterDecision(value: unknown): value is PreRouterDecision {
+    return value !== null
+        && typeof value === 'object'
+        && 'decision' in value
+        && 'meta' in value;
+}
+
+function describePreRouterCheckResult(result: unknown): string | undefined {
+    if (isPreRouterDecision(result)) return result.meta.routingReason;
+    if (result === true) return 'pre-router skipped multi-intent command to model router';
+    return undefined;
+}
+
+function createPreRouterTrace(command: string): PreRouterTrace {
+    return {
+        startedAt: nowMs(),
+        normalizedCommand: normalizeCommand(command),
+        checks: [],
+    };
+}
+
+function recordPreRouterCheck<T>(
+    trace: PreRouterTrace,
+    layer: PreRouterLayer,
+    rule: string,
+    check: () => T,
+): T {
+    const startedAt = nowMs();
+    const result = check();
+    const durationMs = roundDurationMs(nowMs() - startedAt);
+    const reason = describePreRouterCheckResult(result);
+    trace.checks.push({
+        layer,
+        rule,
+        matched: Boolean(result),
+        durationMs,
+        ...(reason ? { reason } : {}),
+    });
+    return result;
+}
+
+function preRouterMatchedLayer(matched?: PreRouterDecision | { layer: PreRouterLayer; rule: string; reason: string }): PreRouterLayer | null {
+    if (!matched) return null;
+    return isPreRouterDecision(matched) ? matched.meta.layer : matched.layer;
+}
+
+function preRouterMatchedRule(matched?: PreRouterDecision | { layer: PreRouterLayer; rule: string; reason: string }): string | null {
+    if (!matched) return null;
+    return isPreRouterDecision(matched) ? matched.meta.rule : matched.rule;
+}
+
+function preRouterMatchedReason(matched?: PreRouterDecision | { layer: PreRouterLayer; rule: string; reason: string }): string | undefined {
+    if (!matched) return undefined;
+    return isPreRouterDecision(matched) ? matched.meta.routingReason : matched.reason;
+}
+
+function recordPreRouterPipelineEvent(
+    traceContext: IntentionTraceContext | undefined,
+    traceId: string,
+    command: string,
+    trace: PreRouterTrace,
+    outcome: PreRouterTraceOutcome,
+    matched?: PreRouterDecision | { layer: PreRouterLayer; rule: string; reason: string },
+): void {
+    if (!traceContext?.pipelineId && !traceContext?.conversationId) return;
+
+    const matchedLayer = preRouterMatchedLayer(matched);
+    const matchedRule = preRouterMatchedRule(matched);
+    const matchedReason = preRouterMatchedReason(matched);
+    const totalDurationMs = roundDurationMs(nowMs() - trace.startedAt);
+    const timings = [
+        ...trace.checks.map(check => ({
+            key: `pre_router_${check.layer}_${check.rule}`,
+            label: `${check.layer} ${check.rule}`,
+            durationMs: check.durationMs,
+            detail: check.matched ? 'matched' : 'missed',
+        })),
+        {
+            key: 'pre_router_total',
+            label: 'Pre-router total',
+            durationMs: totalDurationMs,
+            detail: outcome,
+        },
+    ];
+
+    pipelineLogs.appendEvent({
+        pipelineId: traceContext.pipelineId,
+        conversationId: traceContext.conversationId,
+        stage: 'intent',
+        eventType: 'decision',
+        level: 'info',
+        title: 'pre_router.trace',
+        message: matchedRule ? `${outcome}:${matchedRule}` : outcome,
+        timings,
+        metadata: {
             traceId,
+            conversationId: traceContext.conversationId,
+            pipelineId: traceContext.pipelineId,
+            userCommand: command,
+            normalizedCommand: trace.normalizedCommand,
+            outcome,
+            matchedLayer,
+            matchedRule,
+            matchedReason,
+            modelSkipped: outcome === 'matched',
+            totalDurationMs,
+            checks: trace.checks,
+        },
+    });
+}
+
+function analyzeStaticFastTrack(
+    command: string,
+    traceId: string,
+    recentMessages: ConversationMessage[] = [],
+    traceContext?: IntentionTraceContext,
+): PreRouterDecision | null {
+    const trace = createPreRouterTrace(command);
+    const normalized = trace.normalizedCommand;
+
+    const emptyOrNoise = recordPreRouterCheck(trace, 'P0', 'empty_or_noise', () => {
+        if (normalized) return null;
+        return createPreRouterDecision({
+            traceId,
+            layer: 'P0',
+            rule: 'empty_or_noise',
+            normalizedCommand: normalized,
             intent: 'non_actionable',
             dialogueAct: 'noise',
             routingAction: 'ignore',
-            resolvedContext: {
-                isFollowUp: false,
-                topic: '',
-                rewriteQuery: '',
-            },
+            topic: '',
+            rewriteQuery: '',
             requiresLongTermMemory: false,
             requiresToolsOrMCP: false,
-        };
+            routingReason: 'pre-router ignored empty or ASR noise input',
+            memoryReason: 'empty or noise input does not need long-term memory',
+            visualReason: 'empty or noise input does not need visual understanding',
+            confidence: 0.99,
+        });
+    });
+    if (emptyOrNoise) {
+        recordPreRouterPipelineEvent(traceContext, traceId, command, trace, 'matched', emptyOrNoise);
+        return emptyOrNoise;
     }
 
-    const normalized = command.toLowerCase().replace(/[。！？!?.\s]/g, '');
+    const sessionControl = recordPreRouterCheck(trace, 'P1', 'conversation_end', () => matchSessionControl(normalized, traceId));
+    if (sessionControl) {
+        recordPreRouterPipelineEvent(traceContext, traceId, command, trace, 'matched', sessionControl);
+        return sessionControl;
+    }
+
+    const highRisk = recordPreRouterCheck(trace, 'P2', 'high_risk_guard', () => matchHighRiskCommand(normalized, traceId));
+    if (highRisk) {
+        recordPreRouterPipelineEvent(traceContext, traceId, command, trace, 'matched', highRisk);
+        return highRisk;
+    }
+
+    const hasMultiIntent = recordPreRouterCheck(trace, 'P3', 'multi_intent_detected', () => hasMultipleIntentSegments(command));
+    if (hasMultiIntent) {
+        recordPreRouterPipelineEvent(traceContext, traceId, command, trace, 'skipped_to_model', {
+            layer: 'P3',
+            rule: 'multi_intent_detected',
+            reason: 'pre-router skipped multi-intent command to model router',
+        });
+        logIntentionTrace({
+            ...(traceContext ?? {}),
+            traceId,
+            stage: 'pre_router_skip',
+            command,
+            normalizedCommand: normalized,
+            preRouterRule: 'multi_intent_detected',
+            modelSkipped: false,
+        });
+        return null;
+    }
+
+    const device = recordPreRouterCheck(trace, 'P4', 'safe_device_control_placeholder', () => matchDeviceControl(normalized, traceId));
+    if (device) {
+        recordPreRouterPipelineEvent(traceContext, traceId, command, trace, 'matched', device);
+        return device;
+    }
+
+    const memoryRecall = recordPreRouterCheck(trace, 'P5', 'obvious_memory_recall', () => matchMemoryRecall(normalized, traceId));
+    if (memoryRecall) {
+        recordPreRouterPipelineEvent(traceContext, traceId, command, trace, 'matched', memoryRecall);
+        return memoryRecall;
+    }
+
+    const visualRequest = recordPreRouterCheck(trace, 'P5', 'obvious_visual_request', () => matchVisualRequest(normalized, traceId));
+    if (visualRequest) {
+        recordPreRouterPipelineEvent(traceContext, traceId, command, trace, 'matched', visualRequest);
+        return visualRequest;
+    }
+
+    const utility = recordPreRouterCheck(trace, 'P6', 'local_time_date_utility', () => matchUtility(normalized, traceId));
+    if (utility) {
+        recordPreRouterPipelineEvent(traceContext, traceId, command, trace, 'matched', utility);
+        return utility;
+    }
+
+    const followUp = recordPreRouterCheck(trace, 'P5', 'explicit_short_follow_up', () => matchShortFollowUp(normalized, traceId, recentMessages));
+    if (followUp) {
+        recordPreRouterPipelineEvent(traceContext, traceId, command, trace, 'matched', followUp);
+        return followUp;
+    }
+
+    const ordinaryQa = recordPreRouterCheck(trace, 'P7', 'strict_ordinary_qa', () => matchOrdinaryQa(normalized, traceId));
+    if (ordinaryQa) {
+        recordPreRouterPipelineEvent(traceContext, traceId, command, trace, 'matched', ordinaryQa);
+        return ordinaryQa;
+    }
+
+    recordPreRouterPipelineEvent(traceContext, traceId, command, trace, 'missed');
+    return null;
+}
+
+function createPreRouterDecision(input: {
+    traceId: string;
+    layer: PreRouterLayer;
+    rule: string;
+    normalizedCommand: string;
+    intent: UserIntent;
+    dialogueAct: DialogueAct;
+    routingAction: RoutingAction;
+    topic: string;
+    rewriteQuery: string;
+    requiresLongTermMemory: boolean;
+    requiresToolsOrMCP: boolean;
+    routingReason: string;
+    memoryReason: string;
+    visualReason: string;
+    confidence: number;
+    safetyRiskLevel?: SafetyRiskLevel;
+    safetyReason?: string;
+    clarificationQuestion?: string;
+}): PreRouterDecision {
+    return {
+        decision: {
+            traceId: input.traceId,
+            intent: input.intent,
+            dialogueAct: input.dialogueAct,
+            routingAction: input.routingAction,
+            resolvedContext: {
+                isFollowUp: input.dialogueAct === 'follow_up',
+                topic: input.topic,
+                rewriteQuery: input.rewriteQuery,
+            },
+            requiresLongTermMemory: input.requiresLongTermMemory,
+            requiresToolsOrMCP: input.requiresToolsOrMCP,
+        },
+        meta: {
+            layer: input.layer,
+            rule: input.rule,
+            normalizedCommand: input.normalizedCommand,
+            routingReason: input.routingReason,
+            memoryReason: input.memoryReason,
+            visualReason: input.visualReason,
+            confidence: input.confidence,
+            safetyRiskLevel: input.safetyRiskLevel,
+            safetyReason: input.safetyReason,
+            clarificationQuestion: input.clarificationQuestion,
+        },
+    };
+}
+
+function normalizeCommand(command: string): string {
+    let normalized = command
+        .toLowerCase()
+        .replace(/[，。！？、,.!?;；:："'“”‘’（）()【】[\]{}<>《》]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const fillerPatterns = [
+        /^(呃+|额+|嗯+|啊+|诶+|欸+|那个|这个|就是|那个就是|给我想想|先帮我想想|帮我看下先|帮我看一下先)\s*/u,
+        /\s*(吧|呢|哈|呀|啊)$/u,
+    ];
+
+    let previous = '';
+    while (previous !== normalized) {
+        previous = normalized;
+        for (const pattern of fillerPatterns) {
+            normalized = normalized.replace(pattern, '').trim();
+        }
+    }
+
+    return normalized.replace(/\s+/g, '');
+}
+
+function matchSessionControl(normalized: string, traceId: string): PreRouterDecision | null {
     const closingCommands = new Set([
         '再见',
         '拜拜',
+        '白白',
         '结束',
         '没事了',
         '不用了',
@@ -483,44 +878,275 @@ function analyzeStaticFastTrack(command: string, traceId: string): CoreRoutingDe
         'goodbye',
         'stop',
     ]);
-    if (closingCommands.has(normalized)) {
-        return {
-            traceId,
-            intent: 'conversation_end',
-            dialogueAct: 'closing',
-            routingAction: 'end_session',
-            resolvedContext: {
-                isFollowUp: false,
-                topic: '对话结束',
-                rewriteQuery: '',
-            },
-            requiresLongTermMemory: false,
-            requiresToolsOrMCP: false,
-        };
+
+    if (!closingCommands.has(normalized)) return null;
+
+    return createPreRouterDecision({
+        traceId,
+        layer: 'P1',
+        rule: 'conversation_end',
+        normalizedCommand: normalized,
+        intent: 'conversation_end',
+        dialogueAct: 'closing',
+        routingAction: 'end_session',
+        topic: '对话结束',
+        rewriteQuery: '',
+        requiresLongTermMemory: false,
+        requiresToolsOrMCP: false,
+        routingReason: 'pre-router matched an unambiguous session closing command',
+        memoryReason: 'session closing does not need long-term memory',
+        visualReason: 'session closing does not need visual understanding',
+        confidence: 0.98,
+    });
+}
+
+function matchHighRiskCommand(normalized: string, traceId: string): PreRouterDecision | null {
+    const highRiskPatterns: Array<{ pattern: RegExp; risk: SafetyRiskLevel; reason: string }> = [
+        { pattern: /(删除|清空|抹掉|擦除).*(记忆|数据|历史|记录)|清空记忆/u, risk: 'privacy', reason: '请求删除数据或清空记忆' },
+        { pattern: /(重启|关闭|停止).*(服务|系统|设备|主机|电脑)|恢复出厂/u, risk: 'device_risk', reason: '请求重启、停止或恢复设备/服务' },
+        { pattern: /(打开|开启|启动).*(摄像头|麦克风|话筒|录音|录像)/u, risk: 'privacy', reason: '请求打开隐私相关采集设备' },
+        { pattern: /(关闭|禁用|修改).*(防火墙|安全|保护|权限)|安全设置/u, risk: 'device_risk', reason: '请求修改安全设置' },
+        { pattern: /(开|打开|解锁|关闭|锁).*(门锁|门禁|安防|报警器)/u, risk: 'emergency', reason: '请求控制门锁或安防设备' },
+    ];
+    const matched = highRiskPatterns.find(item => item.pattern.test(normalized));
+    if (!matched) return null;
+
+    return createPreRouterDecision({
+        traceId,
+        layer: 'P2',
+        rule: 'high_risk_guard',
+        normalizedCommand: normalized,
+        intent: 'device_control',
+        dialogueAct: 'new_request',
+        routingAction: 'ask_clarification',
+        topic: '高风险操作确认',
+        rewriteQuery: normalized,
+        requiresLongTermMemory: false,
+        requiresToolsOrMCP: false,
+        routingReason: `pre-router blocked high-risk command: ${matched.reason}`,
+        memoryReason: 'high-risk guard does not need long-term memory',
+        visualReason: 'high-risk guard does not need visual understanding',
+        confidence: 0.97,
+        safetyRiskLevel: matched.risk,
+        safetyReason: matched.reason,
+        clarificationQuestion: '这个操作可能影响隐私、安全或设备状态，请确认你希望继续吗？',
+    });
+}
+
+function hasMultipleIntentSegments(command: string): boolean {
+    const parts = command
+        .split(/(?:顺便|然后|并且|另外|还有|接着|，|。|；|;)/u)
+        .map(part => normalizeCommand(part))
+        .filter(Boolean);
+
+    if (parts.length < 2) return false;
+
+    const categories = new Set(parts.map(classifySegmentIntent).filter(Boolean));
+    return categories.size >= 2;
+}
+
+function classifySegmentIntent(normalized: string): string {
+    if (!normalized) return '';
+    if (/(再见|拜拜|白白|结束|不用了|没事了|就这样|bye|goodbye|stop)/u.test(normalized)) return 'session';
+    if (classifyDeviceRisk(normalized) === 'safe') return 'device';
+    if (isMemoryRecallCommand(normalized)) return 'memory';
+    if (isVisualRequest(normalized)) return 'visual';
+    if (isWeatherRequest(normalized)) return 'weather';
+    if (isUtilityTimeRequest(normalized)) return 'utility';
+    if (/(总结|查|查询|搜索|告诉我|怎么|如何|为什么|什么)/u.test(normalized)) return 'qa';
+    return '';
+}
+
+function classifyDeviceRisk(normalized: string): DeviceRisk {
+    if (/(门锁|门禁|安防|报警器|摄像头|麦克风|防火墙|安全设置|恢复出厂|重启|清空|删除)/u.test(normalized)) {
+        return 'high_risk';
     }
+    if (/(那个|这个|门口|客厅|卧室|厨房|书房|阳台|灯还亮|亮着|状态|怎么.*灯)/u.test(normalized)) {
+        return 'ambiguous';
+    }
+    if (/^(开灯|打开灯|把灯打开|关灯|关闭灯|把灯关掉)$/u.test(normalized)) {
+        return 'safe';
+    }
+    return /(灯|空调|窗帘|插座|电视)/u.test(normalized) ? 'ambiguous' : 'safe';
+}
+
+function matchDeviceControl(normalized: string, traceId: string): PreRouterDecision | null {
+    if (classifyDeviceRisk(normalized) !== 'safe') return null;
 
     const safeDeviceCommands: Array<{ pattern: RegExp; rewrite: string; topic: string }> = [
-        { pattern: /^(开灯|打开灯|把灯打开)$/, rewrite: '打开灯', topic: '智能家居照明' },
-        { pattern: /^(关灯|关闭灯|把灯关掉)$/, rewrite: '关闭灯', topic: '智能家居照明' },
+        { pattern: /^(开灯|打开灯|把灯打开)$/u, rewrite: '打开灯', topic: '智能家居照明' },
+        { pattern: /^(关灯|关闭灯|把灯关掉)$/u, rewrite: '关闭灯', topic: '智能家居照明' },
     ];
-    const deviceMatch = safeDeviceCommands.find(item => item.pattern.test(command));
-    if (deviceMatch) {
-        return {
+    const deviceMatch = safeDeviceCommands.find(item => item.pattern.test(normalized));
+    if (!deviceMatch) return null;
+
+    return createPreRouterDecision({
+        traceId,
+        layer: 'P4',
+        rule: 'safe_device_control_placeholder',
+        normalizedCommand: normalized,
+        intent: 'device_control',
+        dialogueAct: 'new_request',
+        routingAction: 'execute_device',
+        topic: deviceMatch.topic,
+        rewriteQuery: deviceMatch.rewrite,
+        requiresLongTermMemory: false,
+        requiresToolsOrMCP: true,
+        routingReason: 'pre-router matched a low-risk explicit lighting command',
+        memoryReason: 'device control does not need long-term memory',
+        visualReason: 'safe device command does not need visual understanding',
+        confidence: 0.96,
+    });
+}
+
+function matchMemoryRecall(normalized: string, traceId: string): PreRouterDecision | null {
+    if (isMemoryRecallCommand(normalized)) {
+        const rewriteQuery = normalizeMemoryRecallRewrite(normalized);
+        return createPreRouterDecision({
             traceId,
-            intent: 'device_control',
+            layer: 'P5',
+            rule: 'obvious_memory_recall',
+            normalizedCommand: normalized,
+            intent: 'memory_recall',
             dialogueAct: 'new_request',
-            routingAction: 'execute_device',
-            resolvedContext: {
-                isFollowUp: false,
-                topic: deviceMatch.topic,
-                rewriteQuery: deviceMatch.rewrite,
-            },
-            requiresLongTermMemory: false,
-            requiresToolsOrMCP: true,
-        };
+            routingAction: 'answer_after_context',
+            topic: '长期记忆回顾',
+            rewriteQuery,
+            requiresLongTermMemory: true,
+            requiresToolsOrMCP: false,
+            routingReason: 'pre-router matched an obvious memory recall request',
+            memoryReason: 'user asks to recall previous conversation or memory',
+            visualReason: 'memory recall does not need visual understanding',
+            confidence: 0.93,
+        });
     }
 
     return null;
+}
+
+function matchVisualRequest(normalized: string, traceId: string): PreRouterDecision | null {
+    if (isVisualRequest(normalized)) {
+        return createPreRouterDecision({
+            traceId,
+            layer: 'P5',
+            rule: 'obvious_visual_request',
+            normalizedCommand: normalized,
+            intent: 'visual',
+            dialogueAct: 'new_request',
+            routingAction: 'answer_after_context',
+            topic: '视觉理解',
+            rewriteQuery: normalized,
+            requiresLongTermMemory: false,
+            requiresToolsOrMCP: true,
+            routingReason: 'pre-router matched an obvious current visual request',
+            memoryReason: 'visual request does not need long-term memory by default',
+            visualReason: 'user asks about current visual appearance or camera-visible scene',
+            confidence: 0.92,
+        });
+    }
+
+    return null;
+}
+
+function normalizeMemoryRecallRewrite(normalized: string): string {
+    return normalized
+        .replace(/^(帮我)?(总结一下|总结|回顾一下|回顾|告诉我|说说|讲讲)/u, '')
+        .replace(/^(一下|下)/u, '')
+        .trim() || normalized;
+}
+
+function matchUtility(normalized: string, traceId: string): PreRouterDecision | null {
+    if (!isUtilityTimeRequest(normalized) || isWeatherRequest(normalized)) return null;
+
+    return createPreRouterDecision({
+        traceId,
+        layer: 'P6',
+        rule: 'local_time_date_utility',
+        normalizedCommand: normalized,
+        intent: 'qa',
+        dialogueAct: 'new_request',
+        routingAction: 'direct_answer',
+        topic: '本地时间日期',
+        rewriteQuery: normalized,
+        requiresLongTermMemory: false,
+        requiresToolsOrMCP: false,
+        routingReason: 'pre-router matched a local time/date utility request',
+        memoryReason: 'local time/date utility does not need long-term memory',
+        visualReason: 'local time/date utility does not need visual understanding',
+        confidence: 0.94,
+    });
+}
+
+function matchShortFollowUp(normalized: string, traceId: string, recentMessages: ConversationMessage[]): PreRouterDecision | null {
+    const topic = inferRecentAssistantTopic(recentMessages);
+    if (!topic || !isExplicitShortFollowUp(normalized)) return null;
+    const rewrite = `${topic} ${normalized}`;
+
+    return createPreRouterDecision({
+        traceId,
+        layer: 'P5',
+        rule: 'explicit_short_follow_up',
+        normalizedCommand: normalized,
+        intent: 'follow_up',
+        dialogueAct: 'follow_up',
+        routingAction: 'direct_answer',
+        topic,
+        rewriteQuery: rewrite,
+        requiresLongTermMemory: false,
+        requiresToolsOrMCP: false,
+        routingReason: 'pre-router rewrote an explicit short follow-up from recent assistant context',
+        memoryReason: 'explicit follow-up uses current session context only',
+        visualReason: 'explicit follow-up does not need visual understanding',
+        confidence: 0.82,
+    });
+}
+
+function matchOrdinaryQa(normalized: string, traceId: string): PreRouterDecision | null {
+    if (!isStrictOrdinaryQa(normalized)) return null;
+
+    return createPreRouterDecision({
+        traceId,
+        layer: 'P7',
+        rule: 'strict_ordinary_qa',
+        normalizedCommand: normalized,
+        intent: 'qa',
+        dialogueAct: 'new_request',
+        routingAction: 'direct_answer',
+        topic: '',
+        rewriteQuery: normalized,
+        requiresLongTermMemory: false,
+        requiresToolsOrMCP: false,
+        routingReason: 'pre-router matched a strict general-knowledge QA request',
+        memoryReason: 'strict ordinary QA does not need long-term memory',
+        visualReason: 'strict ordinary QA does not need visual understanding',
+        confidence: 0.8,
+    });
+}
+
+function isVisualRequest(normalized: string): boolean {
+    return /(看看|看一下|看下|观察|识别|画面|镜头|照片|图片|穿的|衣服|我今天穿|长什么样|这边情况|眼前|摄像头).*(怎么样|是什么|有什么|好看|评价|情况)?/u.test(normalized)
+        || /(如何|怎么).*(评价|看).*(穿的|衣服|照片|图片)/u.test(normalized);
+}
+
+function isWeatherRequest(normalized: string): boolean {
+    return /(天气|下雨|气温|温度|空气质量|刮风|降温|升温|明天.*冷|今天.*热)/u.test(normalized);
+}
+
+function isUtilityTimeRequest(normalized: string): boolean {
+    return /^(现在)?(几点|几时|什么时间|当前时间)$|^(今天|明天|昨天)?(星期几|周几|几号|日期)$|^今天是什么日子$/u.test(normalized);
+}
+
+function isExplicitShortFollowUp(normalized: string): boolean {
+    return /^(继续说|展开讲|详细讲讲|再讲讲|为什么|怎么做|然后呢|还有呢|具体呢|举例呢|有什么需要注意的吗?|需要注意什么)$/u.test(normalized);
+}
+
+function isStrictOrdinaryQa(normalized: string): boolean {
+    if (!/^(什么是|为什么|如何理解|请解释|解释一下|介绍一下|科普一下)/u.test(normalized)) return false;
+    return !hasOrdinaryQaBlacklist(normalized);
+}
+
+function hasOrdinaryQaBlacklist(normalized: string): boolean {
+    return /(灯|空调|窗帘|插座|电视|设备|门口|客厅|卧室|厨房|书房|阳台|这个|那个|这|那|它|他|她|画面|镜头|照片|图片|穿的|衣服|看看|看一下|记得|记忆|刚才|之前|最近|上次|天气|日程|顺便|然后|并且|另外|清空|删除|重启|摄像头|麦克风|防火墙|门锁|安防)/u.test(normalized);
 }
 
 function buildCoreRoutingMessages(input: AnalyzeCommandInput & { traceId: string }): CoreMessage[] {
@@ -593,6 +1219,7 @@ async function parseOrRepairCoreDecision(input: {
     input: AnalyzeCommandInput & { traceId: string };
     messages: CoreMessage[];
     generate: GenerateTextLike;
+    repairGenerate: GenerateTextLike;
 }): Promise<CoreRoutingDecision> {
     const validation = validateCoreRoutingDecision(input.raw, input.input.traceId);
     if (validation.ok) {
@@ -600,6 +1227,7 @@ async function parseOrRepairCoreDecision(input: {
     }
 
     logIntentionTrace({
+        ...buildIntentionTraceContext(input.input, input.input.userCommand),
         traceId: input.input.traceId,
         stage: 'core_routing_parse_failed',
         command: input.input.userCommand,
@@ -609,6 +1237,7 @@ async function parseOrRepairCoreDecision(input: {
 
     try {
         logIntentionTrace({
+            ...buildIntentionTraceContext(input.input, input.input.userCommand),
             traceId: input.input.traceId,
             stage: 'core_routing_repair_attempt',
             command: input.input.userCommand,
@@ -623,27 +1252,27 @@ async function parseOrRepairCoreDecision(input: {
             },
         ];
         const repairOptions = {
-            model: intentionModel as any,
             maxTokens: GLOBAL_CONFIG.MODELS.INTENSION.MAX_TOKENS,
             temperature: 0,
             messages: repairMessages,
         };
-        const repair = input.generate === generateText
-            ? await generateTextWithRuntimeLog(input.generate, repairOptions, {
+        const repair = input.repairGenerate === defaultRepairGenerate
+            ? await generateTextWithRuntimeLog(input.repairGenerate, repairOptions, {
                 scope: 'intention.repair',
-                modelId: GLOBAL_CONFIG.OLLAMA.INTENTION_MODEL ?? GLOBAL_CONFIG.OLLAMA.TEXT_MODEL,
+                modelId: GLOBAL_CONFIG.MODEL_SERVICES.QWEN_ROUTER_REPAIR_MODEL_ID,
                 traceId: input.input.traceId,
                 pipelineId: input.input.pipelineId,
                 conversationId: input.input.conversationId,
                 userCommand: input.input.userCommand,
                 benchmark: input.input.benchmark,
             })
-            : await input.generate(repairOptions);
+            : await input.repairGenerate(repairOptions);
         const repairedValidation = validateCoreRoutingDecision(repair.text, input.input.traceId);
         if (repairedValidation.ok) {
             return repairedValidation.data;
         }
         logIntentionTrace({
+            ...buildIntentionTraceContext(input.input, input.input.userCommand),
             traceId: input.input.traceId,
             stage: 'core_routing_repair_failed',
             command: input.input.userCommand,
@@ -656,6 +1285,7 @@ async function parseOrRepairCoreDecision(input: {
     } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         logIntentionTrace({
+            ...buildIntentionTraceContext(input.input, input.input.userCommand),
             traceId: input.input.traceId,
             stage: 'core_routing_repair_failed',
             command: input.input.userCommand,
@@ -697,8 +1327,9 @@ traceId, intent, dialogueAct, routingAction, resolvedContext.isFollowUp, resolve
 Do not include markdown or explanations.`;
 }
 
-function applyDeterministicRoutingRules(decision: CoreRoutingDecision, command: string, traceId: string): CoreRoutingDecision {
+function applyDeterministicRoutingRules(decision: CoreRoutingDecision, command: string, input: AnalyzeCommandInput & { traceId: string }): CoreRoutingDecision {
     let next = decision;
+    const traceContext = buildIntentionTraceContext(input, command);
     const applyRule = (
         ruleName: string,
         patch: Partial<Omit<CoreRoutingDecision, 'resolvedContext'>> & {
@@ -713,10 +1344,11 @@ function applyDeterministicRoutingRules(decision: CoreRoutingDecision, command: 
                 ...next.resolvedContext,
                 ...(patch.resolvedContext ?? {}),
             },
-            traceId,
+            traceId: input.traceId,
         };
         logIntentionTrace({
-            traceId,
+            ...traceContext,
+            traceId: input.traceId,
             stage: 'deterministic_rule_applied',
             command,
             ruleName,
@@ -780,24 +1412,27 @@ function applyDeterministicRoutingRules(decision: CoreRoutingDecision, command: 
 
 function createFallbackCoreDecision(input: AnalyzeCommandInput & { traceId: string }, reason: string): CoreRoutingDecision {
     const command = input.userCommand.trim();
-    const contextTopic = inferRecentTopic(input.recentConversationMessages ?? []);
-    const rewriteQuery = contextTopic && isShortAmbiguousCommand(command)
+    const normalized = normalizeCommand(command);
+    const contextTopic = inferRecentAssistantTopic(input.recentConversationMessages ?? []);
+    const canRewriteFollowUp = Boolean(contextTopic && isExplicitShortFollowUp(normalized));
+    const rewriteQuery = canRewriteFollowUp
         ? `${contextTopic} ${command}`
         : command;
     const decision: CoreRoutingDecision = {
         traceId: input.traceId,
-        intent: contextTopic && isShortAmbiguousCommand(command) ? 'follow_up' : 'qa',
-        dialogueAct: contextTopic && isShortAmbiguousCommand(command) ? 'follow_up' : 'new_request',
-        routingAction: 'answer_after_context',
+        intent: canRewriteFollowUp ? 'follow_up' : 'qa',
+        dialogueAct: canRewriteFollowUp ? 'follow_up' : 'new_request',
+        routingAction: 'direct_answer',
         resolvedContext: {
-            isFollowUp: Boolean(contextTopic && isShortAmbiguousCommand(command)),
+            isFollowUp: canRewriteFollowUp,
             topic: contextTopic,
             rewriteQuery,
         },
-        requiresLongTermMemory: true,
+        requiresLongTermMemory: false,
         requiresToolsOrMCP: false,
     };
     logIntentionTrace({
+        ...buildIntentionTraceContext(input, command),
         traceId: input.traceId,
         stage: 'core_routing_fallback',
         command,
@@ -829,15 +1464,14 @@ async function parseOrRepairIntentionAnalysis(
             },
         ];
         const repairOptions = {
-            model: textModel as any,
             maxTokens: GLOBAL_CONFIG.MODELS.INTENSION.MAX_TOKENS,
             temperature: 0,
             messages: repairMessages,
         };
-        const repair = generate === generateText
+        const repair = generate === defaultRepairGenerate
             ? await generateTextWithRuntimeLog(generate, repairOptions, {
                 scope: 'intention.repair',
-                modelId: GLOBAL_CONFIG.OLLAMA.TEXT_MODEL,
+                modelId: GLOBAL_CONFIG.MODEL_SERVICES.QWEN_ROUTER_REPAIR_MODEL_ID,
                 userCommand: fallbackQuery,
             })
             : await generate(repairOptions);
@@ -1036,6 +1670,7 @@ function normalizeAnalysis(data: Partial<IntentionAnalysis>, fallbackQuery: stri
         safetyReason: stringValue(layeredSafety.reason),
         responseStyle,
         clarificationQuestion: stringValue(responsePlan.clarificationQuestion),
+        routingDiagnostics: normalizeRoutingDiagnostics(data.routingDiagnostics),
     });
 }
 
@@ -1063,6 +1698,10 @@ function createFallbackAnalysis(query: string, reason: string): IntentionAnalysi
         routingReason: 'fallback semantic retrieval',
         currentSessionSufficient: false,
         responseStyle: 'brief_answer',
+        routingDiagnostics: {
+            source: 'fallback',
+            modelSkipped: false,
+        },
     });
 }
 
@@ -1071,6 +1710,10 @@ function toCompatAnalysis(decision: CoreRoutingDecision, options: {
     memoryReason: string;
     visualReason: string;
     confidence: number;
+    safetyRiskLevel?: SafetyRiskLevel;
+    safetyReason?: string;
+    clarificationQuestion?: string;
+    routingDiagnostics?: IntentionAnalysis['routingDiagnostics'];
 }): IntentionAnalysis {
     const shouldRespond = !['ignore'].includes(decision.routingAction);
     const shouldEndSession = decision.routingAction === 'end_session' || decision.intent === 'conversation_end';
@@ -1118,7 +1761,12 @@ function toCompatAnalysis(decision: CoreRoutingDecision, options: {
         deviceStateNeeded: requiresDeviceState,
         deviceTargets: requiresDeviceState ? inferDeviceTargets(rewrite) : [],
         deviceStateReason: requiresDeviceState ? 'core routing requested device control/tool execution' : '',
+        safetyRiskLevel: options.safetyRiskLevel,
+        safetyRequiresConfirmation: options.safetyRiskLevel ? options.safetyRiskLevel !== 'none' : false,
+        safetyReason: options.safetyReason,
         responseStyle,
+        clarificationQuestion: options.clarificationQuestion,
+        routingDiagnostics: options.routingDiagnostics,
     });
 }
 
@@ -1184,9 +1832,11 @@ function createAnalysis(input: {
     safetyReason?: string;
     responseStyle: ResponsePlanStyle;
     clarificationQuestion?: string;
+    routingDiagnostics?: IntentionAnalysis['routingDiagnostics'];
 }): IntentionAnalysis {
     return {
         traceId: input.traceId ?? '',
+        routingDiagnostics: input.routingDiagnostics,
         intent: input.intent,
         dialogueAct: input.dialogueAct,
         routingAction: input.routingAction,
@@ -1336,6 +1986,21 @@ function normalizeStringArray(value: unknown): string[] {
         : [];
 }
 
+function normalizeRoutingDiagnostics(value: unknown): IntentionAnalysis['routingDiagnostics'] | undefined {
+    if (!isRecord(value)) return undefined;
+    const source = value.source;
+    if (source !== 'pre-router' && source !== 'qwen-router' && source !== 'fallback') return undefined;
+    return {
+        source,
+        preRouterLayer: PreRouterLayerValues.includes(value.preRouterLayer as PreRouterLayer)
+            ? value.preRouterLayer as PreRouterLayer
+            : undefined,
+        preRouterRule: stringValue(value.preRouterRule) || undefined,
+        normalizedCommand: stringValue(value.normalizedCommand) || undefined,
+        modelSkipped: value.modelSkipped === true,
+    };
+}
+
 function normalizeTopicsFromDecision(decision: CoreRoutingDecision): string[] {
     if (decision.resolvedContext.topic.trim()) return [decision.resolvedContext.topic.trim()];
     switch (decision.intent) {
@@ -1359,7 +2024,7 @@ function inferDeviceTargets(rewrite: string): string[] {
 }
 
 function isMemoryRecallCommand(command: string): boolean {
-    return /(最近|之前|以前|上次|过去).*(聊|说|谈|记得|记忆|话题)|聊过什么|说过什么|记得什么/.test(command);
+    return /(最近|之前|以前|上次|过去|刚才).*(聊|说|谈|记得|记忆|话题)|聊过什么|说过什么|记得什么|刚才说了什么|我刚才说了什么/u.test(command);
 }
 
 function logIntentionTrace(state: Record<string, unknown>, severity: 'info' | 'warn' | 'error' = 'info'): void {
@@ -1383,6 +2048,11 @@ function createTraceId(): string {
 function inferRecentTopic(messages: ConversationMessage[]): string {
     const lastUserMessage = [...messages].reverse().find(message => message.role === 'user' && message.content.trim());
     return lastUserMessage?.content.trim() ?? '';
+}
+
+function inferRecentAssistantTopic(messages: ConversationMessage[]): string {
+    const lastAssistantMessage = [...messages].reverse().find(message => message.role === 'agent' && message.content.trim());
+    return lastAssistantMessage?.content.trim().slice(0, 80) ?? '';
 }
 
 function isShortAmbiguousCommand(command: string): boolean {
@@ -1411,8 +2081,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function traceIntention(command: string, analysis: IntentionAnalysis, source: 'model' | 'fallback'): void {
+function traceIntention(
+    command: string,
+    analysis: IntentionAnalysis,
+    source: 'model' | 'fallback' | 'pre-router',
+    metadata: Record<string, unknown> = {},
+): void {
+    const details = Object.entries(metadata)
+        .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+        .join(' ');
     console.log(
-        `[Intention] traceId=${analysis.traceId ?? ''} source=${source} command="${command}" intent=${analysis.intent} dialogueAct=${analysis.dialogueAct} routingAction=${analysis.routingAction ?? analysis.routing?.action ?? ''} shouldRespond=${analysis.shouldRespond} shouldEndSession=${analysis.shouldEndSession} visionRequired=${analysis.visualUnderstanding.required} visionReason="${analysis.visualUnderstanding.reason}" memoryEnabled=${analysis.memoryRetrieval.enabled} mode=${analysis.memoryRetrieval.mode} query="${analysis.memoryRetrieval.query}" confidence=${analysis.memoryRetrieval.confidence} reason="${analysis.memoryRetrieval.reason}"`,
+        `[Intention] traceId=${analysis.traceId ?? ''} source=${source} command="${command}" intent=${analysis.intent} dialogueAct=${analysis.dialogueAct} routingAction=${analysis.routingAction ?? analysis.routing?.action ?? ''} shouldRespond=${analysis.shouldRespond} shouldEndSession=${analysis.shouldEndSession} visionRequired=${analysis.visualUnderstanding.required} visionReason="${analysis.visualUnderstanding.reason}" memoryEnabled=${analysis.memoryRetrieval.enabled} mode=${analysis.memoryRetrieval.mode} query="${analysis.memoryRetrieval.query}" confidence=${analysis.memoryRetrieval.confidence} reason="${analysis.memoryRetrieval.reason}"${details ? ` ${details}` : ''}`,
     );
 }

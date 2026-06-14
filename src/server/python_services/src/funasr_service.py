@@ -31,15 +31,28 @@ def model_cache() -> str:
     return str(cache)
 
 
+def env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in ("0", "false", "no", "off", "")
+
+
 def resolve_model_name(model_name: str) -> str:
     cached = Path(model_cache()) / "models" / model_name
     if cached.is_dir():
         return str(cached)
+    if env_bool("FUNASR_LOCAL_FILES_ONLY", True):
+        raise RuntimeError(
+            f"FunASR offline mode requires local model files for {model_name} at {cached}. "
+            "Run python-services setup while online, or set FUNASR_LOCAL_FILES_ONLY=0 to allow runtime downloads."
+        )
     return model_name
 
 
 def create_model(model_name: str, punc_model: str = "", spk_model: str = ""):
     os.environ["MODELSCOPE_CACHE"] = model_cache()
+    os.environ.setdefault("MODELSCOPE_OFFLINE", "1")
     os.environ["MODELSCOPE_LOG_LEVEL"] = "40"
     os.environ["FUNASR_LOG_LEVEL"] = "ERROR"
     from funasr import AutoModel

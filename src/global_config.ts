@@ -1,11 +1,21 @@
 import { loadRuntimeEnv } from '@/config/loadEnv';
-import { getCosyVoiceModelDir, getModelBasePath, getPythonServicesRoot, getPythonServicesScriptRoot } from '@/server/services/runtime-paths';
+import {
+  getCosyVoiceModelDir,
+  getModelBasePath,
+  getPythonServicesRoot,
+  getPythonServicesScriptRoot,
+  getQwenRouterFastModelDir,
+  getQwenRouterRepairModelDir,
+  getQwenVlmModelDir,
+} from '@/server/services/runtime-paths';
 
 loadRuntimeEnv();
 
 const PYTHON_SERVICES_ROOT = getPythonServicesRoot();
 const PYTHON_SERVICES_SCRIPT_ROOT = getPythonServicesScriptRoot();
 const MODEL_BASE_PATH = getModelBasePath();
+const QWEN_VLM_PORT = parseEnvNumber(process.env.QWEN_VLM_PORT, 10104);
+const QWEN_ROUTER_PORT = parseEnvNumber(process.env.QWEN_ROUTER_PORT, 10105);
 
 export const GLOBAL_CONFIG = {
   // Media sync window shared by camera/audio buffering.
@@ -60,6 +70,8 @@ export const GLOBAL_CONFIG = {
     FUNASR_PORT: parseEnvNumber(process.env.FUNASR_PORT, 10101),
     COSYVOICE_PORT: parseEnvNumber(process.env.COSYVOICE_PORT, 10102),
     MDX_PORT: parseEnvNumber(process.env.MDX_PORT, 10103),
+    QWEN_VLM_PORT,
+    QWEN_ROUTER_PORT,
     VOICE_DATA_ROOT: process.env.VOICE_DATA_ROOT ?? 'data/voice',
 
     // FunASR service and model selection.
@@ -88,7 +100,7 @@ export const GLOBAL_CONFIG = {
     VAD_START_FRAMES: parseEnvNumber(process.env.VOICE_VAD_START_FRAMES, 2),
     VAD_END_FRAMES: parseEnvNumber(process.env.VOICE_VAD_END_FRAMES, 4),
     VAD_COOLDOWN_MS: parseEnvNumber(process.env.VOICE_VAD_COOLDOWN_MS, 120),
-    WAKE_VAD_THRESHOLD: parseEnvNumber(process.env.VOICE_WAKE_VAD_THRESHOLD, 0.15),
+    WAKE_VAD_THRESHOLD: parseEnvNumber(process.env.VOICE_WAKE_VAD_THRESHOLD, 0.05),
     WAKE_WINDOW_MS: parseEnvNumber(process.env.VOICE_WAKE_WINDOW_MS, 2500),
     WAKE_PROBE_INTERVAL_MS: parseEnvNumber(process.env.VOICE_WAKE_PROBE_INTERVAL_MS, 700),
     WAKE_SESSION_IDLE_MS: parseEnvNumber(process.env.VOICE_WAKE_SESSION_IDLE_MS, 15000),
@@ -117,7 +129,7 @@ export const GLOBAL_CONFIG = {
     COSYVOICE_TTS_CLEANUP_ON_CANCEL: parseEnvBoolean(process.env.COSYVOICE_TTS_CLEANUP_ON_CANCEL, true),
 
     // Barge-in detection while the assistant is speaking.
-    BARGE_IN_ENABLED: true,
+    BARGE_IN_ENABLED: parseEnvBoolean(process.env.SENTINEL_BARGE_IN_ENABLED, true),
     BARGE_IN_VAD_THRESHOLD: 0.08,
     BARGE_IN_MIN_DURATION_MS: 420,
     BARGE_IN_KEYWORD_MIN_DURATION_MS: 220,
@@ -171,21 +183,26 @@ export const GLOBAL_CONFIG = {
     COOKIES_FROM_BROWSER: process.env.YT_DLP_COOKIES_FROM_BROWSER ?? 'chrome',
   },
 
-  // Local Ollama endpoints, model IDs, generation limits, and trace controls.
-  OLLAMA: {
-    IP: "http://localhost:11434/api",
-    TEXT_MODEL: "qwen2.5:7b",
-    INTENTION_MODEL: process.env.SENTINEL_INTENTION_MODEL ?? process.env.SENTINEL_INTENT_MODEL,
-    VISION_MODEL: "qwen2.5vl:7b",
+  MODEL_SERVICES: {
+    QWEN_VLM_BASE_URL: process.env.QWEN_VLM_BASE_URL ?? `http://localhost:${QWEN_VLM_PORT}`,
+    QWEN_ROUTER_BASE_URL: process.env.QWEN_ROUTER_BASE_URL ?? `http://localhost:${QWEN_ROUTER_PORT}`,
+    QWEN_VLM_MODEL_DIR: getQwenVlmModelDir(),
+    QWEN_ROUTER_FAST_MODEL_DIR: getQwenRouterFastModelDir(),
+    QWEN_ROUTER_REPAIR_MODEL_DIR: getQwenRouterRepairModelDir(),
+    QWEN_VLM_MODEL_ID: process.env.QWEN_VLM_MODEL_ID ?? 'qwen3-vl-8b-mlx-4bit',
+    QWEN_ROUTER_FAST_MODEL_ID: process.env.QWEN_ROUTER_FAST_MODEL_ID ?? 'qwen2.5-0.5b-instruct-mlx',
+    QWEN_ROUTER_REPAIR_MODEL_ID: process.env.QWEN_ROUTER_REPAIR_MODEL_ID ?? 'qwen2.5-1.5b-instruct-mlx',
+    TEXT_MAX_TOKENS: parseEnvNumber(process.env.QWEN_VLM_TEXT_MAX_TOKENS, 512),
+    TEXT_TEMPERATURE: parseEnvNumber(process.env.QWEN_VLM_TEXT_TEMPERATURE, 0.2),
+    TEXT_TOP_P: parseEnvNumber(process.env.QWEN_VLM_TEXT_TOP_P, 0.9),
+    VISION_MAX_TOKENS: parseEnvNumber(process.env.QWEN_VLM_VISION_MAX_TOKENS, 256),
+    VISION_TEMPERATURE: parseEnvNumber(process.env.QWEN_VLM_VISION_TEMPERATURE, 0.1),
+    ROUTER_MAX_TOKENS: parseEnvNumber(process.env.QWEN_ROUTER_MAX_TOKENS, 900),
+    ROUTER_REPAIR_WAIT_MS: parseEnvNumber(process.env.QWEN_ROUTER_REPAIR_WAIT_MS, 15000),
+    REQUEST_TIMEOUT_MS: parseEnvNumber(process.env.QWEN_MODEL_SERVICE_TIMEOUT_MS, 300000),
+    WARMUP_ON_START: parseEnvBoolean(process.env.QWEN_MODEL_WARMUP_ON_START, true),
     TRACE_ENABLED: parseEnvBoolean(process.env.SENTINEL_MODEL_TRACE, false),
     TRACE_MAX_CHARS: parseEnvNumber(process.env.SENTINEL_MODEL_TRACE_MAX_CHARS, 4000),
-    TEXT_NUM_CTX: 8192,
-    TEXT_MAX_TOKENS: 512,
-    TEXT_TEMPERATURE: 0.2,
-    TEXT_TOP_P: 0.9,
-    VISION_NUM_CTX: 4096,
-    VISION_MAX_TOKENS: 256,
-    VISION_TEMPERATURE: 0.1,
   },
 
   // Generated media/cache retention.
@@ -202,7 +219,7 @@ export const GLOBAL_CONFIG = {
   }
 };
 
-function parseEnvBoolean(value: string | undefined, fallback: boolean): boolean {
+export function parseEnvBoolean(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined) return fallback;
   return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
 }

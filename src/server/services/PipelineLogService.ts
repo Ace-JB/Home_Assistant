@@ -492,7 +492,7 @@ export class PipelineLogService {
                 ts: record.ts,
                 stage: record.stage,
                 eventType: 'model_call',
-                level: record.status === 'failed' ? 'error' : 'info',
+                level: record.status === 'failed' ? modelCallFailureLevel(record.scope) : 'info',
                 title: 'Model call reference',
                 timings: record.durationMs !== undefined
                     ? [{ key: 'model_call', label: record.scope, durationMs: record.durationMs, detail: record.error }]
@@ -517,7 +517,7 @@ export class PipelineLogService {
                 eventId: record.eventId,
                 ts: record.ts,
                 stage: record.stage,
-                severity: 'error',
+                severity: modelCallFailureLevel(record.scope),
                 reason: `model_call_failed:${record.scope}`,
                 inputSnapshot: record.promptPreview,
                 outputSnapshot: record.error,
@@ -587,7 +587,7 @@ export class PipelineLogService {
                 eventId: record.eventId,
                 ts: record.ts,
                 stage: record.stage,
-                severity: 'error',
+                severity: modelCallFailureLevel(record.scope),
                 reason: `model_call_failed:${record.scope}`,
                 inputSnapshot: record.promptPreview,
                 outputSnapshot: record.error,
@@ -616,7 +616,7 @@ export class PipelineLogService {
                 $eventId: record.eventId,
                 $ts: record.ts,
                 $stage: record.stage,
-                $level: record.status === 'failed' ? 'error' : 'info',
+                $level: record.status === 'failed' ? modelCallFailureLevel(record.scope) : 'info',
                 $title: 'Model call reference',
                 $message: null,
                 $timingsJson: stringifyJson(record.durationMs !== undefined
@@ -1325,6 +1325,7 @@ function stageFromRuntimeCategory(category: string | undefined, title: string): 
     if (category === 'voice-material') return 'summary';
     if (category === 'asr') return 'asr';
     if (category === 'model') return 'model';
+    if (category === 'memory') return 'memory';
     if (category === 'dashboard-service') return 'service';
     if (category === 'system') {
         const lower = title.toLowerCase();
@@ -1341,6 +1342,10 @@ function eventTypeFromLevel(level: PipelineEventLevel): PipelineEventType {
     if (level === 'error') return 'stage_failed';
     if (level === 'warn') return 'fallback';
     return 'stage_complete';
+}
+
+function modelCallFailureLevel(scope: string): Exclude<PipelineEventLevel, 'debug' | 'info'> {
+    return scope.startsWith('intention.') ? 'warn' : 'error';
 }
 
 function normalizeLimit(limit: number | null | undefined): number {
@@ -1436,7 +1441,7 @@ function boundMetadataValue(value: unknown, depth = 0): unknown {
 }
 
 function boundText(value: string): string {
-    const maxChars = GLOBAL_CONFIG.OLLAMA.TRACE_MAX_CHARS;
+    const maxChars = GLOBAL_CONFIG.MODEL_SERVICES.TRACE_MAX_CHARS;
     if (value.length <= maxChars) return value;
     return `${value.slice(0, maxChars)}... [truncated ${value.length - maxChars} chars]`;
 }

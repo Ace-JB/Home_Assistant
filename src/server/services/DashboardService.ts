@@ -136,7 +136,7 @@ type MacProcessSnapshot = {
   uptimeSeconds: number | null;
 };
 
-const SERVICE_IDS = new Set(['main', 'assistant-runtime', 'voice-asr', 'live-vision', 'realtime-socket', 'webrtc', 'monitor', 'funasr', 'cosyvoice', 'voice-separation', 'ffmpeg', 'yt-dlp']);
+const SERVICE_IDS = new Set(['main', 'assistant-runtime', 'voice-asr', 'live-vision', 'realtime-socket', 'webrtc', 'monitor', 'funasr', 'cosyvoice', 'voice-separation', 'qwen-vlm', 'qwen-router', 'ffmpeg', 'yt-dlp']);
 const STOPPED_ASSISTANT_RUNTIME: AssistantRuntimeStatus = {
   status: 'stopped',
   mode: 'minimal',
@@ -155,6 +155,8 @@ const STOPPED_ASSISTANT_RUNTIME: AssistantRuntimeStatus = {
   tasks: [
     { id: 'assistant-runtime', label: 'Assistant Runtime', group: 'core', status: 'pending', required: true, selected: true },
     { id: 'funasr', label: 'Voice ASR / FunASR', group: 'core', status: 'pending', required: true, selected: true },
+    { id: 'qwen-router', label: 'Qwen Router Model', group: 'core', status: 'pending', required: true, selected: true },
+    { id: 'qwen-vlm', label: 'Qwen Main Model', group: 'core', status: 'pending', required: true, selected: true },
     { id: 'audio-monitor', label: 'Audio Monitor / Wake ASR', group: 'core', status: 'pending', required: true, selected: true },
     { id: 'realtime-socket', label: 'Realtime Socket', group: 'core', status: 'pending', required: true, selected: true },
     { id: 'cosyvoice', label: 'CosyVoice TTS', group: 'optional', status: 'skipped', required: false, selected: false },
@@ -176,6 +178,10 @@ export async function getDashboardStatus(): Promise<DashboardStatus> {
     getCosyVoiceDashboardStatus(metrics),
     getYtDlpDashboardStatus(),
   ]);
+  const [qwenVlm, qwenRouter] = await Promise.all([
+    getQwenModelDashboardStatus(metrics, 'qwen-vlm'),
+    getQwenModelDashboardStatus(metrics, 'qwen-router'),
+  ]);
   const funasr = getFunAsrDashboardStatus(metrics);
   const main = getMainServiceStatus(metrics);
   const assistant = getAssistantRuntimeDashboardStatus(metrics, assistantRuntime);
@@ -191,6 +197,8 @@ export async function getDashboardStatus(): Promise<DashboardStatus> {
     liveVision,
   ];
   const advancedServices = [
+    qwenVlm,
+    qwenRouter,
     cosyVoice,
     getVoiceSeparationDashboardStatus(metrics),
     getFfmpegStatus(),
@@ -236,6 +244,10 @@ export async function startDashboardService(serviceId: string): Promise<Dashboar
     await mdxSeparationService.start();
     return getVoiceSeparationDashboardStatus(await collectDashboardMetrics());
   }
+  if (serviceId === 'qwen-vlm' || serviceId === 'qwen-router') {
+    await startManagedModelService(serviceId);
+    return getQwenModelDashboardStatus(await collectDashboardMetrics(), serviceId);
+  }
   throw new Error(`Service ${serviceId} is read-only from dashboard.`);
 }
 
@@ -259,17 +271,23 @@ export async function stopDashboardService(serviceId: string): Promise<Dashboard
     await mdxSeparationService.stop();
     return getVoiceSeparationDashboardStatus(await collectDashboardMetrics());
   }
+  if (serviceId === 'qwen-vlm' || serviceId === 'qwen-router') {
+    await stopManagedModelService(serviceId);
+    return getQwenModelDashboardStatus(await collectDashboardMetrics(), serviceId);
+  }
   throw new Error(`Service ${serviceId} is read-only from dashboard.`);
 }
 
 export type StopAllDashboardManagedServicesDeps = {
   stopFunASR?: () => Promise<void>;
+  stopModelServices?: () => Promise<void>;
   stopCosyVoice?: () => Promise<void>;
   stopMdx?: () => Promise<void>;
 };
 
 export type StartAllDashboardManagedServicesDeps = {
   startFunASR?: () => Promise<void>;
+  startModelServices?: () => Promise<void>;
   startCosyVoice?: () => Promise<void>;
   startMdx?: () => Promise<void>;
 };
@@ -277,6 +295,21 @@ export type StartAllDashboardManagedServicesDeps = {
 export async function startDashboardManagedFunASR(): Promise<void> {
   appendLog('funasr', 'info', 'Start requested by assistant runtime');
   await funasrService.start();
+}
+
+export async function startDashboardManagedModelServices(): Promise<void> {
+  await startDashboardManagedRouterModel();
+  await startDashboardManagedMainModel();
+}
+
+export async function startDashboardManagedRouterModel(): Promise<void> {
+  appendLog('qwen-router', 'info', 'Start requested by assistant runtime');
+  await startManagedModelService('qwen-router');
+}
+
+export async function startDashboardManagedMainModel(): Promise<void> {
+  appendLog('qwen-vlm', 'info', 'Start requested by assistant runtime');
+  await startManagedModelService('qwen-vlm');
 }
 
 export async function startDashboardManagedCosyVoice(): Promise<void> {
@@ -292,26 +325,28 @@ export async function startAllDashboardManagedServices(deps?: StartAllDashboardM
   const tasks = deps
     ? [
       ['funasr', deps.startFunASR],
+      ['qwen-router/qwen-vlm', deps.startModelServices],
       ['cosyvoice', deps.startCosyVoice],
       ['voice-separation', deps.startMdx],
     ] as const
     : [
       ['funasr', () => funasrService.start()],
+      ['qwen-router/qwen-vlm', startDashboardManagedModelServices],
       ['cosyvoice', startManagedCosyVoice],
       ['voice-separation', () => mdxSeparationService.start()],
     ] as const;
 
   appendLog('main', 'info', 'Starting all assistant runtime Python services...');
-  const results = await Promise.allSettled(tasks.map(async ([serviceId, start]) => {
+  const failures: string[] = [];
+  for (const [serviceId, start] of tasks) {
     if (!start) return;
     appendLog(serviceId, 'info', 'Start requested by assistant runtime');
-    await start();
-  }));
-  const failures = results
-    .map((result, index) => result.status === 'rejected'
-      ? `${tasks[index]?.[0] ?? 'service'}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`
-      : null)
-    .filter((value): value is string => Boolean(value));
+    try {
+      await start();
+    } catch (error) {
+      failures.push(`${serviceId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   if (failures.length > 0) {
     throw new Error(failures.join('; '));
   }
@@ -320,6 +355,7 @@ export async function startAllDashboardManagedServices(deps?: StartAllDashboardM
 export async function stopAllDashboardManagedServices(deps?: StopAllDashboardManagedServicesDeps): Promise<void> {
   if (deps) {
     await deps.stopFunASR?.();
+    await deps.stopModelServices?.();
     await deps.stopCosyVoice?.();
     await deps.stopMdx?.();
     return;
@@ -716,6 +752,136 @@ function getVoiceSeparationDashboardStatus(metrics: DashboardMetrics): Dashboard
   };
 }
 
+type QwenModelServiceId = 'qwen-vlm' | 'qwen-router';
+
+async function getQwenModelDashboardStatus(metrics: DashboardMetrics, serviceId: QwenModelServiceId): Promise<DashboardServiceItem> {
+  const service = await checkQwenModelService(serviceId);
+  const processInfo = getProcessSnapshot(metrics, service.pid);
+  const status: DashboardServiceStatus = service.ready
+    ? 'running'
+    : service.error
+      ? 'error'
+      : 'stopped';
+  const name = serviceId === 'qwen-vlm' ? 'Qwen VLM MLX' : 'Qwen Router MLX';
+  return {
+    id: serviceId,
+    name,
+    status,
+    controllable: true,
+    controlReason: null,
+    pid: service.pid,
+    resources: {
+      cpuPercent: processInfo.cpuPercent,
+      memoryMb: processInfo.memoryMb,
+      uptimeSeconds: service.uptimeSeconds ?? processInfo.uptimeSeconds,
+    },
+    interfaces: [{
+      label: 'HTTP',
+      url: service.url,
+      status: service.ready ? 'ok' : service.error ? 'failed' : 'unknown',
+      statusCode: service.status,
+      latencyMs: service.latencyMs,
+      error: service.error,
+    }],
+    logsAvailable: true,
+    actions: service.ready ? ['stop'] : ['start'],
+    lastError: service.error,
+  };
+}
+
+async function startManagedModelService(serviceId: QwenModelServiceId): Promise<void> {
+  const health = await checkQwenModelService(serviceId);
+  if (health.ready) {
+    appendLog(serviceId, 'info', `${serviceId} already online at ${health.url}.`);
+    return;
+  }
+  appendLog(serviceId, 'info', `Starting ${serviceId}...`);
+  await runPythonServiceManager(['start', serviceId]);
+  await postModelServiceStart(serviceId);
+  await waitForModelServiceReady(serviceId);
+}
+
+async function stopManagedModelService(serviceId: QwenModelServiceId): Promise<void> {
+  appendLog(serviceId, 'info', `Stopping ${serviceId}...`);
+  await fetch(new URL('/stop', withTrailingSlash(getQwenModelServiceBaseUrl(serviceId))), {
+    method: 'POST',
+    signal: AbortSignal.timeout(2000),
+  }).catch(() => undefined);
+  await runPythonServiceManager(['stop', serviceId]);
+}
+
+async function waitForModelServiceReady(serviceId: QwenModelServiceId): Promise<void> {
+  const startedAt = Date.now();
+  const timeoutMs = GLOBAL_CONFIG.MODEL_SERVICES.REQUEST_TIMEOUT_MS;
+  while (Date.now() - startedAt < timeoutMs) {
+    const health = await checkQwenModelService(serviceId);
+    if (health.ready) return;
+    await new Promise(resolveWait => setTimeout(resolveWait, 1000));
+  }
+  throw new Error(`${serviceId} startup timeout (${Math.round(timeoutMs / 1000)}s)`);
+}
+
+async function postModelServiceStart(serviceId: QwenModelServiceId): Promise<void> {
+  const response = await fetch(new URL('/start', withTrailingSlash(getQwenModelServiceBaseUrl(serviceId))), {
+    method: 'POST',
+    signal: AbortSignal.timeout(GLOBAL_CONFIG.MODEL_SERVICES.REQUEST_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`${serviceId} start failed status=${response.status}${detail ? ` detail=${detail.slice(0, 300)}` : ''}`);
+  }
+}
+
+async function checkQwenModelService(serviceId: QwenModelServiceId): Promise<{
+  url: string;
+  ready: boolean;
+  status: number | null;
+  latencyMs: number | null;
+  pid: number | null;
+  uptimeSeconds: number | null;
+  error: string | null;
+}> {
+  const baseUrl = getQwenModelServiceBaseUrl(serviceId);
+  const healthUrl = new URL('/health', withTrailingSlash(baseUrl));
+  const startedAt = Date.now();
+  try {
+    const response = await fetch(healthUrl, { signal: AbortSignal.timeout(1000) });
+    const body = await response.json().catch(() => ({})) as {
+      ready?: boolean;
+      ok?: boolean;
+      pid?: number;
+      uptimeSeconds?: number;
+      lastError?: string | null;
+    };
+    const ready = response.ok && Boolean(body.ready ?? body.ok);
+    return {
+      url: healthUrl.toString(),
+      ready,
+      status: response.status,
+      latencyMs: Date.now() - startedAt,
+      pid: body.pid ?? null,
+      uptimeSeconds: body.uptimeSeconds ?? null,
+      error: ready ? null : body.lastError ?? `HTTP ${response.status}`,
+    };
+  } catch (error) {
+    return {
+      url: healthUrl.toString(),
+      ready: false,
+      status: null,
+      latencyMs: Date.now() - startedAt,
+      pid: null,
+      uptimeSeconds: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function getQwenModelServiceBaseUrl(serviceId: QwenModelServiceId): string {
+  return serviceId === 'qwen-vlm'
+    ? GLOBAL_CONFIG.MODEL_SERVICES.QWEN_VLM_BASE_URL
+    : GLOBAL_CONFIG.MODEL_SERVICES.QWEN_ROUTER_BASE_URL;
+}
+
 function getFfmpegStatus(): DashboardServiceItem {
   return {
     id: 'ffmpeg',
@@ -869,16 +1035,27 @@ async function runPythonServiceManager(args: string[]): Promise<void> {
       FUNASR_PORT: String(GLOBAL_CONFIG.VOICE.FUNASR_PORT),
       COSYVOICE_PORT: String(GLOBAL_CONFIG.VOICE.COSYVOICE_PORT),
       MDX_PORT: String(GLOBAL_CONFIG.VOICE.MDX_PORT),
+      QWEN_VLM_PORT: String(GLOBAL_CONFIG.VOICE.QWEN_VLM_PORT),
+      QWEN_ROUTER_PORT: String(GLOBAL_CONFIG.VOICE.QWEN_ROUTER_PORT),
       VOICE_SEPARATION_MODEL_DIR: GLOBAL_CONFIG.VOICE.SEPARATION_MODEL_DIR,
       VOICE_SEPARATION_MODEL: GLOBAL_CONFIG.VOICE.SEPARATION_MODEL,
       VOICE_SEPARATION_DEVICE: GLOBAL_CONFIG.VOICE.SEPARATION_DEVICE,
       VOICE_SEPARATION_ONNX_PROVIDERS: GLOBAL_CONFIG.VOICE.SEPARATION_ONNX_PROVIDERS,
       COSYVOICE_MODEL_DIR: GLOBAL_CONFIG.VOICE.COSYVOICE_MODEL_DIR,
+      QWEN_VLM_MODEL_DIR: GLOBAL_CONFIG.MODEL_SERVICES.QWEN_VLM_MODEL_DIR,
+      QWEN_ROUTER_FAST_MODEL_DIR: GLOBAL_CONFIG.MODEL_SERVICES.QWEN_ROUTER_FAST_MODEL_DIR,
+      QWEN_ROUTER_REPAIR_MODEL_DIR: GLOBAL_CONFIG.MODEL_SERVICES.QWEN_ROUTER_REPAIR_MODEL_DIR,
+      QWEN_VLM_MODEL_ID: GLOBAL_CONFIG.MODEL_SERVICES.QWEN_VLM_MODEL_ID,
+      QWEN_ROUTER_FAST_MODEL_ID: GLOBAL_CONFIG.MODEL_SERVICES.QWEN_ROUTER_FAST_MODEL_ID,
+      QWEN_ROUTER_REPAIR_MODEL_ID: GLOBAL_CONFIG.MODEL_SERVICES.QWEN_ROUTER_REPAIR_MODEL_ID,
+      QWEN_ROUTER_REPAIR_WAIT_MS: String(GLOBAL_CONFIG.MODEL_SERVICES.ROUTER_REPAIR_WAIT_MS),
+      QWEN_MODEL_SERVICE_TIMEOUT_MS: String(GLOBAL_CONFIG.MODEL_SERVICES.REQUEST_TIMEOUT_MS),
+      QWEN_MODEL_WARMUP_ON_START: GLOBAL_CONFIG.MODEL_SERVICES.WARMUP_ON_START ? '1' : '0',
     },
     timeout: 90_000,
   });
   const output = `${stdout}${stderr}`.trim();
-  if (output) appendLog(args[1] === 'cosyvoice' ? 'cosyvoice' : 'main', 'info', output);
+  if (output) appendLog(SERVICE_IDS.has(args[1] ?? '') ? args[1]! : 'main', 'info', output);
 }
 
 function withTrailingSlash(value: string): string {
@@ -902,7 +1079,7 @@ function buildRecommendations(services: DashboardServiceItem[]): DashboardStatus
     });
   }
   for (const service of services) {
-    if (assistantRuntimeStopped && ['monitor', 'realtime-socket', 'webrtc', 'funasr', 'cosyvoice', 'voice-separation'].includes(service.id)) {
+    if (assistantRuntimeStopped && ['monitor', 'realtime-socket', 'webrtc', 'funasr', 'cosyvoice', 'voice-separation', 'qwen-vlm', 'qwen-router'].includes(service.id)) {
       continue;
     }
     if (service.status === 'error' || service.status === 'degraded') {

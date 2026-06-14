@@ -3,6 +3,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { HomeBrain } from '@modules/brain';
 import { buildMemoryPruneUserPrompt } from '@server/prompts';
+import { pipelineLogs } from '@server/services/PipelineLogService';
 import type { ConversationMessage } from '@modules/memory';
 import type { IntentionAnalysis } from '@modules/intention';
 
@@ -22,6 +23,217 @@ describe('HomeBrain', () => {
         expect(prompt).toContain('做饭/备餐意图');
         expect(prompt).toContain('可能的用餐时间');
         expect(prompt).toContain('禁止过度断言');
+    });
+
+    test('records high-risk pre-router incidents on the active pipeline', async () => {
+        const brain = new HomeBrain();
+        const pipelineId = 'pipe-pre-router-hardening';
+        pipelineLogs.removePipeline(pipelineId);
+
+        try {
+            const result = await brain.processCommandDetailed(
+                '清空记忆',
+                '主人',
+                undefined,
+                'zh',
+                undefined,
+                'conversation-pre-router-hardening',
+                {
+                    pipelineId,
+                    memory: {
+                        getRecentConversationMessages: () => [],
+                        getContextMemories: () => {
+                            throw new Error('memory should not be fetched');
+                        },
+                    },
+                    generateText: async () => {
+                        throw new Error('response model should not be called');
+                    },
+                },
+            );
+
+            const detail = pipelineLogs.getPipelineDetail(pipelineId);
+            const incidents = pipelineLogs.listIncidents({ pipelineId, limit: 10 });
+            const intentEvent = detail?.events.find(event => {
+                const metadata = event.metadata && typeof event.metadata === 'object'
+                    ? event.metadata as { intent?: unknown }
+                    : {};
+                return event.stage === 'intent' && metadata.intent === 'device_control';
+            });
+            const routingDiagnostics = intentEvent?.metadata && typeof intentEvent.metadata === 'object'
+                ? (intentEvent.metadata as { routingDiagnostics?: Record<string, unknown> }).routingDiagnostics
+                : undefined;
+            const incidentMetadata = incidents[0]?.metadata && typeof incidents[0].metadata === 'object'
+                ? incidents[0].metadata as Record<string, unknown>
+                : {};
+
+            expect(result.text).toBe('这个操作可能影响隐私、安全或设备状态，请确认你希望继续吗？');
+            expect(incidents).toHaveLength(1);
+            expect(incidents[0]?.reason).toBe('pre_router_hit');
+            expect(incidentMetadata.preRouterRule).toBe('high_risk_guard');
+            expect(routingDiagnostics?.source).toBe('pre-router');
+            expect(routingDiagnostics?.preRouterLayer).toBe('P2');
+            expect(routingDiagnostics?.preRouterRule).toBe('high_risk_guard');
+            expect(routingDiagnostics?.normalizedCommand).toBe('清空记忆');
+            expect(routingDiagnostics?.modelSkipped).toBe(true);
+        } finally {
+            pipelineLogs.removePipeline(pipelineId);
+        }
+    });
+
+    test('returns clarification directly without fetching data or calling response model', async () => {
+        const brain = new HomeBrain();
+        const intention: IntentionAnalysis = {
+            routingAction: 'ask_clarification',
+            routing: {
+                action: 'ask_clarification',
+                confidence: 0.97,
+                reason: 'high risk operation requires confirmation',
+            },
+            responsePlan: {
+                style: 'clarification_question',
+                clarificationQuestion: '请确认是否继续。',
+            },
+            dataPlan: {
+                memory: {
+                    needed: false,
+                    mode: 'none',
+                    query: '',
+                    topics: [],
+                    canFetchInParallel: true,
+                    reason: '',
+                    confidence: 0.97,
+                },
+                vision: {
+                    needed: false,
+                    canFetchInParallel: true,
+                    reason: '',
+                },
+                deviceState: {
+                    needed: false,
+                    targets: [],
+                    reason: '',
+                },
+                safety: {
+                    riskLevel: 'device_risk',
+                    requiresIdentity: false,
+                    requiresConfirmation: true,
+                    reason: 'sensitive operation',
+                },
+            },
+            routingDiagnostics: {
+                source: 'pre-router',
+                preRouterLayer: 'P2',
+                preRouterRule: 'high_risk_guard',
+                normalizedCommand: '重启服务',
+                modelSkipped: true,
+            },
+            intent: 'device_control',
+            dialogueAct: 'new_request',
+            shouldRespond: true,
+            shouldEndSession: false,
+            visualUnderstanding: {
+                required: false,
+                reason: 'no vision required',
+            },
+            memoryRetrieval: {
+                enabled: false,
+                mode: 'none',
+                query: '',
+                topics: [],
+                timeScope: 'unspecified',
+                confidence: 0.97,
+                reason: 'no memory required',
+            },
+            resolvedContext: {
+                isFollowUp: false,
+                topic: '高风险操作确认',
+                rewrite: '重启服务',
+            },
+        };
+        let generated = false;
+        let memoryFetched = false;
+        const deltas: string[] = [];
+
+        const result = await brain.processCommandDetailed(
+            '重启服务',
+            '主人',
+            undefined,
+            'zh',
+            Buffer.from('fake-image'),
+            'clarification-session',
+            {
+                analyzeCommand: async () => intention,
+                memory: {
+                    getRecentConversationMessages: () => [],
+                    getContextMemories: () => {
+                        memoryFetched = true;
+                        return [];
+                    },
+                },
+                generateText: async () => {
+                    generated = true;
+                    return { text: 'should not happen' } as any;
+                },
+                onTextDelta: async (delta) => {
+                    deltas.push(delta);
+                },
+            },
+        );
+
+        expect(result.text).toBe('请确认是否继续。');
+        expect(result.shouldRemember).toBe(true);
+        expect(generated).toBe(false);
+        expect(memoryFetched).toBe(false);
+        expect(deltas).toEqual(['请确认是否继续。']);
+    });
+
+    test('returns device placeholder without reporting actual tool use', async () => {
+        const brain = new HomeBrain();
+        const conversationId = 'device-placeholder-session';
+        let generated = false;
+        let memoryFetched = false;
+
+        const result = await brain.processCommandDetailed(
+            '开灯',
+            '主人',
+            undefined,
+            'zh',
+            undefined,
+            conversationId,
+            {
+                memory: {
+                    getRecentConversationMessages: () => [],
+                    getContextMemories: () => {
+                        memoryFetched = true;
+                        return [];
+                    },
+                },
+                generateText: async () => {
+                    generated = true;
+                    return { text: 'should not happen' } as any;
+                },
+            },
+        );
+
+        const pipeline = pipelineLogs
+            .listPipelines({ kind: 'conversation', limit: 20 })
+            .find(item => item.conversationId === conversationId);
+        const summary = pipeline?.summary && typeof pipeline.summary === 'object'
+            ? pipeline.summary as Record<string, unknown>
+            : {};
+
+        try {
+            expect(result.text).toBe('设备控制还没有接入，所以我没有实际改变任何设备。');
+            expect(generated).toBe(false);
+            expect(memoryFetched).toBe(false);
+            expect(summary.responseMode).toBe('device_placeholder');
+            expect(summary.usedTool).toBe(false);
+        } finally {
+            if (pipeline) {
+                pipelineLogs.removePipeline(pipeline.id);
+            }
+        }
     });
 
     test('should answer assistant proposal using resolved rewrite without long-term memory', async () => {
@@ -255,6 +467,10 @@ describe('HomeBrain', () => {
                         location: 'unknown',
                         timeBucket: 'evening',
                         dayType: 'weekday',
+                        impressions: 0,
+                        positiveFeedbackCount: 0,
+                        negativeFeedbackCount: 0,
+                        ignoredFeedbackCount: 0,
                     }],
                 },
                 generateText: async (options: any) => {
@@ -268,6 +484,118 @@ describe('HomeBrain', () => {
         expect(generatedPrompt).toContain('"resultCount":1');
         expect(generatedPrompt).toContain('latest approved long-term memories');
         expect(generatedPrompt).toContain('辣椒炒肉和番茄炒蛋');
+    });
+
+    test('should inject ambient memories separately from semantic retrieval', async () => {
+        const brain = new HomeBrain();
+        let semanticFetches = 0;
+        let ambientFetches = 0;
+        let generatedPrompt = '';
+
+        await brain.processCommandDetailed(
+            '放个歌',
+            '主人',
+            undefined,
+            'zh',
+            undefined,
+            'ambient-session',
+            {
+                analyzeCommand: async () => ({
+                    routing: {
+                        action: 'direct_answer',
+                        confidence: 0.9,
+                        reason: '普通直接回答',
+                    },
+                    contextResolution: {
+                        isFollowUp: false,
+                        topic: '',
+                        responseRewrite: '放个歌',
+                        memoryQueryRewrite: '',
+                        currentSessionSufficient: true,
+                    },
+                    dataPlan: {
+                        memory: {
+                            needed: false,
+                            mode: 'none',
+                            query: '',
+                            topics: [],
+                            canFetchInParallel: true,
+                            reason: '',
+                            confidence: 0.5,
+                        },
+                        vision: { needed: false, canFetchInParallel: true, reason: '' },
+                        deviceState: { needed: false, targets: [], reason: '' },
+                        safety: { riskLevel: 'none', requiresIdentity: false, requiresConfirmation: false, reason: '' },
+                    },
+                    responsePlan: {
+                        style: 'brief_answer',
+                        clarificationQuestion: '',
+                    },
+                    intent: 'qa',
+                    dialogueAct: 'new_request',
+                    shouldRespond: true,
+                    shouldEndSession: false,
+                    visualUnderstanding: {
+                        required: false,
+                        reason: '不需要视觉',
+                    },
+                    memoryRetrieval: {
+                        enabled: false,
+                        mode: 'none',
+                        query: '',
+                        topics: [],
+                        timeScope: 'unspecified',
+                        confidence: 0.5,
+                        reason: '',
+                    },
+                    resolvedContext: {
+                        isFollowUp: false,
+                        topic: '',
+                        rewrite: '放个歌',
+                    },
+                }),
+                memory: {
+                    getRecentConversationMessages: () => [],
+                    getContextMemories: () => {
+                        semanticFetches += 1;
+                        return [];
+                    },
+                    getAmbientMemories: () => {
+                        ambientFetches += 1;
+                        return [{
+                            id: 'ambient-1',
+                            sourceConversationId: 'ambient-source',
+                            content: '用户喜欢被称呼为主人，回答要简短。',
+                            baseScore: 5,
+                            hitCount: 0,
+                            createdAt: Date.now(),
+                            lastAccessedAt: Date.now(),
+                            status: 'warm',
+                            topic: 'assistant style',
+                            userState: '喜欢被称呼为主人',
+                            behaviorSignal: '全局称呼偏好',
+                            interactionResult: '',
+                            location: 'unknown',
+                            timeBucket: 'evening',
+                            dayType: 'weekday',
+                            impressions: 0,
+                            positiveFeedbackCount: 0,
+                            negativeFeedbackCount: 0,
+                            ignoredFeedbackCount: 0,
+                        }];
+                    },
+                },
+                generateText: async (options: any) => {
+                    generatedPrompt = String(options.messages.at(-1)?.content ?? '');
+                    return { text: '好的。' } as any;
+                },
+            },
+        );
+
+        expect(semanticFetches).toBe(0);
+        expect(ambientFetches).toBe(1);
+        expect(generatedPrompt).toContain('"ambientMemories"');
+        expect(generatedPrompt).toContain('用户喜欢被称呼为主人');
     });
 
     test('should fetch layered memory and vision context in one response path', async () => {
@@ -342,6 +670,7 @@ describe('HomeBrain', () => {
         let memoryQuery = '';
         let generatedPrompt = '';
         const calls: any[] = [];
+        const pipelineId = 'pipe-layered-memory-hit-list';
 
         await brain.processCommandDetailed(
             '帮我看看厨房现在要注意什么',
@@ -372,9 +701,35 @@ describe('HomeBrain', () => {
                             location: 'kitchen',
                             timeBucket: 'evening',
                             dayType: 'weekday',
+                            impressions: 0,
+                            positiveFeedbackCount: 0,
+                            negativeFeedbackCount: 0,
+                            ignoredFeedbackCount: 0,
                         }];
                     },
+                    getAmbientMemories: () => [{
+                        id: 'ambient-1',
+                        sourceConversationId: 'source-ambient',
+                        content: '用户偏好直接称呼为主人。',
+                        baseScore: 5,
+                        hitCount: 0,
+                        createdAt: Date.now(),
+                        lastAccessedAt: Date.now(),
+                        status: 'warm',
+                        topic: '称呼偏好',
+                        userState: '',
+                        behaviorSignal: 'global preference',
+                        interactionResult: '',
+                        location: 'unknown',
+                        timeBucket: 'evening',
+                        dayType: 'weekday',
+                        impressions: 0,
+                        positiveFeedbackCount: 0,
+                        negativeFeedbackCount: 0,
+                        ignoredFeedbackCount: 0,
+                    }],
                 },
+                pipelineId,
                 generateText: async (options: any) => {
                     calls.push(options);
                     if (calls.length === 1) {
@@ -388,7 +743,15 @@ describe('HomeBrain', () => {
 
         expect(memoryQuery).toBe('厨房 安全 用户偏好');
         expect(generatedPrompt).toContain('用户偏好厨房提醒要简短直接');
+        expect(generatedPrompt).toContain('用户偏好直接称呼为主人');
         expect(generatedPrompt).toContain('画面里台面有锅具');
+        const detail = pipelineLogs.getPipelineDetail(pipelineId);
+        const hitList = detail?.events.find(event => event.title === 'memory.hit_list');
+        const metadata = hitList?.metadata as { memories?: Array<{ id: string }>; ambientMemories?: Array<{ id: string }> } | undefined;
+        expect(hitList?.stage).toBe('memory');
+        expect(metadata?.memories?.map(item => item.id)).toEqual(['memory-1']);
+        expect(metadata?.ambientMemories?.map(item => item.id)).toEqual(['ambient-1']);
+        pipelineLogs.removePipeline(pipelineId);
     });
 
     test('should use intention visual decision instead of keyword matching', async () => {
@@ -440,7 +803,8 @@ describe('HomeBrain', () => {
         );
 
         expect(calls).toHaveLength(2);
-        expect(calls[0].messages[0].content).toBeArray();
+        expect(calls[0].prompt).toContain('识别当前画面里的可见状态');
+        expect(calls[0].image).toBeInstanceOf(Buffer);
         expect(String(calls[1].messages.at(-1).content)).toContain('画面里有一杯水');
     });
 
@@ -493,10 +857,9 @@ describe('HomeBrain', () => {
             },
         );
 
-        const imagePart = calls[0].messages[0].content[1];
-        expect(imagePart.image).toBeInstanceOf(Buffer);
-        expect(imagePart.image.length).toBeGreaterThan(0);
-        expect(imagePart.image[0]).toBe(0xff);
-        expect(imagePart.image[1]).toBe(0xd8);
+        expect(calls[0].image).toBeInstanceOf(Buffer);
+        expect(calls[0].image.length).toBeGreaterThan(0);
+        expect(calls[0].image[0]).toBe(0xff);
+        expect(calls[0].image[1]).toBe(0xd8);
     });
 });

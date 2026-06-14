@@ -58,6 +58,18 @@ def resolve_model() -> str:
     }.get(profile, "UVR-MDX-NET-Inst_HQ_3.onnx")
 
 
+def resolve_model_path(model_name: str, directory: Path) -> Path:
+    candidate = Path(model_name)
+    path = candidate if candidate.is_absolute() else directory / candidate
+    resolved = path.resolve()
+    if not resolved.is_file():
+        raise RuntimeError(
+            f"MDX offline mode requires local model file {resolved}. "
+            "Place the ONNX model in VOICE_SEPARATION_MODEL_DIR before starting the service."
+        )
+    return resolved
+
+
 def ensure_started():
     global SEPARATOR, MODEL, PROVIDERS, STARTED_AT, LAST_ERROR
     if SEPARATOR is not None:
@@ -74,6 +86,8 @@ def ensure_started():
             os.environ.get("VOICE_SEPARATION_DEVICE", os.environ.get("PYTHON_SERVICES_DEVICE", "mps")),
         )
         cache = model_dir()
+        model_path = resolve_model_path(MODEL, cache)
+        MODEL = model_path.name if model_path.parent == cache.resolve() else str(model_path)
         SEPARATOR = Separator(
             output_dir=str(cache),
             model_file_dir=str(cache),

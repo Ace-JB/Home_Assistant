@@ -6,7 +6,12 @@ import wave
 from array import array
 from pathlib import Path
 
-from src.server.python_services.src.cosyvoice_service import model_dir, validate_model_dir, trim_wav_silence
+from src.server.python_services.src.cosyvoice_service import (
+    configure_hf_offline_mode,
+    model_dir,
+    trim_wav_silence,
+    validate_model_dir,
+)
 
 
 SAMPLE_RATE = 24000
@@ -98,6 +103,33 @@ class CosyVoiceTrimTest(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "CosyVoice model config not found"):
                 validate_model_dir(missing_config_dir)
+
+    def test_hf_offline_mode_defaults_on_without_overriding_explicit_env(self) -> None:
+        previous_cosyvoice = os.environ.get("COSYVOICE_HF_OFFLINE")
+        previous_hf = os.environ.get("HF_HUB_OFFLINE")
+        try:
+            os.environ.pop("COSYVOICE_HF_OFFLINE", None)
+            os.environ.pop("HF_HUB_OFFLINE", None)
+            configure_hf_offline_mode()
+            self.assertEqual(os.environ.get("HF_HUB_OFFLINE"), "1")
+
+            os.environ["HF_HUB_OFFLINE"] = "0"
+            configure_hf_offline_mode()
+            self.assertEqual(os.environ.get("HF_HUB_OFFLINE"), "0")
+
+            os.environ["COSYVOICE_HF_OFFLINE"] = "0"
+            os.environ.pop("HF_HUB_OFFLINE", None)
+            configure_hf_offline_mode()
+            self.assertIsNone(os.environ.get("HF_HUB_OFFLINE"))
+        finally:
+            if previous_cosyvoice is None:
+                os.environ.pop("COSYVOICE_HF_OFFLINE", None)
+            else:
+                os.environ["COSYVOICE_HF_OFFLINE"] = previous_cosyvoice
+            if previous_hf is None:
+                os.environ.pop("HF_HUB_OFFLINE", None)
+            else:
+                os.environ["HF_HUB_OFFLINE"] = previous_hf
 
 
 if __name__ == "__main__":

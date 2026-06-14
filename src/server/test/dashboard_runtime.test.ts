@@ -5,6 +5,7 @@ import {
 } from '@server/services/AssistantRuntimeService';
 import {
     getDashboardStatus,
+    startAllDashboardManagedServices,
     startDashboardService,
     stopDashboardService,
 } from '@server/services/DashboardService';
@@ -17,6 +18,12 @@ function createRuntime() {
         },
         startFunASR: async () => {
             calls.push('startFunASR');
+        },
+        startRouterModel: async () => {
+            calls.push('startRouterModel');
+        },
+        startMainModel: async () => {
+            calls.push('startMainModel');
         },
         startCosyVoice: async () => {
             calls.push('startCosyVoice');
@@ -89,6 +96,8 @@ describe('Dashboard assistant runtime status', () => {
         ]);
         expect(serviceGroupById(status, 'advanced')?.collapsed).toBe(true);
         expect(serviceGroupById(status, 'advanced')?.services.map(item => item.id)).toEqual([
+            'qwen-vlm',
+            'qwen-router',
             'cosyvoice',
             'voice-separation',
             'ffmpeg',
@@ -109,11 +118,52 @@ describe('Dashboard assistant runtime status', () => {
         expect(stopped.status).toBe('stopped');
         expect(calls).toEqual([
             'startFunASR',
+            'startRouterModel',
+            'startMainModel',
             'startMonitor:audio',
             'stopMonitor',
             'stopRealtimeSocket',
             'stopWebRTC',
             'stopPythonServices',
+        ]);
+    });
+
+    test('starts dashboard-managed service groups serially', async () => {
+        const calls: string[] = [];
+        const delay = () => new Promise(resolve => setTimeout(resolve, 5));
+
+        await startAllDashboardManagedServices({
+            startFunASR: async () => {
+                calls.push('funasr:start');
+                await delay();
+                calls.push('funasr:end');
+            },
+            startModelServices: async () => {
+                calls.push('models:start');
+                await delay();
+                calls.push('models:end');
+            },
+            startCosyVoice: async () => {
+                calls.push('cosyvoice:start');
+                await delay();
+                calls.push('cosyvoice:end');
+            },
+            startMdx: async () => {
+                calls.push('mdx:start');
+                await delay();
+                calls.push('mdx:end');
+            },
+        });
+
+        expect(calls).toEqual([
+            'funasr:start',
+            'funasr:end',
+            'models:start',
+            'models:end',
+            'cosyvoice:start',
+            'cosyvoice:end',
+            'mdx:start',
+            'mdx:end',
         ]);
     });
 });

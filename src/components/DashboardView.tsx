@@ -152,9 +152,13 @@ export const DashboardView: FC = () => {
   async function loadDashboard(signal?: AbortSignal) {
     try {
       const response = await fetch('/api/dashboard/status', { signal });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json() as DashboardStatus;
-      setDashboard(data);
+      const data = await response.json().catch(() => null) as unknown;
+      const errorMessage = data && typeof data === 'object' && 'error' in data && typeof data.error === 'string'
+        ? data.error
+        : null;
+      if (!response.ok) throw new Error(errorMessage ?? `HTTP ${response.status}`);
+      if (!data || typeof data !== 'object' || errorMessage) throw new Error(errorMessage ?? 'Dashboard status unavailable');
+      setDashboard(data as DashboardStatus);
       setError('');
     } catch (nextError) {
       if (nextError instanceof DOMException && nextError.name === 'AbortError') return;

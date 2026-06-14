@@ -15,6 +15,8 @@ service_port() {
     funasr) echo "${FUNASR_PORT:-10101}" ;;
     cosyvoice) echo "${COSYVOICE_PORT:-10102}" ;;
     mdx) echo "${MDX_PORT:-10103}" ;;
+    qwen-vlm) echo "${QWEN_VLM_PORT:-10104}" ;;
+    qwen-router) echo "${QWEN_ROUTER_PORT:-10105}" ;;
     *) return 1 ;;
   esac
 }
@@ -24,14 +26,16 @@ service_run() {
     funasr) echo "$SCRIPT_ROOT/bin/funasr_run" ;;
     cosyvoice) echo "$SCRIPT_ROOT/bin/cosyvoice_run" ;;
     mdx) echo "$SCRIPT_ROOT/bin/mdx_run" ;;
+    qwen-vlm) echo "$SCRIPT_ROOT/bin/qwen_vlm_run" ;;
+    qwen-router) echo "$SCRIPT_ROOT/bin/qwen_router_run" ;;
     *) return 1 ;;
   esac
 }
 
 services_for() {
   case "$1" in
-    all) printf '%s\n' funasr cosyvoice mdx ;;
-    funasr|cosyvoice|mdx) printf '%s\n' "$1" ;;
+    all) printf '%s\n' funasr cosyvoice mdx qwen-vlm qwen-router ;;
+    funasr|cosyvoice|mdx|qwen-vlm|qwen-router) printf '%s\n' "$1" ;;
     *) echo "Unknown service: $1" >&2; exit 2 ;;
   esac
 }
@@ -74,7 +78,11 @@ status_one() {
     rm -f "$(pid_file "$service")"
     pid=""
   fi
-  if [ -n "$pid" ] && [ "$pid" = "$port_owner" ]; then
+  if [ -n "$health" ] && [ -n "$port_owner" ]; then
+    pid="$port_owner"
+    echo "$port_owner" > "$(pid_file "$service")"
+    managed=true
+  elif [ -n "$pid" ] && [ "$pid" = "$port_owner" ]; then
     managed=true
   fi
 
@@ -106,6 +114,11 @@ start_one() {
   if [ -n "$existing" ]; then
     pid="$(read_pid "$service")"
     if [ "$pid" = "$existing" ] && pid_alive "$pid"; then
+      status_one "$service"
+      return
+    fi
+    if [ -n "$(health_json "$port")" ]; then
+      echo "$existing" > "$(pid_file "$service")"
       status_one "$service"
       return
     fi
