@@ -304,7 +304,7 @@ function appendAsrDiagnosticLog(
         ...extra,
     };
 
-    if (GLOBAL_CONFIG.OLLAMA.TRACE_ENABLED) {
+    if (GLOBAL_CONFIG.MODEL_SERVICES.TRACE_ENABLED) {
         console.debug(`[ASR] ${title}`, metadata);
     } else if (level !== 'debug') {
         console[level](`[ASR] ${title}: ${reason}`, metadata);

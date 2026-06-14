@@ -1,17 +1,13 @@
 import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'fs';
 import { dirname, join } from 'path';
+import { memoryAmbientProfile, memorySemanticProfile, scoreCandidate, type ScoringResult } from '@modules/scoring';
 import { getDataDbDir } from '@/server/services/runtime-paths';
 
 const DB_DIR = getDataDbDir();
 const SQLITE_MEMORY_DB_PATH = join(DB_DIR, 'memory.sqlite');
-const MEMORY_HEAT_DECAY_GAMMA = 1.2;
-const MEMORY_HEAT_SCORE_CAP = 8;
-const MEMORY_COLD_HEAT_MULTIPLIER = 0.4;
 const MEMORY_COLD_AFTER_DAYS = 30;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
-const SEMANTIC_TERM_SCORE = 3;
-const MIN_CONTEXT_SEMANTIC_SCORE = SEMANTIC_TERM_SCORE;
 const TOKEN_STOP_WORDS = new Set([
   'a',
   'an',
@@ -56,6 +52,10 @@ type PrunedMemoryRow = {
   location: MemoryLocation;
   time_bucket: TimeBucket;
   day_type: DayType;
+  impressions: number;
+  positive_feedback_count: number;
+  negative_feedback_count: number;
+  ignored_feedback_count: number;
 };
 
 type MemoryCandidateRow = {
@@ -68,10 +68,20 @@ type MemoryCandidateRow = {
   reviewed_at: number | null;
 };
 
+type MemoryRetrievalReason = 'semantic_match' | 'recent_fallback' | 'ambient_bypass';
+
 type MemoryScore = {
-  semanticScore: number;
+  relevanceScore: number;
+  gateRelevanceScore: number;
+  retrievalReason: MemoryRetrievalReason;
+  baseScore: number;
+  freshnessScore: number;
+  feedbackScore: number;
   situationScore: number;
-  heatScore: number;
+  explorationScore: number;
+  gateScore: number;
+  rankScore: number;
+  visibility: 'eligible' | 'suppressed' | 'hidden';
   totalScore: number;
 };
 
@@ -111,6 +121,10 @@ export interface MemoryRecord {
   location: MemoryLocation;
   timeBucket: TimeBucket;
   dayType: DayType;
+  impressions: number;
+  positiveFeedbackCount: number;
+  negativeFeedbackCount: number;
+  ignoredFeedbackCount: number;
 }
 
 export type PrunedMemoryRecord = MemoryRecord;
@@ -171,6 +185,13 @@ export interface UpdatePrunedMemoryInput {
   location?: MemoryLocation;
 }
 
+export type MemoryFeedbackSignal = 'positive' | 'negative' | 'ignored';
+
+export interface RecordMemoryFeedbackInput {
+  memory_id: string;
+  feedback: MemoryFeedbackSignal;
+}
+
 export interface PrunedMemorySearchOptions {
   sourceConversationId?: string;
   query?: string;
@@ -201,6 +222,10 @@ export interface ContextMemorySearchOptions {
   dayType?: DayType;
   limit?: number;
   mode?: 'semantic' | 'recent_recall' | 'hybrid';
+}
+
+export interface AmbientMemorySearchOptions {
+  limit?: number;
 }
 
 export interface RecentConversationMessageOptions {
@@ -340,12 +365,13 @@ export class MemoryDatabase {
         INSERT INTO pruned_memories (
           memory_id, source_conversation_id, content, base_score, hit_count, created_at,
           last_accessed_at, status, topic, user_state, behavior_signal, interaction_result,
-          location, time_bucket, day_type
+          location, time_bucket, day_type, impressions, positive_feedback_count,
+          negative_feedback_count, ignored_feedback_count
         )
         VALUES (
           $memoryId, $sourceConversationId, $content, $baseScore, 0, $createdAt,
           $lastAccessedAt, $status, $topic, $userState, $behaviorSignal, $interactionResult,
-          $location, $timeBucket, $dayType
+          $location, $timeBucket, $dayType, 0, 0, 0, 0
         )
       `)
       .run({
@@ -461,13 +487,13 @@ export class MemoryDatabase {
       return [];
     }
 
-    const candidates = this.searchContextMemoryCandidates(terms, false);
+    const candidates = this.searchContextMemoryCandidates(terms, true);
     const scored = candidates
       .map(memory => ({
         memory,
         score: scoreMemory(memory, terms, options),
       }))
-      .filter(item => item.score.semanticScore >= MIN_CONTEXT_SEMANTIC_SCORE)
+      .filter(item => shouldInjectScoredMemory(item.score, mode))
       .sort((a, b) => b.score.totalScore - a.score.totalScore)
       .slice(0, normalizeLimit(options.limit));
 
@@ -476,15 +502,13 @@ export class MemoryDatabase {
       const remaining = this.getRecentContextMemories(normalizeLimit(options.limit) - scored.length, options.query, new Set(scored.map(item => item.memory.id)));
       finalScored = [
         ...scored,
-        ...remaining.map(memory => ({
-          memory,
-          score: {
-            semanticScore: 0,
-            situationScore: 0,
-            heatScore: calculateHeat(memory, Date.now()),
-            totalScore: calculateHeat(memory, Date.now()),
-          },
-        })),
+        ...remaining.map(memory => {
+          const recentScore = scoreRecentMemory(memory);
+          return {
+            memory,
+            score: toMemoryScore(recentScore, 0, 0, 'recent_fallback'),
+          };
+        }),
       ];
     }
 
@@ -492,14 +516,15 @@ export class MemoryDatabase {
       ? undefined
       : this.getPendingMemoryCandidateMatchCount(terms) > 0
         ? 'candidate_pending'
-        : this.searchContextMemoryCandidates(terms, true).some(item => item.status === 'cold')
-          ? 'cold_filtered'
-          : 'below_semantic_threshold';
+        : 'below_semantic_threshold';
     traceContextMemorySearch(options.query, candidates.length, finalScored, mode, reason);
 
     const results = finalScored.map(item => item.memory);
     for (const item of results) {
-      this.touchMemory(item.id, Date.now(), true);
+      this.recordMemoryExposure(item.id, Date.now(), {
+        updateLastAccessed: true,
+        incrementLegacyHit: true,
+      });
     }
     return results.map(item => this.getPrunedMemory(item.id) ?? item);
   }
@@ -524,9 +549,54 @@ export class MemoryDatabase {
 
     traceRecentMemorySearch(query, rows.length, results);
     for (const item of results) {
-      this.touchMemory(item.id, Date.now(), true);
+      this.recordMemoryExposure(item.id, Date.now(), {
+        updateLastAccessed: true,
+        incrementLegacyHit: true,
+      });
     }
     return results.map(item => this.getPrunedMemory(item.id) ?? item);
+  }
+
+  getAmbientMemories(options: AmbientMemorySearchOptions = {}): MemoryRecord[] {
+    const rows = this.sqlite
+      .query<PrunedMemoryRow, Record<string, SqlValue>>(`
+        SELECT *
+        FROM pruned_memories
+        ORDER BY last_accessed_at DESC, created_at DESC, memory_id DESC
+        LIMIT $limit
+      `)
+      .all({ $limit: 100 });
+    const results = rows
+      .map(row => this.toMemoryRecord(row))
+      .map(memory => ({
+        memory,
+        score: scoreAmbientMemory(memory),
+      }))
+      .filter(item => item.score.visibility !== 'hidden')
+      .sort((a, b) => b.score.totalScore - a.score.totalScore)
+      .slice(0, normalizeLimit(options.limit));
+
+    for (const item of results) {
+      this.recordMemoryExposure(item.memory.id, Date.now(), {
+        updateLastAccessed: false,
+        incrementLegacyHit: false,
+      });
+    }
+    return results.map(item => this.getPrunedMemory(item.memory.id) ?? item.memory);
+  }
+
+  recordMemoryFeedback(input: RecordMemoryFeedbackInput): MemoryRecord | null {
+    const existing = this.getPrunedMemory(input.memory_id);
+    if (!existing) return null;
+    const column = feedbackColumn(input.feedback);
+    this.sqlite
+      .query(`
+        UPDATE pruned_memories
+        SET ${column} = ${column} + 1
+        WHERE memory_id = $memoryId
+      `)
+      .run({ $memoryId: input.memory_id });
+    return this.getPrunedMemory(input.memory_id);
   }
 
   saveMemoryCandidate(input: SaveMemoryCandidateInput): MemoryCandidateRecord {
@@ -676,9 +746,17 @@ export class MemoryDatabase {
         interaction_result TEXT NOT NULL,
         location TEXT NOT NULL,
         time_bucket TEXT NOT NULL,
-        day_type TEXT NOT NULL
+        day_type TEXT NOT NULL,
+        impressions INTEGER NOT NULL DEFAULT 0,
+        positive_feedback_count INTEGER NOT NULL DEFAULT 0,
+        negative_feedback_count INTEGER NOT NULL DEFAULT 0,
+        ignored_feedback_count INTEGER NOT NULL DEFAULT 0
       )
     `);
+    this.ensurePrunedMemoryColumn('impressions', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensurePrunedMemoryColumn('positive_feedback_count', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensurePrunedMemoryColumn('negative_feedback_count', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensurePrunedMemoryColumn('ignored_feedback_count', 'INTEGER NOT NULL DEFAULT 0');
     this.sqlite.run('CREATE INDEX IF NOT EXISTS idx_pruned_memories_source_conversation_id ON pruned_memories (source_conversation_id)');
     this.sqlite.run('CREATE INDEX IF NOT EXISTS idx_pruned_memories_topic ON pruned_memories (topic)');
     this.sqlite.run('CREATE INDEX IF NOT EXISTS idx_pruned_memories_status ON pruned_memories (status)');
@@ -910,6 +988,35 @@ export class MemoryDatabase {
       });
   }
 
+  private recordMemoryExposure(memoryId: string, accessedAt: number, options: {
+    updateLastAccessed: boolean;
+    incrementLegacyHit: boolean;
+  }): void {
+    this.sqlite
+      .query(`
+        UPDATE pruned_memories
+        SET last_accessed_at = CASE
+              WHEN $updateLastAccessed = 1 THEN $lastAccessedAt
+              ELSE last_accessed_at
+            END,
+            hit_count = hit_count + $hitIncrement,
+            impressions = impressions + 1
+        WHERE memory_id = $memoryId
+      `)
+      .run({
+        $memoryId: memoryId,
+        $lastAccessedAt: accessedAt,
+        $updateLastAccessed: options.updateLastAccessed ? 1 : 0,
+        $hitIncrement: options.incrementLegacyHit ? 1 : 0,
+      });
+  }
+
+  private ensurePrunedMemoryColumn(column: string, definition: string): void {
+    const rows = this.sqlite.query<{ name: string }, []>('PRAGMA table_info(pruned_memories)').all();
+    if (rows.some(row => row.name === column)) return;
+    this.sqlite.run(`ALTER TABLE pruned_memories ADD COLUMN ${column} ${definition}`);
+  }
+
   private updateMemoryCandidateStatus(candidateId: string, status: MemoryCandidateStatus): MemoryCandidateRecord | null {
     const existing = this.getMemoryCandidate(candidateId);
     if (!existing) return null;
@@ -989,6 +1096,10 @@ export class MemoryDatabase {
       location: row.location,
       timeBucket: row.time_bucket,
       dayType: row.day_type,
+      impressions: row.impressions ?? 0,
+      positiveFeedbackCount: row.positive_feedback_count ?? 0,
+      negativeFeedbackCount: row.negative_feedback_count ?? 0,
+      ignoredFeedbackCount: row.ignored_feedback_count ?? 0,
     };
   }
 
@@ -1022,6 +1133,17 @@ function normalizeOffset(offset: number | undefined): number {
 function normalizeBaseScore(score: number | undefined): number {
   if (!Number.isFinite(score)) return 3;
   return Math.max(1, Math.min(5, Math.round(score!)));
+}
+
+function feedbackColumn(feedback: MemoryFeedbackSignal): string {
+  switch (feedback) {
+    case 'positive':
+      return 'positive_feedback_count';
+    case 'negative':
+      return 'negative_feedback_count';
+    case 'ignored':
+      return 'ignored_feedback_count';
+  }
 }
 
 function getTimeBucket(date: Date): TimeBucket {
@@ -1068,29 +1190,108 @@ function scoreMemory(memory: MemoryRecord, terms: string[], options: ContextMemo
     memory.behaviorSignal,
     memory.interactionResult,
   ].join(' ').toLowerCase();
-  const semanticScore = terms.reduce(
-    (score, term) => (haystack.includes(term) ? score + SEMANTIC_TERM_SCORE : score),
-    0,
-  );
-  const situationScore = (
+  const matchedTerms = terms.filter(term => haystack.includes(term)).length;
+  const relevanceScore = terms.length === 0 ? 0 : matchedTerms / terms.length;
+  const situationScore = calculateSituationScore(memory, options);
+  const result = scoreCandidate({
+    baseScore: memory.status === 'cold' ? memory.baseScore * 0.85 : memory.baseScore,
+    relevance: relevanceScore,
+    confidence: memory.status === 'cold' ? 0.85 : 1,
+    freshness: {
+      createdAt: memory.createdAt,
+      lastSeenAt: memory.lastAccessedAt,
+    },
+    feedback: {
+      positive: memory.positiveFeedbackCount,
+      negative: memory.negativeFeedbackCount,
+      ignored: memory.ignoredFeedbackCount,
+    },
+    situation: situationScore,
+    exploration: {
+      impressions: memory.impressions,
+    },
+  }, memorySemanticProfile);
+
+  return toMemoryScore(result, relevanceScore, situationScore, 'semantic_match');
+}
+
+function scoreRecentMemory(memory: MemoryRecord): ScoringResult {
+  return scoreCandidate({
+    baseScore: memory.status === 'cold' ? memory.baseScore * 0.85 : memory.baseScore,
+    relevance: 1,
+    confidence: memory.status === 'cold' ? 0.85 : 1,
+    freshness: {
+      createdAt: memory.createdAt,
+    },
+    feedback: {
+      positive: memory.positiveFeedbackCount,
+      negative: memory.negativeFeedbackCount,
+      ignored: memory.ignoredFeedbackCount,
+    },
+    situation: 0,
+    exploration: {
+      impressions: memory.impressions,
+    },
+  }, memorySemanticProfile);
+}
+
+function scoreAmbientMemory(memory: MemoryRecord): MemoryScore {
+  const result = scoreCandidate({
+    baseScore: memory.baseScore,
+    relevance: 0,
+    confidence: 1,
+    freshness: {
+      createdAt: memory.createdAt,
+    },
+    feedback: {
+      positive: memory.positiveFeedbackCount,
+      negative: memory.negativeFeedbackCount,
+      ignored: memory.ignoredFeedbackCount,
+    },
+    situation: 0,
+    exploration: {
+      impressions: memory.impressions,
+    },
+  }, memoryAmbientProfile);
+
+  return toMemoryScore(result, 0, 0, 'ambient_bypass');
+}
+
+function calculateSituationScore(memory: MemoryRecord, options: ContextMemorySearchOptions): number {
+  const rawScore = (
     (options.location && memory.location === options.location ? 2 : 0)
     + (options.timeBucket && memory.timeBucket === options.timeBucket ? 1 : 0)
     + (options.dayType && memory.dayType === options.dayType ? 1 : 0)
   );
-  const heatScore = calculateHeat(memory, Date.now());
-  return {
-    semanticScore,
-    situationScore,
-    heatScore,
-    totalScore: semanticScore + situationScore + heatScore,
-  };
+  return rawScore / 4;
 }
 
-function calculateHeat(memory: MemoryRecord, now: number): number {
-  const deltaDays = Math.max(0, (now - memory.lastAccessedAt) / MS_PER_DAY);
-  const rawHeat = (memory.baseScore * (memory.hitCount + 1)) / ((deltaDays + 1) ** MEMORY_HEAT_DECAY_GAMMA);
-  const statusAdjustedHeat = memory.status === 'cold' ? rawHeat * MEMORY_COLD_HEAT_MULTIPLIER : rawHeat;
-  return Math.min(MEMORY_HEAT_SCORE_CAP, statusAdjustedHeat);
+function shouldInjectScoredMemory(score: MemoryScore, mode: ContextMemorySearchOptions['mode']): boolean {
+  if (score.visibility === 'hidden') return false;
+  if (score.visibility === 'eligible') return true;
+  return mode === 'hybrid' || score.relevanceScore >= 0.75;
+}
+
+function toMemoryScore(
+  result: ScoringResult,
+  relevanceScore: number,
+  situationScore: number,
+  retrievalReason: MemoryRetrievalReason,
+): MemoryScore {
+  return {
+    relevanceScore,
+    gateRelevanceScore: result.components.relevance,
+    retrievalReason,
+    baseScore: result.components.base,
+    freshnessScore: result.components.freshness,
+    feedbackScore: result.components.feedback,
+    situationScore,
+    explorationScore: result.components.exploration,
+    gateScore: result.gateScore,
+    rankScore: result.rankScore,
+    visibility: result.visibility,
+    totalScore: result.finalScore,
+  };
 }
 
 function toFtsQuery(terms: string[]): string {
@@ -1110,14 +1311,20 @@ function traceContextMemorySearch(
   candidateCount: number,
   matches: Array<{ memory: MemoryRecord; score: MemoryScore }>,
   mode = 'semantic',
-  reason?: 'no_terms' | 'below_semantic_threshold' | 'cold_filtered' | 'candidate_pending',
+  reason?: 'no_terms' | 'below_semantic_threshold' | 'candidate_pending',
 ): void {
   const injected = matches.map(item => ({
     id: item.memory.id,
     topic: item.memory.topic,
-    semanticScore: item.score.semanticScore,
-    situationScore: item.score.situationScore,
-    heatScore: Number(item.score.heatScore.toFixed(3)),
+    retrievalReason: item.score.retrievalReason,
+    relevanceScore: Number(item.score.relevanceScore.toFixed(3)),
+    gateRelevanceScore: Number(item.score.gateRelevanceScore.toFixed(3)),
+    situationScore: Number(item.score.situationScore.toFixed(3)),
+    freshnessScore: Number(item.score.freshnessScore.toFixed(3)),
+    feedbackScore: Number(item.score.feedbackScore.toFixed(3)),
+    gateScore: Number(item.score.gateScore.toFixed(3)),
+    rankScore: Number(item.score.rankScore.toFixed(3)),
+    visibility: item.score.visibility,
     totalScore: Number(item.score.totalScore.toFixed(3)),
   }));
 

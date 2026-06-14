@@ -187,10 +187,10 @@ export class BenchmarkService {
                     variantId,
                     iteration: index,
                     warmup: index < warmupIterations,
-                    backend: input.backend ?? 'ollama',
-                    textModel: input.textModel ?? GLOBAL_CONFIG.OLLAMA.TEXT_MODEL,
-                    visionModel: input.visionModel ?? GLOBAL_CONFIG.OLLAMA.VISION_MODEL,
-                    ctxSize: input.ctxSize ?? GLOBAL_CONFIG.OLLAMA.TEXT_NUM_CTX,
+                    backend: input.backend ?? 'mlx',
+                    textModel: input.textModel ?? GLOBAL_CONFIG.MODEL_SERVICES.QWEN_VLM_MODEL_ID,
+                    visionModel: input.visionModel ?? GLOBAL_CONFIG.MODEL_SERVICES.QWEN_VLM_MODEL_ID,
+                    ctxSize: input.ctxSize ?? 0,
                     notes: input.notes,
                 };
                 await this.runScenario(scenario, metadata);
@@ -455,7 +455,7 @@ function seedRecentConversation(memoryStore: typeof memory, conversationId: stri
 }
 
 function defaultVariantId(): string {
-    return `ollama-${GLOBAL_CONFIG.OLLAMA.TEXT_MODEL.replace(/[^a-zA-Z0-9_.-]/g, '-')}`;
+    return `mlx-${GLOBAL_CONFIG.MODEL_SERVICES.QWEN_VLM_MODEL_ID.replace(/[^a-zA-Z0-9_.-]/g, '-')}`;
 }
 
 function positiveInteger(value: unknown, fallback: number): number {

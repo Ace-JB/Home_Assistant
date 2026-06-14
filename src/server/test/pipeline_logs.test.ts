@@ -114,6 +114,33 @@ describe('PipelineLogService', () => {
         expect((detail?.events[0]?.metadata as { modelCallId?: string } | undefined)?.modelCallId).toBe('model-lifecycle');
     });
 
+    test('treats intention model call failures as recoverable warnings', () => {
+        const service = new PipelineLogService();
+        service.startPipeline({
+            id: 'pipe-intention-recovered',
+            kind: 'conversation',
+            title: 'Conversation pipeline',
+            conversationId: 'conversation-intention-recovered',
+        });
+
+        service.recordModelCall({
+            pipelineId: 'pipe-intention-recovered',
+            stage: 'model',
+            scope: 'intention.routing',
+            modelId: 'qwen-router',
+            status: 'failed',
+            error: 'router unavailable',
+        });
+
+        const detail = service.getPipelineDetail('pipe-intention-recovered');
+        const incidents = service.listIncidents({ pipelineId: 'pipe-intention-recovered', limit: 10 });
+
+        expect(detail?.status).toBe('running');
+        expect(detail?.severity).toBe('warn');
+        expect(detail?.events[0]?.level).toBe('warn');
+        expect(incidents[0]?.severity).toBe('warn');
+    });
+
     test('bounds model call metadata without corrupting json', () => {
         const service = new PipelineLogService();
         service.recordModelCall({

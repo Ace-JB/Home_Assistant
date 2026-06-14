@@ -1,6 +1,6 @@
 import { type FC, useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n, type Language } from '../i18n';
-import { choosePipelineIdAfterLogRefresh } from './logsNavigation';
+import { chooseLogItemIdAfterRefresh, choosePipelineIdAfterLogRefresh } from './logsNavigation';
 
 type PipelineKind = 'system' | 'conversation';
 type PipelineStage = 'wake' | 'asr' | 'intent' | 'context' | 'memory' | 'vision' | 'model' | 'tool' | 'tts' | 'service' | 'summary';
@@ -165,6 +165,24 @@ type IncidentRef = {
   reason?: string;
 };
 
+type PreRouterCheck = {
+  layer: string;
+  rule: string;
+  matched: boolean;
+  durationMs: number;
+  reason?: string;
+};
+
+type MemoryHitItem = {
+  id: string;
+  topic?: string;
+  status?: string;
+  baseScore?: number;
+  hitCount?: number;
+  impressions?: number;
+  content?: string;
+};
+
 const PAGE_SIZE = 200;
 
 export const LogsView: FC = () => {
@@ -184,6 +202,7 @@ export const LogsView: FC = () => {
   const [modelReturnContext, setModelReturnContext] = useState<ModelReturnContext | null>(null);
   const pendingModelCallIdRef = useRef<string | null>(null);
   const pendingPipelineIdRef = useRef<string | null>(null);
+  const pendingIncidentIdRef = useRef<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const detailPanelRef = useRef<HTMLElement | null>(null);
@@ -193,19 +212,22 @@ export const LogsView: FC = () => {
   }, [activeTab]);
 
   useEffect(() => {
-    if (activeTab !== 'model' || !selectedModelCallId || !selectedModelCallDetail) return;
+    const target = selectedListTarget(activeTab, {
+      modelCall: selectedModelCallId && selectedModelCallDetail ? selectedModelCallId : null,
+      incident: selectedIncidentId && selectedIncidentDetail ? selectedIncidentId : null,
+    });
+    if (!target) return;
     const frame = window.requestAnimationFrame(() => {
-      document.getElementById(domId('model-call-list', selectedModelCallId))?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      document.getElementById(domId(target.prefix, target.id))?.scrollIntoView({ block: 'center', behavior: 'smooth' });
       detailPanelRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeTab, selectedModelCallDetail, selectedModelCallId]);
+  }, [activeTab, selectedIncidentDetail, selectedIncidentId, selectedModelCallDetail, selectedModelCallId]);
 
   const visiblePipelines = useMemo(() => pipelines, [pipelines]);
-  const availableModelCallIds = useMemo(() => new Set(modelCalls.map(call => call.id)), [modelCalls]);
-  const availableIncidentIds = useMemo(() => new Set(incidents.map(incident => incident.id)), [incidents]);
 
   function handleTabChange(tab: LogsTab) {
+    if (tab === activeTab) return;
     setActiveTab(tab);
     setSelected(null);
     setSelectedModelCallDetail(null);
@@ -250,15 +272,9 @@ export const LogsView: FC = () => {
           setSelectedModelCallId(null);
         }
       } else if (activeTab === 'model') {
-        const targetModelCallId = pendingModelCallIdRef.current ?? selectedModelCallId;
-        const selectedModelCall = targetModelCallId
-          ? modelData.modelCalls.find(call => call.id === targetModelCallId)
-          : null;
-        const selectedModelCallFallback = selectedModelCallId
-          ? modelData.modelCalls.find(call => call.id === selectedModelCallId)
-          : null;
-        if (selectedModelCall ?? selectedModelCallFallback) {
-          await selectModelCall((selectedModelCall ?? selectedModelCallFallback)!.id, { preserveReturnContext: true });
+        const targetModelCallId = chooseLogItemIdAfterRefresh(modelData.modelCalls, pendingModelCallIdRef.current, selectedModelCallId);
+        if (targetModelCallId) {
+          await selectModelCall(targetModelCallId, { preserveReturnContext: true });
           pendingModelCallIdRef.current = null;
         } else {
           setSelected(null);
@@ -268,11 +284,10 @@ export const LogsView: FC = () => {
           setModelReturnContext(null);
         }
       } else if (activeTab === 'incidents') {
-        const selectedIncident = selectedIncidentId
-          ? incidentData.incidents.find(incident => incident.id === selectedIncidentId)
-          : null;
-        if (selectedIncident) {
-          await selectIncident(selectedIncident.id);
+        const targetIncidentId = chooseLogItemIdAfterRefresh(incidentData.incidents, pendingIncidentIdRef.current, selectedIncidentId);
+        if (targetIncidentId) {
+          await selectIncident(targetIncidentId);
+          pendingIncidentIdRef.current = null;
         } else {
           setSelected(null);
           setSelectedModelCallDetail(null);
@@ -392,6 +407,7 @@ export const LogsView: FC = () => {
   }
 
   async function openIncident(incidentId: string) {
+    pendingIncidentIdRef.current = incidentId;
     setActiveTab('incidents');
     await selectIncident(incidentId);
   }
@@ -585,8 +601,6 @@ export const LogsView: FC = () => {
           <PipelineDetailView
             pipeline={selected}
             language={language}
-            availableModelCallIds={availableModelCallIds}
-            availableIncidentIds={availableIncidentIds}
             onOpenModelCall={(modelCallId, pipelineId) => void openModelCall(modelCallId, pipelineId)}
             onOpenIncident={(incidentId) => void openIncident(incidentId)}
             onDelete={() => void deleteSelected()}
@@ -642,6 +656,7 @@ const ModelCallItem: FC<{ call: ModelCallRecord; language: Language; selected: b
 
 const IncidentItem: FC<{ incident: PipelineIncident; language: Language; selected: boolean; onOpen: () => void }> = ({ incident, language, selected, onOpen }) => (
   <button
+    id={domId('incident-list', incident.id)}
     type="button"
     onClick={onOpen}
     className={`w-full rounded-md border p-3 text-left transition ${
@@ -815,12 +830,10 @@ const BenchmarkStagePanel: FC<{ summary: BenchmarkScenarioSummary }> = ({ summar
 const PipelineDetailView: FC<{
   pipeline: PipelineDetail;
   language: Language;
-  availableModelCallIds: Set<string>;
-  availableIncidentIds: Set<string>;
   onOpenModelCall: (modelCallId: string, pipelineId: string) => void;
   onOpenIncident: (incidentId: string) => void;
   onDelete: () => void;
-}> = ({ pipeline, language, availableModelCallIds, availableIncidentIds, onOpenModelCall, onOpenIncident, onDelete }) => {
+}> = ({ pipeline, language, onOpenModelCall, onOpenIncident, onDelete }) => {
   const summaryJson = pipeline.summary ? JSON.stringify(pipeline.summary, null, 2) : '';
   const metadataJson = pipeline.metadata ? JSON.stringify(pipeline.metadata, null, 2) : '';
   return (
@@ -856,8 +869,6 @@ const PipelineDetailView: FC<{
       <Timeline
         events={pipeline.events}
         language={language}
-        availableModelCallIds={availableModelCallIds}
-        availableIncidentIds={availableIncidentIds}
         onOpenModelCall={onOpenModelCall}
         onOpenIncident={onOpenIncident}
       />
@@ -870,11 +881,9 @@ const PipelineDetailView: FC<{
 const Timeline: FC<{
   events: PipelineEvent[];
   language: Language;
-  availableModelCallIds: Set<string>;
-  availableIncidentIds: Set<string>;
   onOpenModelCall: (modelCallId: string, pipelineId: string) => void;
   onOpenIncident: (incidentId: string) => void;
-}> = ({ events, language, availableModelCallIds, availableIncidentIds, onOpenModelCall, onOpenIncident }) => (
+}> = ({ events, language, onOpenModelCall, onOpenIncident }) => (
   <div className="rounded-md border border-slate-800 bg-slate-950/70 p-4">
     <div className="mb-4 text-xs font-bold uppercase tracking-widest text-slate-500">Timeline</div>
     <div className="space-y-3">
@@ -882,8 +891,6 @@ const Timeline: FC<{
         const modelRef = getModelCallRef(event);
         const incidentRef = getIncidentRef(event);
         const transcriptText = getTranscriptText(event);
-        const canOpenModelCall = modelRef ? availableModelCallIds.has(modelRef.modelCallId) : false;
-        const canOpenIncident = incidentRef ? availableIncidentIds.has(incidentRef.incidentId) : false;
         return (
           <div key={event.id} className="grid grid-cols-[84px_minmax(0,1fr)] gap-3">
             <div className="font-mono text-[11px] text-slate-500">{formatDateShort(event.ts, language)}</div>
@@ -901,29 +908,25 @@ const Timeline: FC<{
                   <span>{modelRef.status}</span>
                   <span>in {modelRef.inputChars ?? 0}</span>
                   <span>out {modelRef.outputChars ?? 0}</span>
-                  {canOpenModelCall ? (
-                    <button
-                      type="button"
-                      onClick={() => onOpenModelCall(modelRef.modelCallId, event.pipelineId)}
-                      className="rounded-md border border-indigo-500/40 px-2 py-1 text-[11px] font-semibold text-indigo-200 transition hover:bg-indigo-500/10"
-                    >
-                      {language === 'zh' ? '查看模型调用' : 'Open model call'}
-                    </button>
-                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => onOpenModelCall(modelRef.modelCallId, event.pipelineId)}
+                    className="rounded-md border border-indigo-500/40 px-2 py-1 text-[11px] font-semibold text-indigo-200 transition hover:bg-indigo-500/10"
+                  >
+                    {language === 'zh' ? '查看模型调用' : 'Open model call'}
+                  </button>
                 </div>
               ) : incidentRef ? (
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-400">
                   <span>{incidentRef.reason || 'incident'}</span>
                   <span>{incidentRef.severity}</span>
-                  {canOpenIncident ? (
-                    <button
-                      type="button"
-                      onClick={() => onOpenIncident(incidentRef.incidentId)}
-                      className="rounded-md border border-indigo-500/40 px-2 py-1 text-[11px] font-semibold text-indigo-200 transition hover:bg-indigo-500/10"
-                    >
-                      {language === 'zh' ? '查看异常复盘' : 'Open incident'}
-                    </button>
-                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => onOpenIncident(incidentRef.incidentId)}
+                    className="rounded-md border border-indigo-500/40 px-2 py-1 text-[11px] font-semibold text-indigo-200 transition hover:bg-indigo-500/10"
+                  >
+                    {language === 'zh' ? '查看异常复盘' : 'Open incident'}
+                  </button>
                 </div>
               ) : event.message || event.detail ? (
                 <div className="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-slate-400">{event.message || event.detail}</div>
@@ -933,6 +936,7 @@ const Timeline: FC<{
                   {transcriptText}
                 </div>
               ) : null}
+              <EventStructuredMetadata event={event} language={language} />
               {event.timings?.length ? (
                 <EventTimings eventId={event.id} timings={event.timings} />
               ) : null}
@@ -967,6 +971,84 @@ const EventTimings: FC<{ eventId: string; timings: TaskTiming[] }> = ({ eventId,
     </div>
   );
 };
+
+const EventStructuredMetadata: FC<{ event: PipelineEvent; language: Language }> = ({ event, language }) => {
+  const preRouterChecks = getPreRouterChecks(event);
+  const memoryHits = getMemoryHitGroups(event);
+  if (preRouterChecks.length) {
+    return <PreRouterCheckList checks={preRouterChecks} language={language} />;
+  }
+  if (memoryHits.memories.length || memoryHits.ambientMemories.length || event.title === 'memory.hit_list') {
+    return <MemoryHitList memories={memoryHits.memories} ambientMemories={memoryHits.ambientMemories} language={language} />;
+  }
+  return null;
+};
+
+const PreRouterCheckList: FC<{ checks: PreRouterCheck[]; language: Language }> = ({ checks, language }) => (
+  <div className="mt-2 overflow-hidden rounded-md border border-slate-800 bg-slate-900/60">
+    <div className="border-b border-slate-800 px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-slate-500">
+      {language === 'zh' ? 'Pre-router 检查列表' : 'Pre-router checks'}
+    </div>
+    <div className="divide-y divide-slate-800">
+      {checks.map((check, index) => (
+        <div key={`${check.layer}-${check.rule}-${index}`} className="grid gap-2 px-3 py-2 text-xs md:grid-cols-[72px_1fr_auto] md:items-center">
+          <div className="flex items-center gap-2">
+            <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold ${check.matched ? 'bg-emerald-500/15 text-emerald-300' : 'bg-slate-800 text-slate-400'}`}>
+              {check.layer}
+            </span>
+            <span className={check.matched ? 'text-emerald-300' : 'text-slate-500'}>{check.matched ? 'matched' : 'missed'}</span>
+          </div>
+          <div className="min-w-0">
+            <div className="break-all font-semibold text-slate-200">{check.rule}</div>
+            {check.reason ? <div className="mt-0.5 break-words text-[11px] text-slate-500">{check.reason}</div> : null}
+          </div>
+          <div className="font-mono text-[11px] text-slate-500">{formatDurationMs(check.durationMs)}</div>
+        </div>
+      ))}
+    </div>
+  </div>
+);
+
+const MemoryHitList: FC<{ memories: MemoryHitItem[]; ambientMemories: MemoryHitItem[]; language: Language }> = ({ memories, ambientMemories, language }) => (
+  <div className="mt-2 space-y-2">
+    <MemoryHitGroup
+      title={language === 'zh' ? '命中记忆' : 'Memory hits'}
+      emptyText={language === 'zh' ? '无普通记忆命中' : 'No memory hits'}
+      memories={memories}
+    />
+    <MemoryHitGroup
+      title={language === 'zh' ? 'Ambient 记忆' : 'Ambient memories'}
+      emptyText={language === 'zh' ? '无 Ambient 记忆' : 'No ambient memories'}
+      memories={ambientMemories}
+    />
+  </div>
+);
+
+const MemoryHitGroup: FC<{ title: string; emptyText: string; memories: MemoryHitItem[] }> = ({ title, emptyText, memories }) => (
+  <div className="overflow-hidden rounded-md border border-slate-800 bg-slate-900/60">
+    <div className="flex items-center justify-between border-b border-slate-800 px-3 py-2">
+      <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">{title}</span>
+      <span className="font-mono text-[11px] text-slate-500">{memories.length}</span>
+    </div>
+    {memories.length ? (
+      <div className="divide-y divide-slate-800">
+        {memories.map((memory, index) => (
+          <div key={`${memory.id}-${index}`} className="px-3 py-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-semibold text-slate-100">{memory.topic || '-'}</span>
+              {memory.status ? <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-300">{memory.status}</span> : null}
+              {memory.baseScore !== undefined ? <span className="text-[11px] text-slate-500">score {memory.baseScore}</span> : null}
+              {memory.impressions !== undefined ? <span className="text-[11px] text-slate-500">seen {memory.impressions}</span> : null}
+            </div>
+            <div className="mt-1 line-clamp-3 whitespace-pre-wrap break-words text-[11px] leading-5 text-slate-400">{memory.content || memory.id}</div>
+          </div>
+        ))}
+      </div>
+    ) : (
+      <div className="px-3 py-2 text-xs text-slate-500">{emptyText}</div>
+    )}
+  </div>
+);
 
 const ModelCallDetailView: FC<{
   detail: ModelCallDetail;
@@ -1150,6 +1232,19 @@ function visibleCount(tab: LogsTab, pipelines: PipelineRun[], modelCalls: ModelC
   return pipelines.length;
 }
 
+function selectedListTarget(
+  tab: LogsTab,
+  selectedIds: { modelCall: string | null; incident: string | null },
+): { prefix: string; id: string } | null {
+  if (tab === 'model' && selectedIds.modelCall) {
+    return { prefix: 'model-call-list', id: selectedIds.modelCall };
+  }
+  if (tab === 'incidents' && selectedIds.incident) {
+    return { prefix: 'incident-list', id: selectedIds.incident };
+  }
+  return null;
+}
+
 function getModelCallRef(event: PipelineEvent): ModelCallRef | null {
   if (event.eventType !== 'model_call') return null;
   const metadata = getRecord(event.metadata);
@@ -1186,6 +1281,53 @@ function getTranscriptText(event: PipelineEvent): string | null {
     ?? stringValue(metadata.command)
     ?? stringValue(metadata.rawTranscript)
     ?? null;
+}
+
+function getPreRouterChecks(event: PipelineEvent): PreRouterCheck[] {
+  if (event.title !== 'pre_router.trace') return [];
+  const metadata = getRecord(event.metadata);
+  const checks = Array.isArray(metadata.checks) ? metadata.checks : [];
+  return checks.flatMap((item): PreRouterCheck[] => {
+    const record = getRecord(item);
+    const layer = stringValue(record.layer);
+    const rule = stringValue(record.rule);
+    const durationMs = numberValue(record.durationMs);
+    if (!layer || !rule || durationMs === undefined) return [];
+    return [{
+      layer,
+      rule,
+      matched: record.matched === true,
+      durationMs,
+      reason: stringValue(record.reason),
+    }];
+  });
+}
+
+function getMemoryHitGroups(event: PipelineEvent): { memories: MemoryHitItem[]; ambientMemories: MemoryHitItem[] } {
+  if (event.title !== 'memory.hit_list') return { memories: [], ambientMemories: [] };
+  const metadata = getRecord(event.metadata);
+  return {
+    memories: readMemoryHits(metadata.memories),
+    ambientMemories: readMemoryHits(metadata.ambientMemories),
+  };
+}
+
+function readMemoryHits(value: unknown): MemoryHitItem[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): MemoryHitItem[] => {
+    const record = getRecord(item);
+    const id = stringValue(record.id);
+    if (!id) return [];
+    return [{
+      id,
+      topic: stringValue(record.topic),
+      status: stringValue(record.status),
+      baseScore: numberValue(record.baseScore),
+      hitCount: numberValue(record.hitCount),
+      impressions: numberValue(record.impressions),
+      content: stringValue(record.content),
+    }];
+  });
 }
 
 function groupTimingsByDetail(timings: TaskTiming[]): Array<{ detail: string; timings: TaskTiming[] }> | null {

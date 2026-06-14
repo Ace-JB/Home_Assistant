@@ -5,11 +5,41 @@ SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ROOT="${PYTHON_SERVICES_ROOT:-data/python_services}"
 SERVICE="${1:-all}"
 COSYVOICE_MODEL_DIR="${COSYVOICE_MODEL_DIR:-$ROOT/models_cache/cosyvoice/Fun-CosyVoice3-0.5B-2512-4bit}"
+QWEN_VLM_MODEL_DIR="${QWEN_VLM_MODEL_DIR:-$ROOT/models_cache/qwen-vlm}"
+QWEN_ROUTER_FAST_MODEL_DIR="${QWEN_ROUTER_FAST_MODEL_DIR:-$ROOT/models_cache/qwen-router/fast}"
+QWEN_ROUTER_REPAIR_MODEL_DIR="${QWEN_ROUTER_REPAIR_MODEL_DIR:-$ROOT/models_cache/qwen-router/repair}"
+QWEN_HF_CACHE_DIR="${QWEN_HF_CACHE_DIR:-$ROOT/models_cache/hf-cache}"
+QWEN_HF_HOME_DIR="${QWEN_HF_HOME_DIR:-$ROOT/models_cache/hf-home}"
+QWEN_HF_XET_CACHE_DIR="${QWEN_HF_XET_CACHE_DIR:-$QWEN_HF_CACHE_DIR/xet}"
+QWEN_REQUIRE_MODELS="${QWEN_REQUIRE_MODELS:-0}"
+QWEN_SETUP="${QWEN_SETUP:-0}"
+QWEN_DOWNLOAD_MODELS="${QWEN_DOWNLOAD_MODELS:-1}"
+QWEN_VLM_REPO="${QWEN_VLM_REPO:-mlx-community/Qwen3-VL-8B-Instruct-4bit}"
+QWEN_ROUTER_FAST_REPO="${QWEN_ROUTER_FAST_REPO:-mlx-community/Qwen2.5-0.5B-Instruct-4bit}"
+QWEN_ROUTER_REPAIR_REPO="${QWEN_ROUTER_REPAIR_REPO:-mlx-community/Qwen2.5-1.5B-Instruct-4bit}"
+QWEN_HF_MAX_WORKERS="${QWEN_HF_MAX_WORKERS:-1}"
+QWEN_HF_TOKEN_FILE="${QWEN_HF_TOKEN_FILE:-$HOME/.cache/huggingface/token}"
+QWEN_HF_DISABLE_XET="${QWEN_HF_DISABLE_XET:-1}"
+QWEN_HF_DOWNLOAD_TIMEOUT="${QWEN_HF_DOWNLOAD_TIMEOUT:-60}"
+QWEN_HF_ETAG_TIMEOUT="${QWEN_HF_ETAG_TIMEOUT:-30}"
+export HF_HOME="${HF_HOME:-$QWEN_HF_HOME_DIR}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-$QWEN_HF_CACHE_DIR}"
+export HF_XET_CACHE="${HF_XET_CACHE:-$QWEN_HF_XET_CACHE_DIR}"
+export HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-$QWEN_HF_DISABLE_XET}"
+export HF_HUB_DOWNLOAD_TIMEOUT="${HF_HUB_DOWNLOAD_TIMEOUT:-$QWEN_HF_DOWNLOAD_TIMEOUT}"
+export HF_HUB_ETAG_TIMEOUT="${HF_HUB_ETAG_TIMEOUT:-$QWEN_HF_ETAG_TIMEOUT}"
+export HF_HUB_ENABLE_HF_TRANSFER="${HF_HUB_ENABLE_HF_TRANSFER:-0}"
 
 services_for() {
   case "$1" in
-    all) printf '%s\n' funasr cosyvoice mdx ;;
-    funasr|cosyvoice|mdx) printf '%s\n' "$1" ;;
+    all)
+      printf '%s\n' funasr cosyvoice mdx
+      if [ "$QWEN_SETUP" = "1" ]; then
+        printf '%s\n' qwen-vlm qwen-router
+      fi
+      ;;
+    models|qwen|qwen-all) printf '%s\n' qwen-router qwen-vlm ;;
+    funasr|cosyvoice|mdx|qwen-vlm|qwen-router) printf '%s\n' "$1" ;;
     *) echo "Unknown service: $1" >&2; exit 2 ;;
   esac
 }
@@ -29,7 +59,142 @@ ensure_cosyvoice_model() {
   fi
 }
 
-mkdir -p "$ROOT/envs" "$ROOT/models_cache/funasr" "$ROOT/models_cache/cosyvoice" "$ROOT/models_cache/mdx" "$ROOT/run"
+ensure_mlx_model_dir() {
+  local label="$1"
+  local dir="$2"
+  local setup_target="$3"
+  local missing=()
+  if mlx_model_complete "$dir"; then
+    return
+  fi
+  for file in config.json tokenizer.json; do
+    if [ ! -f "$dir/$file" ]; then
+      missing+=("$file")
+    fi
+  done
+
+  shopt -s nullglob
+  local weights=("$dir"/*.safetensors "$dir"/*.npz "$dir"/*.gguf)
+  shopt -u nullglob
+  if [ "${#weights[@]}" -eq 0 ]; then
+    missing+=("*.safetensors|*.npz|*.gguf")
+  fi
+
+  if [ "${#missing[@]}" -gt 0 ]; then
+    echo "$label model is incomplete at $dir" >&2
+    echo "Missing files: ${missing[*]}" >&2
+    if [ "$QWEN_REQUIRE_MODELS" = "1" ]; then
+      echo "Place the model files in the fixed directory, then rerun: bun run python-services:setup $setup_target" >&2
+      exit 1
+    fi
+    echo "Continuing dependency setup. Place model files before starting $setup_target, or set QWEN_REQUIRE_MODELS=1 to make setup fail on missing models." >&2
+  fi
+}
+
+mlx_model_complete() {
+  local dir="$1"
+  [ -f "$dir/config.json" ] || return 1
+  [ -f "$dir/tokenizer.json" ] || return 1
+  shopt -s nullglob
+  local weights=("$dir"/*.safetensors "$dir"/*.npz "$dir"/*.gguf)
+  shopt -u nullglob
+  [ "${#weights[@]}" -gt 0 ]
+}
+
+download_hf_model() {
+  local label="$1"
+  local repo="$2"
+  local dir="$3"
+  local python_bin="$4"
+
+  if mlx_model_complete "$dir"; then
+    echo "$label model already exists at $dir"
+    return
+  fi
+  if [ "$QWEN_DOWNLOAD_MODELS" != "1" ]; then
+    echo "Skipping $label model download because QWEN_DOWNLOAD_MODELS=$QWEN_DOWNLOAD_MODELS"
+    return
+  fi
+  if [ -z "$repo" ]; then
+    echo "Skipping $label model download because repository id is empty." >&2
+    return
+  fi
+
+  echo "Downloading $label model from Hugging Face: $repo -> $dir"
+  echo "Using Hugging Face cache: $QWEN_HF_CACHE_DIR"
+  "$python_bin" - "$repo" "$dir" "$QWEN_HF_CACHE_DIR" <<'PY'
+import os
+import shutil
+import sys
+from pathlib import Path
+from huggingface_hub import snapshot_download
+
+repo_id = sys.argv[1]
+local_dir = sys.argv[2]
+cache_dir = sys.argv[3]
+
+def read_token_file(path: str | None) -> str | None:
+    if not path:
+        return None
+    try:
+        token = Path(path).expanduser().read_text(encoding="utf-8").strip()
+        return token or None
+    except FileNotFoundError:
+        return None
+
+token = (
+    os.environ.get("QWEN_HF_TOKEN")
+    or os.environ.get("HF_TOKEN")
+    or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    or read_token_file(os.environ.get("QWEN_HF_TOKEN_FILE"))
+    or read_token_file("~/.cache/huggingface/token")
+    or read_token_file("~/.huggingface/token")
+)
+
+def materialize_snapshot(snapshot: str, destination: str) -> None:
+    source_root = Path(snapshot)
+    destination_root = Path(destination)
+    destination_root.mkdir(parents=True, exist_ok=True)
+
+    for source in source_root.rglob("*"):
+        if not source.is_file():
+            continue
+        relative = source.relative_to(source_root)
+        target = destination_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() or target.is_symlink():
+            if target.is_file() or target.is_symlink():
+                target.unlink()
+            else:
+                raise RuntimeError(f"Cannot replace non-file model path: {target}")
+        try:
+            os.symlink(source.resolve(), target)
+        except OSError:
+            shutil.copy2(source, target)
+
+
+snapshot_path = snapshot_download(
+    repo_id=repo_id,
+    cache_dir=cache_dir,
+    token=token,
+    max_workers=int(os.environ.get("QWEN_HF_MAX_WORKERS", "1")),
+)
+materialize_snapshot(snapshot_path, local_dir)
+PY
+}
+
+mkdir -p \
+  "$ROOT/envs" \
+  "$ROOT/models_cache/funasr" \
+  "$ROOT/models_cache/cosyvoice" \
+  "$ROOT/models_cache/mdx" \
+  "$QWEN_HF_CACHE_DIR" \
+  "$QWEN_HF_HOME_DIR" \
+  "$QWEN_HF_XET_CACHE_DIR" \
+  "$QWEN_VLM_MODEL_DIR" \
+  "$QWEN_ROUTER_FAST_MODEL_DIR" \
+  "$QWEN_ROUTER_REPAIR_MODEL_DIR" \
+  "$ROOT/run"
 
 for service in $(services_for "$SERVICE"); do
   env_dir="$ROOT/envs/${service}_env"
@@ -41,5 +206,15 @@ for service in $(services_for "$SERVICE"); do
   "$env_dir/bin/python" -m pip install -r "$requirements"
   if [ "$service" = "cosyvoice" ]; then
     ensure_cosyvoice_model
+  fi
+  if [ "$service" = "qwen-vlm" ]; then
+    download_hf_model "qwen-vlm" "$QWEN_VLM_REPO" "$QWEN_VLM_MODEL_DIR" "$env_dir/bin/python"
+    ensure_mlx_model_dir "qwen-vlm" "$QWEN_VLM_MODEL_DIR" "qwen-vlm"
+  fi
+  if [ "$service" = "qwen-router" ]; then
+    download_hf_model "qwen-router fast" "$QWEN_ROUTER_FAST_REPO" "$QWEN_ROUTER_FAST_MODEL_DIR" "$env_dir/bin/python"
+    download_hf_model "qwen-router repair" "$QWEN_ROUTER_REPAIR_REPO" "$QWEN_ROUTER_REPAIR_MODEL_DIR" "$env_dir/bin/python"
+    ensure_mlx_model_dir "qwen-router fast" "$QWEN_ROUTER_FAST_MODEL_DIR" "qwen-router"
+    ensure_mlx_model_dir "qwen-router repair" "$QWEN_ROUTER_REPAIR_MODEL_DIR" "qwen-router"
   fi
 done

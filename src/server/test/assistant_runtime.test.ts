@@ -10,6 +10,12 @@ function createRuntime(overrides: Partial<ConstructorParameters<typeof Assistant
         startFunASR: async () => {
             calls.push('startFunASR');
         },
+        startRouterModel: async () => {
+            calls.push('startRouterModel');
+        },
+        startMainModel: async () => {
+            calls.push('startMainModel');
+        },
         startCosyVoice: async () => {
             calls.push('startCosyVoice');
         },
@@ -53,12 +59,12 @@ describe('AssistantRuntimeService', () => {
         });
     });
 
-    test('starts minimal runtime by default without optional services', async () => {
+    test('starts minimal runtime with core model services by default', async () => {
         const { service, calls } = createRuntime();
 
         const status = await service.start();
 
-        expect(calls).toEqual(['startFunASR', 'startMonitor:audio']);
+        expect(calls).toEqual(['startFunASR', 'startRouterModel', 'startMainModel', 'startMonitor:audio']);
         expect(status).toMatchObject({
             status: 'running',
             mode: 'minimal',
@@ -67,6 +73,8 @@ describe('AssistantRuntimeService', () => {
             actions: ['stop'],
         });
         expect(status.tasks.find(task => task.id === 'webrtc')?.status).toBe('skipped');
+        expect(status.tasks.find(task => task.id === 'qwen-router')?.status).toBe('ready');
+        expect(status.tasks.find(task => task.id === 'qwen-vlm')?.status).toBe('ready');
         expect(status.tasks.find(task => task.id === 'cosyvoice')?.status).toBe('skipped');
         expect(status.tasks.find(task => task.id === 'voice-separation')?.status).toBe('skipped');
         expect(status.services.find(service => service.id === 'webrtc')?.status).toBe('stopped');
@@ -81,6 +89,8 @@ describe('AssistantRuntimeService', () => {
 
         expect(calls).toEqual([
             'startFunASR',
+            'startRouterModel',
+            'startMainModel',
             'startCosyVoice',
             'startVoiceSeparation',
             'startWebRTC',
@@ -106,6 +116,32 @@ describe('AssistantRuntimeService', () => {
         expect(status.lastError).toBe('camera unavailable');
         expect(calls).toEqual([
             'startFunASR',
+            'startRouterModel',
+            'startMainModel',
+            'stopMonitor',
+            'stopRealtimeSocket',
+            'stopWebRTC',
+            'stopPythonServices',
+        ]);
+    });
+
+    test('fails runtime startup when a core model service fails', async () => {
+        const { service, calls } = createRuntime({
+            startMainModel: async () => {
+                calls.push('startMainModel');
+                throw new Error('qwen-vlm unavailable');
+            },
+        });
+
+        const status = await service.start();
+
+        expect(status.status).toBe('error');
+        expect(status.lastError).toBe('qwen-vlm unavailable');
+        expect(status.tasks.find(task => task.id === 'qwen-vlm')?.status).toBe('failed');
+        expect(calls).toEqual([
+            'startFunASR',
+            'startRouterModel',
+            'startMainModel',
             'stopMonitor',
             'stopRealtimeSocket',
             'stopWebRTC',
@@ -122,6 +158,8 @@ describe('AssistantRuntimeService', () => {
 
         expect(calls).toEqual([
             'startFunASR',
+            'startRouterModel',
+            'startMainModel',
             'startMonitor:audio',
             'stopMonitor',
             'stopRealtimeSocket',

@@ -11,12 +11,12 @@ type ModelCallContext = {
     benchmark?: unknown;
 };
 
-type GenerateLike = (options: any) => Promise<{ text: string }>;
-type StreamLike = (options: any) => Promise<{ textStream: AsyncIterable<string> }>;
+type GenerateLike = (options: any) => Promise<{ text: string; metadata?: unknown }>;
+type StreamLike = (options: any) => Promise<{ textStream: AsyncIterable<string>; metadata?: unknown }>;
 
 const seenModels = new Set<string>();
 
-export async function generateTextWithRuntimeLog<T extends { text: string }>(
+export async function generateTextWithRuntimeLog<T extends { text: string; metadata?: unknown }>(
     generate: (options: any) => Promise<T>,
     options: any,
     context: ModelCallContext,
@@ -39,6 +39,7 @@ export async function generateTextWithRuntimeLog<T extends { text: string }>(
             outputChars: result.text?.length ?? 0,
             outputPreview: result.text ?? '',
             durationMs,
+            modelMetrics: await resolveModelMetrics(result.metadata),
         }, requestLog.id);
         if (coldStart && context.pipelineId) {
             pipelineLogs.appendEvent({
@@ -90,6 +91,7 @@ export async function streamTextWithRuntimeLog(
                 requestLogId: requestLog.id,
                 coldStart,
                 context,
+                metadata: result.metadata,
             }),
         };
     } catch (error) {
@@ -112,6 +114,7 @@ async function* observeTextStream(
         requestLogId: string;
         coldStart: boolean;
         context: ModelCallContext;
+        metadata?: unknown;
     },
 ): AsyncIterable<string> {
     let output = '';
@@ -127,6 +130,7 @@ async function* observeTextStream(
             outputChars: output.length,
             outputPreview: output,
             durationMs,
+            modelMetrics: await resolveModelMetrics(input.metadata),
         }, input.requestLogId);
         if (input.coldStart && input.context.pipelineId) {
             pipelineLogs.appendEvent({
@@ -181,9 +185,20 @@ function appendModelCall(
             traceId: context.traceId ?? null,
             userCommand: context.userCommand ?? null,
             coldStart: metadata.coldStart ?? null,
+            modelMetrics: metadata.modelMetrics ?? null,
             benchmark: context.benchmark ?? null,
         },
     });
+}
+
+async function resolveModelMetrics(value: unknown): Promise<Record<string, unknown> | null> {
+    try {
+        const resolved = value instanceof Promise ? await value : value;
+        if (!resolved || typeof resolved !== 'object' || Array.isArray(resolved)) return null;
+        return resolved as Record<string, unknown>;
+    } catch (error) {
+        return { metadataError: getErrorMessage(error) };
+    }
 }
 
 function resolvePipelineId(context: ModelCallContext): string | undefined {

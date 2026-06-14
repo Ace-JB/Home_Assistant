@@ -350,6 +350,10 @@ describe('MemoryDatabase', () => {
     });
 
     expect(saved.status).toBe('warm');
+    expect(saved.impressions).toBe(0);
+    expect(saved.positiveFeedbackCount).toBe(0);
+    expect(saved.negativeFeedbackCount).toBe(0);
+    expect(saved.ignoredFeedbackCount).toBe(0);
 
     db.close();
   });
@@ -386,6 +390,7 @@ describe('MemoryDatabase', () => {
 
     expect(results[0]?.id).toBe(relevant.id);
     expect(db.getPrunedMemory(relevant.id)?.hitCount).toBe(1);
+    expect(db.getPrunedMemory(relevant.id)?.impressions).toBe(1);
 
     db.close();
   });
@@ -535,31 +540,43 @@ describe('MemoryDatabase', () => {
 
   test('should supplement semantic results with recent memories in hybrid mode', () => {
     const db = createTempMemory();
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map(String).join(' '));
+    };
 
-    const olderRelevant = db.savePrunedMemory({
-      source_conversation_id: 'older-relevant',
-      content: 'The user likes warm light while cooking.',
-      topic: 'kitchen lighting',
-      base_score: 3,
-      created_at: new Date('2026-05-15T10:00:00.000Z').getTime(),
-    });
-    const recentUnrelated = db.savePrunedMemory({
-      source_conversation_id: 'recent-unrelated',
-      content: '用户询问了辣椒炒肉和番茄炒蛋的制作方法。',
-      topic: '家常菜的做法',
-      base_score: 3,
-      created_at: new Date('2026-05-21T10:00:00.000Z').getTime(),
-    });
+    try {
+      const olderRelevant = db.savePrunedMemory({
+        source_conversation_id: 'older-relevant',
+        content: 'The user likes warm light while cooking.',
+        topic: 'kitchen lighting',
+        base_score: 3,
+        created_at: new Date('2026-05-15T10:00:00.000Z').getTime(),
+      });
+      const recentUnrelated = db.savePrunedMemory({
+        source_conversation_id: 'recent-unrelated',
+        content: '用户询问了辣椒炒肉和番茄炒蛋的制作方法。',
+        topic: '家常菜的做法',
+        base_score: 3,
+        created_at: new Date('2026-05-21T10:00:00.000Z').getTime(),
+      });
 
-    const results = db.getContextMemories({
-      query: 'light',
-      mode: 'hybrid',
-      limit: 2,
-    });
+      const results = db.getContextMemories({
+        query: 'light',
+        mode: 'hybrid',
+        limit: 2,
+      });
 
-    expect(results.map(item => item.id)).toEqual([olderRelevant.id, recentUnrelated.id]);
-
-    db.close();
+      expect(results.map(item => item.id)).toEqual([olderRelevant.id, recentUnrelated.id]);
+      const injectedLog = logs.find(line => line.includes('[Memory] Injected memories:'));
+      expect(injectedLog).toContain('"retrievalReason":"recent_fallback"');
+      expect(injectedLog).toContain('"relevanceScore":0');
+      expect(injectedLog).toContain('"gateRelevanceScore":1');
+    } finally {
+      console.log = originalLog;
+      db.close();
+    }
   });
 
   test('should create, approve, and reject memory candidates', () => {
@@ -610,7 +627,31 @@ describe('MemoryDatabase', () => {
     db.close();
   });
 
-  test('should filter cold memories from semantic retrieval but include them in recent recall', () => {
+  test('should score ambient freshness from creation time instead of ordinary access time', () => {
+    const db = createTempMemory();
+    const oldPreference = db.savePrunedMemory({
+      source_conversation_id: 'old-ambient-style',
+      content: 'The user prefers brief direct style when discussing lights.',
+      topic: 'assistant style',
+      base_score: 5,
+      created_at: Date.now() - 90 * 24 * 60 * 60 * 1000,
+    });
+    const newerPreference = db.savePrunedMemory({
+      source_conversation_id: 'newer-ambient-style',
+      content: 'The user prefers brief direct style when discussing music.',
+      topic: 'assistant style',
+      base_score: 5,
+      created_at: Date.now() - 2 * 24 * 60 * 60 * 1000,
+    });
+
+    expect(db.getContextMemories({ query: 'lights', limit: 1 })[0]?.id).toBe(oldPreference.id);
+    expect(db.getPrunedMemory(oldPreference.id)!.lastAccessedAt).toBeGreaterThan(oldPreference.lastAccessedAt);
+    expect(db.getAmbientMemories({ limit: 1 })[0]?.id).toBe(newerPreference.id);
+
+    db.close();
+  });
+
+  test('should score cold memories instead of filtering them from semantic retrieval', () => {
     const db = createTempMemory();
     const cold = db.savePrunedMemory({
       source_conversation_id: 'cold-source',
@@ -621,8 +662,47 @@ describe('MemoryDatabase', () => {
       created_at: Date.now(),
     });
 
-    expect(db.getContextMemories({ query: 'green tea dinner', limit: 5 })).toEqual([]);
+    expect(db.getContextMemories({ query: 'green tea dinner', limit: 5 })[0]?.id).toBe(cold.id);
     expect(db.getContextMemories({ query: 'recent memories', mode: 'recent_recall', limit: 1 })[0]?.id).toBe(cold.id);
+
+    db.close();
+  });
+
+  test('should retrieve ambient memories without query relevance gating', () => {
+    const db = createTempMemory();
+    const createdAt = Date.now() - 20 * 24 * 60 * 60 * 1000;
+    const style = db.savePrunedMemory({
+      source_conversation_id: 'ambient-style',
+      content: 'The user prefers concise answers and likes to be called 主人.',
+      topic: 'assistant style',
+      user_state: 'prefers concise answers',
+      behavior_signal: 'global preference',
+      base_score: 5,
+      created_at: createdAt,
+    });
+
+    expect(db.getAmbientMemories({ limit: 1 })[0]?.id).toBe(style.id);
+    const afterAmbient = db.getPrunedMemory(style.id);
+    expect(afterAmbient?.impressions).toBe(1);
+    expect(afterAmbient?.hitCount).toBe(0);
+    expect(afterAmbient?.lastAccessedAt).toBe(style.lastAccessedAt);
+
+    db.close();
+  });
+
+  test('should record explicit positive negative and ignored memory feedback', () => {
+    const db = createTempMemory();
+    const saved = db.savePrunedMemory({
+      source_conversation_id: 'feedback-source',
+      content: 'The user prefers direct answers.',
+      topic: 'assistant style',
+      base_score: 4,
+    });
+
+    expect(db.recordMemoryFeedback({ memory_id: saved.id, feedback: 'positive' })?.positiveFeedbackCount).toBe(1);
+    expect(db.recordMemoryFeedback({ memory_id: saved.id, feedback: 'negative' })?.negativeFeedbackCount).toBe(1);
+    expect(db.recordMemoryFeedback({ memory_id: saved.id, feedback: 'ignored' })?.ignoredFeedbackCount).toBe(1);
+    expect(db.recordMemoryFeedback({ memory_id: 'missing', feedback: 'positive' })).toBeNull();
 
     db.close();
   });
@@ -648,6 +728,7 @@ describe('MemoryDatabase', () => {
     expect(db.maintainMemoryLifecycle(now)).toBe(1);
     expect(db.getPrunedMemory(stale.id)?.status).toBe('cold');
     expect(db.getPrunedMemory(important.id)?.status).toBe('warm');
+    expect(db.getContextMemories({ query: 'low value topic', limit: 1 })[0]?.id).toBe(stale.id);
 
     db.close();
   });

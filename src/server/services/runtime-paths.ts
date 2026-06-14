@@ -1,6 +1,9 @@
 import { join, resolve } from 'path';
 
 export const DEFAULT_COSYVOICE_MODEL_DIR = join('data', 'python_services', 'models_cache', 'cosyvoice', 'Fun-CosyVoice3-0.5B-2512-4bit');
+export const DEFAULT_QWEN_VLM_MODEL_DIR = join('data', 'python_services', 'models_cache', 'qwen-vlm');
+export const DEFAULT_QWEN_ROUTER_FAST_MODEL_DIR = join('data', 'python_services', 'models_cache', 'qwen-router', 'fast');
+export const DEFAULT_QWEN_ROUTER_REPAIR_MODEL_DIR = join('data', 'python_services', 'models_cache', 'qwen-router', 'repair');
 
 export function resolveRuntimePath(envKey: string, defaultPath: string): string {
     const configured = process.env[envKey];
@@ -26,4 +29,16 @@ export function getPythonServicesScriptRoot(): string {
 
 export function getCosyVoiceModelDir(): string {
     return resolveRuntimePath('COSYVOICE_MODEL_DIR', DEFAULT_COSYVOICE_MODEL_DIR);
+}
+
+export function getQwenVlmModelDir(): string {
+    return resolveRuntimePath('QWEN_VLM_MODEL_DIR', DEFAULT_QWEN_VLM_MODEL_DIR);
+}
+
+export function getQwenRouterFastModelDir(): string {
+    return resolveRuntimePath('QWEN_ROUTER_FAST_MODEL_DIR', DEFAULT_QWEN_ROUTER_FAST_MODEL_DIR);
+}
+
+export function getQwenRouterRepairModelDir(): string {
+    return resolveRuntimePath('QWEN_ROUTER_REPAIR_MODEL_DIR', DEFAULT_QWEN_ROUTER_REPAIR_MODEL_DIR);
 }

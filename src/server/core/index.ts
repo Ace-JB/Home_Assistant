@@ -35,6 +35,8 @@ import {
   getDashboardStatus,
   startDashboardManagedCosyVoice,
   startDashboardManagedFunASR,
+  startDashboardManagedMainModel,
+  startDashboardManagedRouterModel,
   startDashboardManagedVoiceSeparation,
   startDashboardService,
   stopAllDashboardManagedServices,
@@ -42,6 +44,11 @@ import {
 } from "@server/services/DashboardService";
 import { benchmarkService, type BenchmarkRunInput, type BenchmarkScenarioId } from "@server/services/BenchmarkService";
 import { pipelineLogs } from "@server/services/PipelineLogService";
+import {
+  applyAssistantVoiceConfig,
+  getAssistantVoiceConfig,
+  readAssistantVoiceBody,
+} from "@server/services/AssistantConfigService";
 import {
   AssistantRuntimeService,
   type AssistantRuntimeOptionalService,
@@ -73,6 +80,8 @@ const assistantRuntime = getAssistantRuntimeService(() => new AssistantRuntimeSe
   startMonitor,
   stopMonitor,
   startFunASR: startDashboardManagedFunASR,
+  startRouterModel: startDashboardManagedRouterModel,
+  startMainModel: startDashboardManagedMainModel,
   startCosyVoice: startDashboardManagedCosyVoice,
   startVoiceSeparation: startDashboardManagedVoiceSeparation,
   stopPythonServices: stopAllDashboardManagedServices,
@@ -143,13 +152,32 @@ const server = serve<SocketClientData>({
 
     "/api/dashboard/status": {
       async GET() {
-        return Response.json(await getDashboardStatus());
+        try {
+          return Response.json(await getDashboardStatus());
+        } catch (error) {
+          console.error("[Dashboard] status failed:", error);
+          return Response.json({ error: error instanceof Error ? error.message : "dashboard status failed" }, { status: 500 });
+        }
       },
     },
 
     "/api/assistant-runtime/status": {
       GET() {
         return Response.json(assistantRuntime.getStatus());
+      },
+    },
+
+    "/api/assistant/config": {
+      GET() {
+        return Response.json({ config: getAssistantVoiceConfig() });
+      },
+      async POST(req: Request) {
+        const body = await req.json().catch(() => null);
+        try {
+          return Response.json({ config: await applyAssistantVoiceConfig(readAssistantVoiceBody(body)) });
+        } catch (error) {
+          return Response.json({ error: error instanceof Error ? error.message : "invalid assistant config" }, { status: 400 });
+        }
       },
     },
 

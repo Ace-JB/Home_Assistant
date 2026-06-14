@@ -1,0 +1,46 @@
+# .understandignore - patterns for files/dirs to exclude from architecture analysis
+# Syntax: gitignore-style globs.
+
+# Dependencies and build output
+node_modules/
+dist/
+build/
+out/
+coverage/
+.cache/
+.turbo/
+
+# Local/private runtime data
+.env
+.env.*
+data/
+models/
+recordings/
+
+# Generated reports and media
+test-report.html
+performance-report.json
+*.mp4
+*.mov
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.ico
+
+# Lock files and editor/system files
+*.lock
+bun.lock
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+.DS_Store
+.vscode/
+.idea/
+
+# Internal analysis/cache directories
+.git/
+.codegraph/
+.understand-anything/tmp/
+.understand-anything/.trash-*/

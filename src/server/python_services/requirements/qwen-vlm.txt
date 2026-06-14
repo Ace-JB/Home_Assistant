@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+pillow
+mlx
+mlx-vlm
+huggingface-hub
+hf-transfer

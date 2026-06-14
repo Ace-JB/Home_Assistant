@@ -7,5 +7,6 @@ PORT="${COSYVOICE_PORT:-10102}"
 
 export PYTHON_SERVICES_ROOT="$ROOT"
 export COSYVOICE_MODEL_DIR="${COSYVOICE_MODEL_DIR:-$ROOT/models_cache/cosyvoice/Fun-CosyVoice3-0.5B-2512-4bit}"
+export COSYVOICE_HF_OFFLINE="${COSYVOICE_HF_OFFLINE:-1}"
 
 exec "$ENV_DIR/bin/python" -m uvicorn src.server.python_services.src.cosyvoice_service:app --host 127.0.0.1 --port "$PORT"

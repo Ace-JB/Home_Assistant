@@ -29,6 +29,8 @@ type FunASRHealth = {
 };
 
 const execFileAsync = promisify(execFile);
+const FUNASR_HTTP_BIND_TIMEOUT_MS = 180_000;
+const FUNASR_READY_TIMEOUT_MS = 180_000;
 
 /**
  * HTTP client for the isolated FunASR FastAPI service.
@@ -63,6 +65,7 @@ export class FunASRService {
             this.appendLog('info', 'Starting FunASR HTTP service...');
             try {
                 await runPythonServiceManager(['start', 'funasr']);
+                await this.waitUntilHttpReachable();
                 await this.postJson('/start', {});
                 await this.waitUntilReady();
                 const durationMs = Date.now() - startedAt;
@@ -139,12 +142,22 @@ export class FunASRService {
 
     private async waitUntilReady(): Promise<void> {
         const startedAt = Date.now();
-        while (Date.now() - startedAt < 60_000) {
+        while (Date.now() - startedAt < FUNASR_READY_TIMEOUT_MS) {
             const health = await this.refreshStatus().catch(() => null);
             if (health?.ready) return;
             await Bun.sleep(1000);
         }
-        throw new Error('FunASR HTTP service startup timeout (60s)');
+        throw new Error(`FunASR HTTP service startup timeout (${Math.round(FUNASR_READY_TIMEOUT_MS / 1000)}s)`);
+    }
+
+    private async waitUntilHttpReachable(): Promise<void> {
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < FUNASR_HTTP_BIND_TIMEOUT_MS) {
+            const health = await this.refreshStatus().catch(() => null);
+            if (health) return;
+            await Bun.sleep(1000);
+        }
+        throw new Error(`FunASR HTTP service did not bind within ${Math.round(FUNASR_HTTP_BIND_TIMEOUT_MS / 1000)}s`);
     }
 
     private async refreshStatus(): Promise<FunASRHealth> {
@@ -165,7 +178,7 @@ export class FunASRService {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
-            signal: AbortSignal.timeout(120_000),
+            signal: AbortSignal.timeout(FUNASR_READY_TIMEOUT_MS),
         }).catch(error => {
             throw new Error(`FunASR service is unreachable at ${serviceUrl()}: ${getErrorMessage(error)}`);
         });

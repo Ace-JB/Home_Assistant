@@ -1,5 +1,4 @@
-import { createOllama } from 'ollama-ai-provider';
-import { generateText, streamText, type CoreMessage, type UserContent } from 'ai';
+import type { CoreMessage } from 'ai';
 import { spawn } from 'child_process';
 import { GLOBAL_CONFIG } from '@/global_config';
 import { memory, type ConversationMessage, type DayType, type PrunedMemoryRecord, type TimeBucket } from '@modules/memory';
@@ -19,19 +18,10 @@ import { pipelineLogs } from '@server/services/PipelineLogService';
 import type { TaskTiming } from '@server/services/cosyvoice/types';
 import type { AssistantLanguage } from '@tools/Socket';
 import { visionAttention } from '@server/modules/vision/attention';
+import { mlxModelClient } from '@server/services/model-runtime/MlxModelClient';
 
-const ollama = createOllama({
-    baseURL: GLOBAL_CONFIG.OLLAMA.IP,
-});
-
-const TEXT_MODEL_ID = GLOBAL_CONFIG.OLLAMA.TEXT_MODEL;
-const VISION_MODEL_ID = GLOBAL_CONFIG.OLLAMA.VISION_MODEL;
-const textModel = ollama(TEXT_MODEL_ID, {
-    numCtx: GLOBAL_CONFIG.OLLAMA.TEXT_NUM_CTX,
-});
-const visionModel = ollama(VISION_MODEL_ID, {
-    numCtx: GLOBAL_CONFIG.OLLAMA.VISION_NUM_CTX,
-});
+const TEXT_MODEL_ID = GLOBAL_CONFIG.MODEL_SERVICES.QWEN_VLM_MODEL_ID;
+const VISION_MODEL_ID = GLOBAL_CONFIG.MODEL_SERVICES.QWEN_VLM_MODEL_ID;
 const VISION_IMAGE_MAX_EDGE = 640;
 const VISION_IMAGE_JPEG_Q = 7;
 
@@ -48,9 +38,11 @@ export interface BrainCommandResult {
     shouldRemember: boolean;
 }
 
-type TextGenerate = typeof generateText;
-type TextStream = typeof streamText;
+type TextGenerate = (options: any) => Promise<{ text: string }>;
+type TextStream = (options: any) => Promise<{ textStream: AsyncIterable<string> }>;
 type AnalyzeCommandFn = (input: AnalyzeCommandInput) => Promise<IntentionAnalysis>;
+const defaultGenerateText: TextGenerate = (options: any) => mlxModelClient.generateText(options);
+const defaultStreamText: TextStream = (options: any) => mlxModelClient.streamText(options);
 
 interface BrainProcessDeps {
     analyzeCommand?: AnalyzeCommandFn;
@@ -59,7 +51,8 @@ interface BrainProcessDeps {
     onTextDelta?: (delta: string) => void | Promise<void>;
     pipelineId?: string;
     benchmark?: unknown;
-    memory?: Pick<typeof memory, 'getRecentConversationMessages' | 'getContextMemories'>;
+    memory?: Pick<typeof memory, 'getRecentConversationMessages' | 'getContextMemories'>
+        & Partial<Pick<typeof memory, 'getAmbientMemories'>>;
 }
 
 export interface CameraRecognitionContext {
@@ -95,12 +88,70 @@ export interface CameraRecognitionContext {
     objects?: Array<{ label: string; score: number }>;
 }
 
+function logMemoryHits(input: {
+    pipelineId: string;
+    conversationId?: string;
+    traceId: string;
+    userCommand: string;
+    fetched: boolean;
+    mode: string;
+    query: string;
+    durationMs: number;
+    contextMemories: PrunedMemoryRecord[];
+    ambientMemories: PrunedMemoryRecord[];
+}): void {
+    if (!input.conversationId) return;
+    const memories = input.contextMemories.map(toMemoryHitLogItem);
+    const ambientMemories = input.ambientMemories.map(toMemoryHitLogItem);
+    pipelineLogs.append({
+        category: 'memory',
+        level: 'info',
+        title: 'memory.hit_list',
+        message: `${memories.length} memory hit(s), ${ambientMemories.length} ambient hit(s)`,
+        pipelineId: input.pipelineId,
+        conversationId: input.conversationId,
+        timings: [{
+            key: 'memory_hit_fetch',
+            label: 'Memory hits',
+            durationMs: input.durationMs,
+            detail: `${memories.length} memory / ${ambientMemories.length} ambient`,
+        }],
+        metadata: {
+            conversationId: input.conversationId,
+            pipelineId: input.pipelineId,
+            traceId: input.traceId,
+            userCommand: input.userCommand,
+            fetched: input.fetched,
+            mode: input.mode,
+            query: input.query,
+            resultCount: memories.length,
+            ambientResultCount: ambientMemories.length,
+            memories,
+            ambientMemories,
+        },
+    });
+}
+
+function toMemoryHitLogItem(memory: PrunedMemoryRecord): Record<string, unknown> {
+    return {
+        id: memory.id,
+        topic: memory.topic,
+        status: memory.status,
+        baseScore: memory.baseScore,
+        hitCount: memory.hitCount,
+        impressions: memory.impressions,
+        lastAccessedAt: memory.lastAccessedAt,
+        content: memory.content,
+    };
+}
+
 
 function buildContextPrompt(
     userName: string,
     userCommand: string,
     language: AssistantLanguage = 'zh',
     contextMemories: PrunedMemoryRecord[] = [],
+    ambientMemories: PrunedMemoryRecord[] = [],
     visualSummary?: string,
     memoryRetrieval?: IntentionAnalysis['memoryRetrieval'],
 ): string {
@@ -116,6 +167,17 @@ function buildContextPrompt(
                     : undefined,
             }
             : undefined,
+        ambientMemories: ambientMemories.map(item => ({
+            id: item.id,
+            content: item.content,
+            topic: item.topic,
+            userState: item.userState,
+            behaviorSignal: item.behaviorSignal,
+            interactionResult: item.interactionResult,
+            baseScore: item.baseScore,
+            status: item.status,
+            createdAt: item.createdAt,
+        })),
         approvedMemories: contextMemories.map(item => ({
             id: item.id,
             content: item.content,
@@ -143,6 +205,7 @@ function buildConversationMessages(
     userCommand: string,
     language: AssistantLanguage,
     contextMemories: PrunedMemoryRecord[],
+    ambientMemories: PrunedMemoryRecord[],
     visualSummary: string | undefined,
     recentConversationMessages: ConversationMessage[],
     memoryRetrieval?: IntentionAnalysis['memoryRetrieval'],
@@ -161,6 +224,7 @@ function buildConversationMessages(
                 userCommand,
                 language,
                 contextMemories,
+                ambientMemories,
                 visualSummary,
                 memoryRetrieval,
             ),
@@ -224,17 +288,6 @@ async function prepareVisionImage(image: Buffer | Uint8Array | string): Promise<
     });
 }
 
-function buildUserContent(prompt: string, image?: Buffer | Uint8Array | string): UserContent {
-    if (!image) {
-        return prompt;
-    }
-
-    return [
-        { type: 'text', text: prompt },
-        { type: 'image', image, mimeType: 'image/jpeg' },
-    ];
-}
-
 function summarizeCameraContext(cameraContext?: CameraRecognitionContext): string {
     if (!cameraContext) {
         return JSON.stringify({ cameraRecognition: { confidence: 'unavailable', faces: [] } });
@@ -279,7 +332,7 @@ export class HomeBrain {
     ): Promise<BrainCommandResult> {
         const memoryStore = deps.memory ?? memory;
         const analyze = deps.analyzeCommand ?? analyzeCommand;
-        const generate = deps.generateText ?? generateText;
+        const generate = deps.generateText ?? defaultGenerateText;
         const now = new Date();
         const traceId = createTraceId();
         const pipelineId = deps.pipelineId ?? traceId;
@@ -361,6 +414,7 @@ export class HomeBrain {
                 intent: intention.intent,
                 dialogueAct: intention.dialogueAct,
                 routingAction: intention.routingAction ?? intention.routing?.action,
+                routingDiagnostics: intention.routingDiagnostics,
             },
         });
         const routingAction = intention.routingAction ?? intention.routing?.action;
@@ -431,6 +485,73 @@ export class HomeBrain {
                 shouldRemember: false,
             };
         }
+        if (routingAction === 'ask_clarification') {
+            const clarification = intention.responsePlan?.clarificationQuestion
+                || (language === 'en' ? 'Please confirm before I continue.' : '请先确认一下，我再继续。');
+            if (deps.onTextDelta) {
+                await deps.onTextDelta(clarification);
+            }
+            logPipelineStage('Routing result', {
+                key: 'routing_result',
+                label: 'Routing result',
+                durationMs: 0,
+                detail: 'clarification',
+            }, {
+                message: 'Clarification returned by intent routing',
+                metadata: {
+                    routingAction,
+                    responsePlan: intention.responsePlan,
+                    routingDiagnostics: intention.routingDiagnostics,
+                },
+            });
+            logPipelineStage('Conversation pipeline complete', {
+                key: 'conversation_total',
+                label: 'Total',
+                durationMs: Date.now() - pipelineStartedAt,
+                detail: 'clarification',
+            });
+            completeConversationPipeline('completed', 'clarification');
+            return {
+                text: clarification,
+                shouldRespond: true,
+                shouldEndSession: false,
+                shouldRemember: true,
+            };
+        }
+        if (routingAction === 'execute_device' && intention.intent === 'device_control') {
+            const placeholder = language === 'en'
+                ? 'Device control is not connected yet, so I did not change any device.'
+                : '设备控制还没有接入，所以我没有实际改变任何设备。';
+            if (deps.onTextDelta) {
+                await deps.onTextDelta(placeholder);
+            }
+            logPipelineStage('Routing result', {
+                key: 'routing_result',
+                label: 'Routing result',
+                durationMs: 0,
+                detail: 'device_placeholder',
+            }, {
+                message: 'Device control placeholder returned without tool execution',
+                metadata: {
+                    routingAction,
+                    deviceState: intention.dataPlan?.deviceState,
+                    routingDiagnostics: intention.routingDiagnostics,
+                },
+            });
+            logPipelineStage('Conversation pipeline complete', {
+                key: 'conversation_total',
+                label: 'Total',
+                durationMs: Date.now() - pipelineStartedAt,
+                detail: 'device_placeholder',
+            });
+            completeConversationPipeline('completed', 'device_placeholder');
+            return {
+                text: placeholder,
+                shouldRespond: true,
+                shouldEndSession: false,
+                shouldRemember: true,
+            };
+        }
         const responseCommand = intention.resolvedContext.rewriteQuery || intention.contextResolution?.responseRewrite || intention.resolvedContext.rewrite || userCommand;
         const retrieval = intention.memoryRetrieval;
         const shouldFetchMemory = requiresLongTermMemory;
@@ -438,8 +559,10 @@ export class HomeBrain {
         const memoryQuery = intention.resolvedContext.rewriteQuery || memoryPlan?.query || retrieval.query || intention.contextResolution?.memoryQueryRewrite || responseCommand;
         const dataFetchStartedAt = Date.now();
         const memoryFetchStartedAt = Date.now();
+        const ambientMemoryFetchStartedAt = Date.now();
         const toolFetchStartedAt = Date.now();
-        const [contextMemories, toolOrMcpContext] = await Promise.all([
+        const shouldFetchAmbientMemory = Boolean(memoryStore.getAmbientMemories) && !intention.shouldEndSession;
+        const [contextMemories, ambientMemories, toolOrMcpContext] = await Promise.all([
             shouldFetchMemory && memoryMode !== 'none'
                 ? Promise.resolve(memoryStore.getContextMemories({
                         query: memoryQuery,
@@ -462,6 +585,19 @@ export class HomeBrain {
                         return items;
                     })
                 : Promise.resolve([]),
+            shouldFetchAmbientMemory
+                ? Promise.resolve(memoryStore.getAmbientMemories!({ limit: 3 }))
+                    .then(items => {
+                        recordModelDecision('Brain', 'ambient_memory_fetch_complete', {
+                            pipelineId,
+                            conversationId,
+                            traceId,
+                            durationMs: Date.now() - ambientMemoryFetchStartedAt,
+                            resultCount: items.length,
+                        });
+                        return items;
+                    })
+                : Promise.resolve([]),
             requiresToolsOrMCP
                 ? this.readToolOrMcpContext({
                     responseCommand,
@@ -478,11 +614,23 @@ export class HomeBrain {
                 })
                 : Promise.resolve(undefined),
         ]);
+        logMemoryHits({
+            pipelineId,
+            conversationId,
+            traceId,
+            userCommand,
+            fetched: shouldFetchMemory && memoryMode !== 'none',
+            mode: memoryMode,
+            query: memoryQuery,
+            durationMs: Date.now() - memoryFetchStartedAt,
+            contextMemories,
+            ambientMemories,
+        });
         logPipelineStage('Context data fetch', {
             key: 'context_data_fetch',
             label: 'Context data',
             durationMs: Date.now() - dataFetchStartedAt,
-            detail: `${contextMemories.length} memory item(s)`,
+            detail: `${contextMemories.length} memory item(s), ${ambientMemories.length} ambient item(s)`,
         }, {
             metadata: {
                 memory: {
@@ -490,6 +638,10 @@ export class HomeBrain {
                     mode: memoryMode,
                     query: memoryQuery,
                     resultCount: contextMemories.length,
+                },
+                ambientMemory: {
+                    fetched: shouldFetchAmbientMemory,
+                    resultCount: ambientMemories.length,
                 },
                 toolsOrMCP: requiresToolsOrMCP,
                 vision: Boolean(toolOrMcpContext?.visualSummary),
@@ -501,6 +653,7 @@ export class HomeBrain {
             responseCommand,
             language,
             contextMemories,
+            ambientMemories,
             visualSummary,
             recentConversationMessages,
             retrieval,
@@ -521,6 +674,13 @@ export class HomeBrain {
                 vision: Boolean(toolOrMcpContext?.visualSummary),
             },
             injectedMemories: contextMemories.map(item => ({
+                id: item.id,
+                topic: item.topic,
+                status: item.status,
+                baseScore: item.baseScore,
+                content: item.content,
+            })),
+            ambientMemories: ambientMemories.map(item => ({
                 id: item.id,
                 topic: item.topic,
                 status: item.status,
@@ -631,7 +791,7 @@ export class HomeBrain {
         language: AssistantLanguage,
         image?: Buffer | Uint8Array | string,
         cameraContext?: CameraRecognitionContext,
-        generate: TextGenerate = generateText,
+        generate: TextGenerate = defaultGenerateText,
     traceContext: { traceId?: string; conversationId?: string; pipelineId?: string; userCommand?: string; benchmark?: unknown } = {},
     ): Promise<string> {
         if (!image) {
@@ -658,26 +818,24 @@ export class HomeBrain {
         });
 
         const options = {
-            model: visionModel as any,
-            maxTokens: GLOBAL_CONFIG.OLLAMA.VISION_MAX_TOKENS,
-            temperature: GLOBAL_CONFIG.OLLAMA.VISION_TEMPERATURE,
-            messages: [
-                {
-                    role: 'user',
-                    content: buildUserContent(prompt, preparedImage),
-                },
-            ] satisfies CoreMessage[],
+            prompt,
+            image: preparedImage,
+            maxTokens: GLOBAL_CONFIG.MODEL_SERVICES.VISION_MAX_TOKENS,
+            temperature: GLOBAL_CONFIG.MODEL_SERVICES.VISION_TEMPERATURE,
         };
-        const result = generate === generateText
-            ? await generateTextWithRuntimeLog(generate, options, {
-                scope: 'vision.summary',
-                modelId: VISION_MODEL_ID,
-                traceId: traceContext.traceId,
-                conversationId: traceContext.conversationId,
-                pipelineId: traceContext.pipelineId,
-                userCommand: traceContext.userCommand ?? userCommand,
-                benchmark: traceContext.benchmark,
-            })
+        const result = generate === defaultGenerateText
+            ? await generateTextWithRuntimeLog(
+                () => mlxModelClient.describeVision(options),
+                options,
+                {
+                    scope: 'vision.summary',
+                    modelId: VISION_MODEL_ID,
+                    traceId: traceContext.traceId,
+                    conversationId: traceContext.conversationId,
+                    pipelineId: traceContext.pipelineId,
+                    userCommand: traceContext.userCommand ?? userCommand,
+                    benchmark: traceContext.benchmark,
+                })
             : await generate(options);
         return result.text.trim();
     }
@@ -724,11 +882,10 @@ export class HomeBrain {
         deps: BrainProcessDeps,
     ): Promise<string> {
         const options = {
-            model: textModel as any,
             system: getSystemPrompt(language),
-            maxTokens: GLOBAL_CONFIG.OLLAMA.TEXT_MAX_TOKENS,
-            temperature: GLOBAL_CONFIG.OLLAMA.TEXT_TEMPERATURE,
-            topP: GLOBAL_CONFIG.OLLAMA.TEXT_TOP_P,
+            maxTokens: GLOBAL_CONFIG.MODEL_SERVICES.TEXT_MAX_TOKENS,
+            temperature: GLOBAL_CONFIG.MODEL_SERVICES.TEXT_TEMPERATURE,
+            topP: GLOBAL_CONFIG.MODEL_SERVICES.TEXT_TOP_P,
             messages,
         };
 
@@ -740,8 +897,8 @@ export class HomeBrain {
             return result.text;
         }
 
-        const stream = deps.streamText ?? streamText;
-        const result = stream === streamText
+        const stream = deps.streamText ?? defaultStreamText;
+        const result = stream === defaultStreamText
             ? await streamTextWithRuntimeLog(stream, options, {
                 scope: 'brain.response',
                 modelId: TEXT_MODEL_ID,
@@ -788,14 +945,13 @@ export async function pruneConversationForMemory(
     });
 
     const options = {
-        model: textModel as any,
-        maxTokens: GLOBAL_CONFIG.OLLAMA.TEXT_MAX_TOKENS,
-        temperature: GLOBAL_CONFIG.OLLAMA.TEXT_TEMPERATURE,
-        topP: GLOBAL_CONFIG.OLLAMA.TEXT_TOP_P,
+        maxTokens: GLOBAL_CONFIG.MODEL_SERVICES.TEXT_MAX_TOKENS,
+        temperature: GLOBAL_CONFIG.MODEL_SERVICES.TEXT_TEMPERATURE,
+        topP: GLOBAL_CONFIG.MODEL_SERVICES.TEXT_TOP_P,
         system: getMemoryPruneSystemPrompt(language),
-        prompt,
+        messages: [{ role: 'user', content: prompt }] satisfies CoreMessage[],
     };
-    const result = await generateTextWithRuntimeLog(generateText, options, {
+    const result = await generateTextWithRuntimeLog(defaultGenerateText, options, {
         scope: 'memory.prune',
         modelId: TEXT_MODEL_ID,
     });

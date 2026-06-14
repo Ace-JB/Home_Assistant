@@ -56,7 +56,7 @@ bun run python-services:setup
 bun dev
 ```
 
-This starts the persistent Web shell only. The Dashboard stays online, but the assistant runtime starts in `stopped` state by default: camera, microphone, realtime socket, WebRTC, FunASR, CosyVoice, and MDX are not started until explicitly requested.
+This starts the persistent Web shell only. The Dashboard stays online, but the assistant runtime starts in `stopped` state by default: camera, microphone, realtime socket, WebRTC, FunASR, Qwen model services, CosyVoice, and MDX are not started until explicitly requested.
 
 Open the Dashboard at:
 
@@ -100,6 +100,9 @@ PYTHON_SERVICES_SCRIPT_ROOT=src/server/python_services
 SENTINEL_DB_DIR=data/db
 SENTINEL_MODEL_BASE_PATH=data/models/server-models
 COSYVOICE_MODEL_DIR=data/python_services/models_cache/cosyvoice/Fun-CosyVoice3-0.5B-2512-4bit
+QWEN_VLM_MODEL_DIR=data/python_services/models_cache/qwen-vlm
+QWEN_ROUTER_FAST_MODEL_DIR=data/python_services/models_cache/qwen-router/fast
+QWEN_ROUTER_REPAIR_MODEL_DIR=data/python_services/models_cache/qwen-router/repair
 COSYVOICE_FALLBACK_TO_SAY=0
 ```
 
@@ -130,6 +133,51 @@ Useful environment variables:
 - `COSYVOICE_FALLBACK_TO_SAY` - set to `1` to fall back to macOS `say` when CosyVoice fails.
 
 The voice control UI can extract speaker material from uploaded media or imported audio URLs. Generated uploads, speaker profiles, trace files, and extracted WAV files are stored under `data/voice`, which is ignored by git because it may contain private voice samples and transcripts.
+
+#### MLX Model Services
+Qwen VLM and router models run as managed Python services, not through Ollama. `bun run python-services:setup` installs the lightweight core Python services. Qwen model dependencies and model snapshots are heavier, so install them explicitly when you are ready to use the model services. The setup script downloads model snapshots through the shared Hugging Face cache at `data/python_services/models_cache/hf-cache`, then links the active snapshot into fixed model directories:
+
+- `data/python_services/models_cache/qwen-vlm`
+- `data/python_services/models_cache/qwen-router/fast`
+- `data/python_services/models_cache/qwen-router/repair`
+
+Install or refresh the model service environments:
+
+```bash
+bun run python-services:setup:models
+```
+
+For unstable networks, install the smaller router models first and the large VLM snapshot separately:
+
+```bash
+bun run python-services:setup:router
+HF_TOKEN=... bun run python-services:setup:vlm
+```
+
+You can also run `huggingface-cli login` once; the setup script will read the cached token from `~/.cache/huggingface/token` automatically. Use `QWEN_HF_TOKEN_FILE` to point at another token file.
+
+Default model repositories:
+
+- `QWEN_VLM_REPO=mlx-community/Qwen3-VL-8B-Instruct-4bit`
+- `QWEN_ROUTER_FAST_REPO=mlx-community/Qwen2.5-0.5B-Instruct-4bit`
+- `QWEN_ROUTER_REPAIR_REPO=mlx-community/Qwen2.5-1.5B-Instruct-4bit`
+
+To include Qwen model services in the default setup command, run `QWEN_SETUP=1 bun run python-services:setup`. To install dependencies without downloading model snapshots, set `QWEN_DOWNLOAD_MODELS=0`. To make setup fail when model files are missing, run it with `QWEN_REQUIRE_MODELS=1`. Use `HF_TOKEN`, `QWEN_HF_TOKEN`, or a cached Hugging Face CLI token for authenticated downloads; `QWEN_HF_MAX_WORKERS=1` is the default to avoid SSL retry storms on large snapshots. The setup script pins `HF_HOME`, `HF_HUB_CACHE`, and `HF_XET_CACHE` under `data/python_services/models_cache` so interrupted downloads stay project-local. `QWEN_HF_DISABLE_XET=1` and `HF_HUB_ENABLE_HF_TRANSFER=0` are the defaults because the standard downloader is more predictable for resumable weak-network downloads; change them only when you want backend-specific acceleration.
+
+Useful environment variables:
+- `QWEN_VLM_PORT` and `QWEN_ROUTER_PORT` - local FastAPI service ports.
+- `QWEN_VLM_MODEL_DIR` - Qwen3-VL MLX model directory.
+- `QWEN_ROUTER_FAST_MODEL_DIR` - Qwen2.5 0.5B router model directory.
+- `QWEN_ROUTER_REPAIR_MODEL_DIR` - Qwen2.5 1.5B repair model directory.
+- `QWEN_HF_CACHE_DIR` - shared Hugging Face cache used for resumable snapshot downloads; default `data/python_services/models_cache/hf-cache`.
+- `QWEN_HF_HOME_DIR` - project-local Hugging Face home directory; default `data/python_services/models_cache/hf-home`.
+- `QWEN_HF_XET_CACHE_DIR` - project-local Xet cache directory for opt-in Xet downloads; default `data/python_services/models_cache/hf-cache/xet`.
+- `QWEN_HF_DISABLE_XET` - disables the Xet backend by default for more predictable resume behavior on weak networks.
+- `QWEN_HF_DOWNLOAD_TIMEOUT` and `QWEN_HF_ETAG_TIMEOUT` - Hugging Face request timeouts; defaults are `60` and `30` seconds.
+- `QWEN_VLM_REPO`, `QWEN_ROUTER_FAST_REPO`, and `QWEN_ROUTER_REPAIR_REPO` - Hugging Face repositories downloaded by `python-services:setup:models`.
+- `QWEN_HF_MAX_WORKERS` - Hugging Face snapshot download worker count; default `1` is slower but more reliable on weak networks.
+- `QWEN_HF_TOKEN_FILE` - optional token file path; default `~/.cache/huggingface/token`.
+- `QWEN_ROUTER_REPAIR_WAIT_MS` - max wait for repair model prewarm before returning an explicit model-service error.
 
 #### Model Decision Trace Logs
 Set `SENTINEL_MODEL_TRACE=1` only during local debugging to print model prompts, decisions, summaries, and raw outputs:
@@ -167,14 +215,14 @@ The project is structured into modular layers for maximum performance and mainta
 
 ### 🧭 Assistant Runtime (`src/server/services/AssistantRuntimeService.ts`)
 - **Runtime States**: `stopped`, `starting`, `running`, `stopping`, `degraded`, and `error` are tracked in memory only; service restart returns to `stopped`.
-- **Minimal Startup**: Runtime start defaults to `minimal`, which starts FunASR, audio monitor / wake ASR, and realtime socket only.
+- **Minimal Startup**: Runtime start defaults to `minimal`, which starts FunASR, required MLX model services, audio monitor / wake ASR, and realtime socket only.
 - **Optional Startup Tools**: The startup dialog can also prewarm CosyVoice TTS, Live / Vision, and MDX voice separation. Choosing Live / Vision promotes that start to `full` so camera, WebRTC, and visual detection start together.
 - **Shutdown Scope**: Runtime stop releases monitor, realtime socket clients/server, WebRTC/UDP resources, and local Python model services while keeping the Web HTTP server, Dashboard APIs, pipeline logs, memory DB, and SQLite handles online.
 - **Failure Semantics**: Python helper failures with a working monitor mark the runtime `degraded`; monitor startup failure marks it `error` and triggers cleanup.
 - **WebRTC Gate**: `/webrtc` returns `409` while runtime is offline, so a browser cannot bypass the master runtime switch.
 
 ### 🧠 Brain & AI (`@modules/brain`)
-- **HomeBrain**: The core logic engine using Ollama with `qwen2.5:7b` for normal voice dialogue and `qwen2.5vl:7b` only for explicit vision requests.
+- **HomeBrain**: The core logic engine calls managed MLX model services: Qwen3-VL handles main dialogue and visual summaries, while the router service handles fast intent routing and repair.
 - **FaceEngine**: Real-time face detection and identification using `Human.js` and TensorFlow.
 - **Prompt Files**: Prompt text is centralized under `src/server/prompts`, with Chinese and English variants kept together by responsibility.
 - **Follow-up Intent Guard**: Short affirmative replies such as “可以呀” after an assistant proposal are resolved as current-session follow-ups instead of long-term memory recall.
@@ -194,14 +242,14 @@ The project is structured into modular layers for maximum performance and mainta
 ### 🎙️ Voice & Tools (`@server/tools`)
 - **Voice**: Text-to-Speech (TTS) uses the MLX CosyVoice service by default, keeps macOS `say` as fallback, and uses FunASR for transcription.
 - **CosyVoice Material Workflow**: `VoiceControlView` extracts prompt audio and transcript candidates from local uploads or imported audio URLs, saves reusable speaker profiles, and applies the selected profile to the running TTS configuration.
-- **Python Service Scripts**: `bun run python-services:setup`, `bun run python-services:start`, and `bun run python-services:status` manage local FastAPI helpers under `src/server/python_services`.
+- **Python Service Scripts**: `bun run python-services:setup`, `bun run python-services:start`, and `bun run python-services:status` manage local FastAPI helpers under `src/server/python_services`, including FunASR, CosyVoice, MDX, Qwen VLM, and Qwen router.
 - **WebRTC**: Real-time video/audio streaming via WebRTC (UDP), created lazily only while the assistant runtime is active.
 - **Frequency Control**: `WiseRelex` (DetectionValve) manages AI inference frequency to optimize CPU usage.
 - **Identity Verification**: Camera recognition context is passed to `HomeBrain` with `identityVerification`, `similarity`, and threshold details before command execution.
 - **Runtime-bound Listening Path**: Voice signal collection and realtime transcription are enabled only after the assistant runtime is started; realtime transcript display has no separate subtitle toggle.
 
 ### 📊 Dashboard & Logs (`src/components`, `src/server/services`)
-- **Service Dashboard**: `DashboardView` and `DashboardService` surface four product-level services (`Web Shell`, `Assistant Runtime`, `Voice ASR`, `Live / Vision`) first, with CosyVoice, MDX, FFmpeg, yt-dlp, realtime socket, and WebRTC details folded under advanced dependencies.
+- **Service Dashboard**: `DashboardView` and `DashboardService` surface four product-level services (`Web Shell`, `Assistant Runtime`, `Voice ASR`, `Live / Vision`) first, with Qwen VLM, Qwen router, CosyVoice, MDX, FFmpeg, yt-dlp, realtime socket, and WebRTC details folded under advanced dependencies.
 - **Pipeline Logs**: `LogsView` and `PipelineLogService` connect pipeline events, model calls, incidents, and runtime service logs in one review surface.
 - **Environment Loader**: `src/config/loadEnv.ts` loads `.env` plus environment-specific overrides before the app reads runtime configuration.
 
@@ -268,7 +316,7 @@ src/
 - **CosyVoice Material Import Fails**: Install or refresh yt-dlp with the voice control UI or `bun run src/server/scripts/install_yt_dlp.ts`, then retry with a direct media URL. yt-dlp reads Chrome cookies by default via `YT_DLP_COOKIES_FROM_BROWSER=chrome`; use values like `chrome:Profile 1` for another Chrome profile, or set it empty to disable browser cookie loading.
 - **Dashboard Service Won't Start**: Check the service log in `DashboardView`, verify the target binary is installed, and confirm the relevant path is allowed by the local config.
 - **Pipeline Logs Look Empty**: The logs are created when pipeline, model, service, or incident events are recorded; run a normal voice or memory flow first.
-- **Model Initialization**: Ensure `qwen2.5:7b` and `qwen2.5vl:7b` are available in Ollama; normal voice dialogue uses the text model, while vision is on demand.
+- **Model Initialization**: Ensure Qwen model files exist under `data/python_services/models_cache/qwen-vlm`, `data/python_services/models_cache/qwen-router/fast`, and `data/python_services/models_cache/qwen-router/repair`, then run `bun run python-services:setup`.
 - **Face Recognition Mismatch**: If logs show `candidateLabel` but low `similarity`, re-register the member with `bun src/server/scripts/register_face.ts --name master --camera`.
 
 ## CodeGraph

@@ -58,6 +58,8 @@ type AsrLogOptions = Parameters<typeof extractTextFromVoiceStream>[1];
 let firstAudioReceived = false;
 type MonitorMode = 'full' | 'video' | 'audio';
 type MonitorStop = () => Promise<void>;
+type MonitorStarter = () => Promise<MonitorStop>;
+type MonitorStarters = Partial<Record<MonitorMode, MonitorStarter>>;
 type MonitorRuntime = {
     mode: MonitorMode;
     stop: MonitorStop;
@@ -69,6 +71,7 @@ type MonitorRuntimeState = {
 };
 
 const MONITOR_RUNTIME_KEY = Symbol.for('home-assistant.monitorRuntime');
+let monitorStartersOverride: MonitorStarters | null = null;
 
 function getMonitorRuntimeState(): MonitorRuntimeState {
     const globalScope = globalThis as typeof globalThis & { [MONITOR_RUNTIME_KEY]?: MonitorRuntimeState };
@@ -76,6 +79,14 @@ function getMonitorRuntimeState(): MonitorRuntimeState {
         globalScope[MONITOR_RUNTIME_KEY] = {};
     }
     return globalScope[MONITOR_RUNTIME_KEY]!;
+}
+
+function getMonitorStarter(mode: MonitorMode): MonitorStarter {
+    const override = monitorStartersOverride?.[mode];
+    if (override) return override;
+    if (mode === 'video') return monitorVideoOnly;
+    if (mode === 'audio') return () => monitor({ video: false });
+    return () => monitor({ video: true });
 }
 
 function buildCameraRecognitionContext(detection: HumanDetectionResult): CameraRecognitionContext {
@@ -397,7 +408,7 @@ async function monitor(options: { video: boolean } = { video: true }): Promise<M
         const now = Date.now();
         if (now - lastAsrVadDiagnosticAt < ASR_VAD_DIAGNOSTIC_INTERVAL_MS) return;
         lastAsrVadDiagnosticAt = now;
-        if (GLOBAL_CONFIG.OLLAMA.TRACE_ENABLED) {
+        if (GLOBAL_CONFIG.MODEL_SERVICES.TRACE_ENABLED) {
             console.debug('[ASR:VAD] waiting', {
                 reason,
                 peak: Number(peak.toFixed(4)),
@@ -1090,7 +1101,7 @@ async function monitor(options: { video: boolean } = { video: true }): Promise<M
             if (!text) return;
             const wake = extractWakeCommand(text, GLOBAL_CONFIG.VOICE.WAKE_WORD);
             if (!wake.hasWakeWord) {
-                if (GLOBAL_CONFIG.OLLAMA.TRACE_ENABLED) {
+                if (GLOBAL_CONFIG.MODEL_SERVICES.TRACE_ENABLED) {
                     console.debug('[Wake] Wake word not detected', {
                         utteranceId,
                         wakeWord: GLOBAL_CONFIG.VOICE.WAKE_WORD,
@@ -1539,6 +1550,13 @@ export function __setMonitorRuntimeForTest(state: MonitorRuntimeState): void {
     runtimeState.starting = state.starting;
 }
 
+export function __setMonitorStartersForTest(starters: MonitorStarters | null): void {
+    if (process.env.NODE_ENV !== 'test') {
+        throw new Error('__setMonitorStartersForTest is only available in test.');
+    }
+    monitorStartersOverride = starters;
+}
+
 export async function startMonitor(mode: MonitorMode = 'full') {
     const state = getMonitorRuntimeState();
     if (state.runtime) {
@@ -1557,14 +1575,7 @@ export async function startMonitor(mode: MonitorMode = 'full') {
     state.starting = (async () => {
         const startedAt = Date.now();
         console.log(`🚀 Starting Sentinel Monitor (${label})...`);
-        let stop: MonitorStop;
-        if (mode === 'video') {
-            stop = await monitorVideoOnly();
-        } else if (mode === 'audio') {
-            stop = await monitor({ video: false });
-        } else {
-            stop = await monitor({ video: true });
-        }
+        const stop = await getMonitorStarter(mode)();
         pipelineLogs.append({
             category: 'system',
             level: 'info',
@@ -1595,6 +1606,7 @@ export async function startMonitor(mode: MonitorMode = 'full') {
             },
             pipelineId: 'system',
         });
+        throw error;
     } finally {
         state.starting = undefined;
     }

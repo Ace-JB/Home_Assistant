@@ -68,3 +68,12 @@ recordings
 src/server/db/*.sqlite
 src/server/db/*.sqlite-shm
 src/server/db/*.sqlite-wal
+
+# Understand-Anything
+.understand-anything/*
+!.understand-anything/
+!.understand-anything/.understandignore
+
+# Local agentmemory reference skills
+.agents/skills/
+skills-lock.json

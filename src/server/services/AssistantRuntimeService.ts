@@ -8,7 +8,7 @@ export type AssistantRuntimeOperationType = 'start' | 'stop';
 export type AssistantRuntimeOperationPhase = 'running' | 'completed' | 'failed';
 
 export type AssistantRuntimeTask = {
-    id: 'assistant-runtime' | 'funasr' | 'audio-monitor' | 'realtime-socket' | 'webrtc' | 'live-vision' | 'cosyvoice' | 'voice-separation';
+    id: 'assistant-runtime' | 'funasr' | 'qwen-router' | 'qwen-vlm' | 'audio-monitor' | 'realtime-socket' | 'webrtc' | 'live-vision' | 'cosyvoice' | 'voice-separation';
     label: string;
     group: 'core' | 'optional';
     status: AssistantRuntimeTaskStatus;
@@ -52,6 +52,8 @@ export type AssistantRuntimeDeps = {
     startMonitor: (mode: AssistantRuntimeMonitorMode) => Promise<void>;
     stopMonitor: () => Promise<void>;
     startFunASR: () => Promise<void>;
+    startRouterModel: () => Promise<void>;
+    startMainModel: () => Promise<void>;
     startCosyVoice: () => Promise<void>;
     startVoiceSeparation: () => Promise<void>;
     stopPythonServices: () => Promise<void>;
@@ -149,11 +151,20 @@ export class AssistantRuntimeService {
             this.setTaskStatus('funasr', 'running');
             await this.deps.startFunASR();
             this.setTaskStatus('funasr', 'ready');
+
+            this.setTaskStatus('qwen-router', 'running');
+            await this.deps.startRouterModel();
+            this.setTaskStatus('qwen-router', 'ready');
+
+            this.setTaskStatus('qwen-vlm', 'running');
+            await this.deps.startMainModel();
+            this.setTaskStatus('qwen-vlm', 'ready');
         } catch (error) {
             const message = normalizeError(error);
             this.status = 'error';
             this.lastError = message;
-            this.setTaskStatus('funasr', 'failed', message);
+            const runningTask = this.tasks.find(task => task.status === 'running' && task.group === 'core' && task.id !== 'assistant-runtime');
+            this.setTaskStatus(runningTask?.id ?? 'funasr', 'failed', message);
             this.setServiceState('python-services', 'error', message);
             await this.cleanupAfterFailedStart();
             this.finishOperation('failed');
@@ -331,6 +342,8 @@ function createRuntimeTasks(mode: AssistantRuntimeMode, optionalServices: Assist
     return [
         createTask('assistant-runtime', 'Assistant Runtime', 'core', true, true),
         createTask('funasr', 'Voice ASR / FunASR', 'core', true, true),
+        createTask('qwen-router', 'Qwen Router Model', 'core', true, true),
+        createTask('qwen-vlm', 'Qwen Main Model', 'core', true, true),
         createTask('audio-monitor', 'Audio Monitor / Wake ASR', 'core', true, true),
         createTask('realtime-socket', 'Realtime Socket', 'core', true, true),
         createTask('cosyvoice', 'CosyVoice TTS', 'optional', false, optional.has('cosyvoice')),

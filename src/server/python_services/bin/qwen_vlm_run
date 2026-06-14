@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${PYTHON_SERVICES_ROOT:-data/python_services}"
+ENV_DIR="$ROOT/envs/qwen-vlm_env"
+PORT="${QWEN_VLM_PORT:-10104}"
+
+export HF_HUB_OFFLINE="${QWEN_HF_OFFLINE:-${HF_HUB_OFFLINE:-1}}"
+export HF_DATASETS_OFFLINE="${QWEN_HF_OFFLINE:-${HF_DATASETS_OFFLINE:-1}}"
+
+if [ ! -x "$ENV_DIR/bin/python" ]; then
+  echo "qwen-vlm environment missing at $ENV_DIR. Run: bun run python-services:setup qwen-vlm" >&2
+  exit 1
+fi
+
+exec "$ENV_DIR/bin/python" -m uvicorn src.server.python_services.src.qwen_vlm_service:app --host 127.0.0.1 --port "$PORT"

@@ -6,6 +6,8 @@ ENV_DIR="$ROOT/envs/funasr_env"
 PORT="${FUNASR_PORT:-10101}"
 
 export PYTHON_SERVICES_ROOT="$ROOT"
+export FUNASR_LOCAL_FILES_ONLY="${FUNASR_LOCAL_FILES_ONLY:-1}"
+export MODELSCOPE_OFFLINE="${MODELSCOPE_OFFLINE:-1}"
 export FUNASR_MODEL="${FUNASR_MODEL:-iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch}"
 export FUNASR_MATERIAL_MODEL="${FUNASR_MATERIAL_MODEL:-iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch}"
 export FUNASR_PUNC_MODEL="${FUNASR_PUNC_MODEL:-iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch}"

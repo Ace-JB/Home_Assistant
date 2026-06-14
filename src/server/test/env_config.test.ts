@@ -10,8 +10,12 @@ import {
     probeYtDlpAudioFormats,
 } from '@server/services/CosyVoiceMaterialService';
 import { getCosyVoiceModelDir } from '@server/services/runtime-paths';
+import { GLOBAL_CONFIG, parseEnvBoolean } from '@/global_config';
 
 const COSYVOICE_MODEL_DIR = 'data/python_services/models_cache/cosyvoice/Fun-CosyVoice3-0.5B-2512-4bit';
+const QWEN_VLM_MODEL_DIR = 'data/python_services/models_cache/qwen-vlm';
+const QWEN_ROUTER_FAST_MODEL_DIR = 'data/python_services/models_cache/qwen-router/fast';
+const QWEN_ROUTER_REPAIR_MODEL_DIR = 'data/python_services/models_cache/qwen-router/repair';
 
 describe('environment config files', () => {
     test('should define shared runtime keys in base env', () => {
@@ -31,7 +35,12 @@ describe('environment config files', () => {
         expect(content).toContain('FUNASR_PORT=10101');
         expect(content).toContain('COSYVOICE_PORT=10102');
         expect(content).toContain('MDX_PORT=10103');
+        expect(content).toContain('QWEN_VLM_PORT=10104');
+        expect(content).toContain('QWEN_ROUTER_PORT=10105');
         expect(content).toContain('VOICE_DATA_ROOT=data/voice');
+        expect(content).toContain(`QWEN_VLM_MODEL_DIR=${QWEN_VLM_MODEL_DIR}`);
+        expect(content).toContain(`QWEN_ROUTER_FAST_MODEL_DIR=${QWEN_ROUTER_FAST_MODEL_DIR}`);
+        expect(content).toContain(`QWEN_ROUTER_REPAIR_MODEL_DIR=${QWEN_ROUTER_REPAIR_MODEL_DIR}`);
         expect(content).not.toContain('SENTINEL_DEMO_MODE=');
         expect(content).not.toContain('COSYVOICE_BASE_URL=http://localhost:10102');
         expect(content).not.toContain('FUNASR_BASE_URL=http://localhost:10101');
@@ -52,16 +61,41 @@ describe('environment config files', () => {
         const example = readFileSync('.env.example', 'utf8');
 
         expect(example).toContain('# FUNASR_BASE_URL=http://localhost:10101');
+        expect(example).toContain('FUNASR_LOCAL_FILES_ONLY=1');
+        expect(example).toContain('# QWEN_VLM_BASE_URL=http://localhost:10104');
+        expect(example).toContain('# QWEN_ROUTER_BASE_URL=http://localhost:10105');
+        expect(example).toContain('QWEN_ROUTER_REPAIR_WAIT_MS=15000');
+        expect(example).toContain('QWEN_MODEL_SERVICE_TIMEOUT_MS=300000');
+        expect(example).toContain('QWEN_MODEL_WARMUP_ON_START=1');
+        expect(example).toContain('QWEN_HF_OFFLINE=1');
+        expect(example).toContain('QWEN_HF_CACHE_DIR=data/python_services/models_cache/hf-cache');
+        expect(example).toContain('QWEN_HF_HOME_DIR=data/python_services/models_cache/hf-home');
+        expect(example).toContain('QWEN_HF_XET_CACHE_DIR=data/python_services/models_cache/hf-cache/xet');
+        expect(example).toContain('QWEN_VLM_REPO=mlx-community/Qwen3-VL-8B-Instruct-4bit');
+        expect(example).toContain('QWEN_ROUTER_FAST_REPO=mlx-community/Qwen2.5-0.5B-Instruct-4bit');
+        expect(example).toContain('QWEN_ROUTER_REPAIR_REPO=mlx-community/Qwen2.5-1.5B-Instruct-4bit');
+        expect(example).toContain('QWEN_HF_MAX_WORKERS=1');
+        expect(example).toContain('QWEN_HF_DISABLE_XET=1');
+        expect(example).toContain('QWEN_HF_DOWNLOAD_TIMEOUT=60');
+        expect(example).toContain('QWEN_HF_ETAG_TIMEOUT=30');
+        expect(example).toContain('# HF_HUB_ENABLE_HF_TRANSFER=1');
+        expect(example).toContain('# QWEN_REQUIRE_MODELS=1');
+        expect(example).toContain('# QWEN_SETUP=1');
+        expect(example).toContain('# QWEN_DOWNLOAD_MODELS=0');
+        expect(example).toContain('# QWEN_HF_TOKEN=');
+        expect(example).toContain('# QWEN_HF_TOKEN_FILE=~/.cache/huggingface/token');
         expect(example).toContain('# VOICE_SEPARATION_BASE_URL=http://localhost:10103');
         expect(example).toContain('# VOICE_SEPARATION_DEVICE=mps');
         expect(example).toContain('# COSYVOICE_BASE_URL=http://localhost:10102');
         expect(example).toContain('COSYVOICE_TRIM_SILENCE=1');
+        expect(example).toContain('COSYVOICE_HF_OFFLINE=1');
         expect(example).toContain('src/server/python_services/src/cosyvoice_service.py');
         expect(example).not.toContain('SENTINEL_DEMO_MODE=');
         expect(example).not.toContain('VOICE_SEPARATION_PROVIDER=');
         expect(example).not.toContain('VOICE_SEPARATION_LAZY_START=');
         expect(example).not.toContain('VOICE_SEPARATION_IDLE_TTL_MS=');
         expect(example).not.toContain('VOICE_SEPARATION_MAX_CONCURRENCY=');
+        expect(example).not.toContain('SENTINEL_INTENTION_MODEL=');
     });
 
     test('should keep CosyVoice runtime on the managed python services surface', () => {
@@ -72,11 +106,40 @@ describe('environment config files', () => {
             'package.json',
             'src/server/python_services/bin/setup',
             'src/server/python_services/bin/cosyvoice_run',
+            'src/server/python_services/bin/qwen_vlm_run',
+            'src/server/python_services/bin/qwen_router_run',
+            'src/server/python_services/bin/manage',
+            'src/server/python_services/requirements/qwen-vlm.txt',
+            'src/server/python_services/requirements/qwen-router.txt',
         ];
         const content = files.map(file => readFileSync(file, 'utf8')).join('\n');
 
         expect(content).toContain('src/server/python_services');
         expect(content).toContain(COSYVOICE_MODEL_DIR);
+        expect(content).toContain('qwen-vlm');
+        expect(content).toContain('qwen-router');
+        expect(content).toContain('QWEN_REQUIRE_MODELS');
+        expect(content).toContain('QWEN_SETUP');
+        expect(content).toContain('QWEN_DOWNLOAD_MODELS');
+        expect(content).toContain('QWEN_HF_MAX_WORKERS');
+        expect(content).toContain('QWEN_HF_CACHE_DIR');
+        expect(content).toContain('QWEN_HF_HOME_DIR');
+        expect(content).toContain('QWEN_HF_XET_CACHE_DIR');
+        expect(content).toContain('QWEN_HF_DISABLE_XET');
+        expect(content).toContain('QWEN_HF_DOWNLOAD_TIMEOUT');
+        expect(content).toContain('QWEN_HF_ETAG_TIMEOUT');
+        expect(content).toContain('QWEN_HF_TOKEN_FILE');
+        expect(content).toContain('HUGGINGFACE_HUB_TOKEN');
+        expect(content).toContain('HF_HUB_ENABLE_HF_TRANSFER');
+        expect(content).toContain('huggingface-hub');
+        expect(content).toContain('hf-transfer');
+        expect(content).toContain('snapshot_download');
+        expect(content).toContain('python-services:setup:models');
+        expect(content).toContain('python-services:setup:router');
+        expect(content).toContain('python-services:setup:vlm');
+        expect(content).toContain(QWEN_VLM_MODEL_DIR);
+        expect(content).toContain(QWEN_ROUTER_FAST_MODEL_DIR);
+        expect(content).toContain(QWEN_ROUTER_REPAIR_MODEL_DIR);
         expect(content).not.toContain('COSYVOICE_INSTALL_DIR');
         expect(content).not.toContain('COSYVOICE_CONDA_ENV');
         expect(content).not.toContain('COSYVOICE_MLX_PACKAGE');
@@ -106,6 +169,13 @@ describe('environment config files', () => {
         expect(prodEnv).toContain('NODE_ENV=production');
         expect(prodEnv).toContain('COSYVOICE_FALLBACK_TO_SAY=0');
         expect(prodEnv).not.toContain('VITE_SOCKET_URL=');
+    });
+
+    test('should keep barge-in enabled by default and allow env opt-out parsing', () => {
+        expect(GLOBAL_CONFIG.VOICE.BARGE_IN_ENABLED).toBe(true);
+        expect(parseEnvBoolean(undefined, true)).toBe(true);
+        expect(parseEnvBoolean('0', true)).toBe(false);
+        expect(parseEnvBoolean('false', true)).toBe(false);
     });
 
     test('should restrict CosyVoice prompt audio to managed wav files', () => {
